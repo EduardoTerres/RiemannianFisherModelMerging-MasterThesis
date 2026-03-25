@@ -1,1 +1,7 @@
 .vscode/
+.mypy_cache/
+*.egg-info
+
+OrthoMerge/models/*
+utils/convert_llama_weights/meta_llama_model/*
+utils/convert_llama_weights/transformers/*

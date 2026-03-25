@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-ml-project"
+version = "0.1.0"
+dependencies = [
+    "torch==2.2.1",
+    "torchvision==0.17.1",
+    "torchaudio==2.2.1",
+    "transformers==4.46.0",
+    "accelerate==0.34.2",
+    "safetensors==0.4.5",
+    "huggingface_hub==0.26.2",
+    "tqdm",
+    "numpy==1.26.4",
+    "datasets==3.1.0",
+]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+strict = true
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+# Enable Flake8 rules (E, F) by default
+select = ["E", "F", "W"] 
+ignore = ["E203"]

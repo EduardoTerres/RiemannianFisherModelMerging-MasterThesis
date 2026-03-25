@@ -9,7 +9,7 @@ python eval/eval_scienceqa.py --merged_dir outputs/OrthoMerge_Llama-3.1-8B/merge
 conda activate lm-eval; cd eval/lm-evaluation-harness
 lm_eval --model hf \
     --tasks social_iqa,commonsense_qa,minerva_math500 \
-    --model_args pretrained=outputs/OrthoMerge_Llama-3.1-8B/merged_model \
+    --model_args pretrained=../../outputs/OrthoMerge_Llama-3.1-8B/merged_model \
     --device cuda:0 \
     --batch_size 8 \
     --confirm_run_unsafe_code

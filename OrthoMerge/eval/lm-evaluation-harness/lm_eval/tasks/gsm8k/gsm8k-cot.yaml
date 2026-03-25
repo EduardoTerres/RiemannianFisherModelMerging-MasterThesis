@@ -1,5 +1,5 @@
 dataset_name: main
-dataset_path: gsm8k
+dataset_path: openai/gsm8k
 doc_to_target: '{{answer.split(''####'')[-1].strip() if answer is defined else target}}'
 doc_to_text: 'Q: {{question}}
 
@@ -46,8 +46,7 @@ fewshot_config:
 filter_list:
 - filter:
   - function: regex
-    # regex_pattern: The answer is (\-?[0-9\.\,]+).
-    regex_pattern: The answer is(?:\s*:)?\s*(?:####\s*)?(?:\$\\?boxed\{|\$)?\s*(-?[0-9,\.]+)\s*(?:\}?\$)?\.?
+    regex_pattern: The answer is (\-?[0-9\.\,]+).
   - function: take_first
   name: strict-match
 - filter:

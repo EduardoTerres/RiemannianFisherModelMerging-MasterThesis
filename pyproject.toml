@@ -16,6 +16,7 @@ dependencies = [
     "tqdm",
     "numpy==1.26.4",
     "datasets==3.1.0",
+    "peft==0.18.0",
 ]
 
 [tool.mypy]

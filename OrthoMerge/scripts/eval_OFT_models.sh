@@ -5,12 +5,13 @@ set -e
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
 # ScienceQA
+MODEL_PATH="outputs/OrthoMerge_Llama-3.1-8B-jacobi-2/merged_model"
 conda activate OrthoMerge
-python eval/eval_scienceqa.py --merged_dir models/OrthoMerge_Llama-3.1-8B_OFT_5_task
+python eval/eval_scienceqa.py --merged_dir ${MODEL_PATH}
 
 # SocialIQA, CommonsenseQA, and Minerva Math500
 RELATIVE_PATH="../.."
-MODEL_PATH="outputs/OrthoMerge_Llama-3.1-8B-jacobi-all-test4/merged_model"
+MODEL_PATH="outputs/OrthoMerge_Llama-3.1-8B-jacobi-2/merged_model"
 conda activate lm-eval; cd eval/lm-evaluation-harness
 lm_eval --model hf \
     --tasks social_iqa,commonsense_qa,minerva_math500 \

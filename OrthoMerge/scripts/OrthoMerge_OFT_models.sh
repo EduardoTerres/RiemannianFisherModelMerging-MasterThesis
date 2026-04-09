@@ -12,5 +12,5 @@ python merge/OrthoMerge_OFT_models.py \
       models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_commonsense/ \
       models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_socialiqa/ \
       models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_scienceqa/ \
-  --output_merged_adapter_dir outputs/OrthoMerge_Llama-3.1-8B-jacobi-all-test4 \
+  --output_merged_adapter_dir outputs/OrthoMerge_Llama-3.1-8B-jacobi-3 \
   --save_merged_model

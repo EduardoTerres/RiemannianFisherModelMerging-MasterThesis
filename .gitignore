@@ -1,9 +1,11 @@
 .vscode/
 .mypy_cache/
 *.egg-info
+*.pyc
 
 miniconda.sh
 OrthoMerge/models/*
 OrthoMerge/outputs/*
 utils/convert_llama_weights/meta_llama_model/*
 utils/convert_llama_weights/transformers/*
+__pycache__/**

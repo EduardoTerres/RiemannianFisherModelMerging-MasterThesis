@@ -44,10 +44,10 @@ ADAPTERS_PATH   = f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters"
 
 EVAL_TASKS = [
     # (tag, dataset_path, dataset_name, split, doc_to_text, adapter_path)
-    ("social_iqa",      "allenai/social_i_qa",    None,      "train", _siqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_socialiqa"),
-    ("commonsense_qa",  "tau/commonsense_qa",      None,      "train", _csqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_commonsense"),
-    ("minerva_math500", "HuggingFaceH4/MATH-500",  "default", "test",  _minerva_text,  f"{ADAPTERS_PATH}/llama3-1_8b_finetune_numinamath"),
-    ("humanevalplus",   "openai/openai_humaneval",  None,      "test",  _humaneval_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_magicoder"),
+    ("social_iqa",      "allenai/social_i_qa",    None,      "train", _siqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_socialiqa"),  # noqa: E501
+    ("commonsense_qa",  "tau/commonsense_qa",      None,      "train", _csqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_commonsense"),  # noqa: E501
+    ("minerva_math500", "HuggingFaceH4/MATH-500",  "default", "test",  _minerva_text,  f"{ADAPTERS_PATH}/llama3-1_8b_finetune_numinamath"),  # noqa: E501
+    ("humanevalplus",   "openai/openai_humaneval",  None,      "test",  _humaneval_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_magicoder"),  # noqa: E501
 ]
 
 
@@ -65,7 +65,10 @@ def build_loader(
     dataset = dataset.select(range(min(num_samples, len(dataset))))
 
     def tokenize(batch):
-        texts = [doc_to_text({k: batch[k][i] for k in batch}) for i in range(len(batch[next(iter(batch))]))]
+        texts = [
+            doc_to_text({k: batch[k][i] for k in batch})
+            for i in range(len(batch[next(iter(batch))]))
+        ]
         return tokenizer(texts, truncation=True, max_length=max_length, padding="max_length")
 
     dataset = dataset.map(tokenize, batched=True, remove_columns=dataset.column_names)
@@ -95,7 +98,9 @@ def compute_and_save_fim(
     base = AutoModelForCausalLM.from_pretrained(
         base_model_path, torch_dtype=torch.float32, device_map=None
     )
-    model = PeftModel.from_pretrained(base, adapter_path).merge_and_unload().to(device)
+    model = PeftModel.from_pretrained(base, adapter_path, is_trainable=True)
+    model.enable_adapter_layers()
+    model.to(device)
     model.eval()
 
     loader = build_loader(
@@ -103,6 +108,7 @@ def compute_and_save_fim(
         tokenizer, num_samples, batch_size, max_length,
     )
     diag_fisher = compute_diagonal_fim(model, loader, device)
+    # diag_fisher keys: "base_model.model...oft_R.default.weight"
 
     save_file(diag_fisher, save_path)
     print(f"[{task_tag}] Diagonal FIM saved to {save_path}")
@@ -143,7 +149,7 @@ def compute_all_fishers(
         )
         print("[OK] Done.")
 
-    print(f"\nAll fishers saved to {output_dir}/")
+    print(f"All fishers saved to {output_dir}/")
 
 
 if __name__ == "__main__":

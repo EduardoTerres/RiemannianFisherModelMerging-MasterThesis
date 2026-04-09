@@ -441,7 +441,7 @@ if __name__ == "__main__":
     print()
 
     try:
-         = AutoTokenizer.from_pretrained(
+        tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path=(
                 os.path.join(cache_dir, args.language_model_name)
                 if cache_dir

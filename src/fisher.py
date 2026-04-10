@@ -4,6 +4,8 @@ All I/O (model/dataset loading, file saving) lives in src/scripts/compute_fisher
 """
 import torch
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
+from tqdm import tqdm
 
 
 def compute_diagonal_fim(
@@ -27,7 +29,7 @@ def compute_diagonal_fim(
         for n, p in model.named_parameters() if p.requires_grad
     }
 
-    for batch in loader:
+    for batch in tqdm(loader):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
 
@@ -141,3 +143,62 @@ def compute_diagonal_fim_true(
                     diag_fisher[n] += v.cpu()
 
     return diag_fisher, n_positions
+
+
+def compute_empirical_fisher(model, loader, device):
+    """
+    Compute the empirical diagonal Fisher for the trainable parameters
+    of a causal LM / PEFT model.
+
+    Correctly averages per-sequence squared gradients (not the square of the
+    batch-averaged gradient, which would underestimate the Fisher).
+
+    Returns
+    -------
+    fisher : dict[str, torch.Tensor]
+        Diagonal Fisher tensors on CPU, same shapes as the parameters.
+    """
+    model.eval()
+
+    named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+    if not named_params:
+        raise ValueError("No trainable parameters with requires_grad=True were found.")
+
+    param_names, params = zip(*named_params)
+    fisher = [torch.zeros_like(p, dtype=torch.float32, device="cpu") for p in params]
+    n_sequences = 0
+
+    for batch in tqdm(loader):
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        log_probs = F.log_softmax(outputs.logits[:, :-1, :], dim=-1)
+        token_log_probs = log_probs.gather(-1, input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
+
+        if attention_mask is not None:
+            token_log_probs = token_log_probs * attention_mask[:, 1:].to(token_log_probs.dtype)
+
+        seq_log_probs = token_log_probs.sum(dim=-1)   # (B,)
+        batch_size = seq_log_probs.shape[0]
+
+        for i in range(batch_size):
+            model.zero_grad(set_to_none=True)
+            grads = torch.autograd.grad(
+                seq_log_probs[i],
+                params,
+                retain_graph=(i < batch_size - 1),
+                create_graph=False,
+                allow_unused=True,
+            )
+            for j, g in enumerate(grads):
+                if g is not None:
+                    fisher[j] += g.detach().float().cpu() ** 2
+            n_sequences += 1
+
+    if n_sequences == 0:
+        raise ValueError("No sequences were processed.")
+
+    return {n: f / n_sequences for n, f in zip(param_names, fisher)}

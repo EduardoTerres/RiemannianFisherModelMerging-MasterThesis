@@ -2,13 +2,21 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import os
 from typing import Dict, List, Literal, Optional
+from OrthoMerge.merge.OrthoMerge_C_TA import merge_cayley_Q_list
 import torch
 from torch import Tensor
 from safetensors import safe_open
 from safetensors.torch import load_file
 
+from src.utils.path import OFT_LLAMA_MODELS_DIR
+
 from .geometry import Manifold, SOnManifold
-from OrthoMerge.merge.oft_utils import oft_params_to_skew_matrix, skew_matrix_to_oft_params
+from OrthoMerge.merge.OrthoMerge_OFT_models import (
+    oft_params_to_skew_matrix,
+    skew_matrix_to_oft_params,
+    merge_cayley_Q_list,
+)
+
 
 MergeMode = Literal["plain", "diagonal_fisher", "linear_system"]
 
@@ -29,11 +37,11 @@ class RiemannianMerging(ABC):
         self,
         manifold: Manifold,
         lam: float = 1.0,
-        alpha: Optional[List[float]] = None,
+        alphas: Optional[List[float]] = None,
     ):
         self.manifold = manifold
         self.lam = lam
-        self.alpha = alpha  # per-task weights; uniform if None
+        self.alphas = alphas  # per-task weights; uniform if None
 
     @abstractmethod
     def load_weights(self, adapter_paths: List[str]) -> List[Dict[str, Tensor]]:
@@ -44,39 +52,16 @@ class RiemannianMerging(ABC):
         """Load diagonal Fisher dicts from disk. Returns one dict per path."""
 
     @abstractmethod
-    def to_task_vectors(
-        self, weights_list: List[Dict[str, Tensor]]
-    ) -> Dict[str, List[Tensor]]:
-        """
-        Convert raw adapter weights to per-key lists of Lie-algebra task vectors.
-        Returns {key: [Omega_1, ..., Omega_T]}.
-        """
-
-    @abstractmethod
-    def from_task_vector(self, key: str, omega: Tensor) -> Tensor:
-        """Convert a merged Lie-algebra task vector back to adapter weight format."""
-
-    @abstractmethod
     def merge_formula(
         self,
-        omegas: List[Tensor],
-        mode: MergeMode,
+        weights_list: List[Tensor],
         fisher_list: Optional[List[Dict[str, Tensor]]] = None,
-        key: Optional[str] = None,
+        mode: MergeMode = "plain",
     ) -> Tensor:
-        """
-        Merge T task vectors into one.
+        """Merge task vectors into one (B, n, n) Omega.
 
-        Args:
-            omegas:      [Omega_1, ..., Omega_T], each (B, n, n) in so(n).
-            mode:        "plain"           - weighted average, no curvature.
-                         "diagonal_fisher" - element-wise Fisher weighting (no solve).
-                         "linear_system"   - full transported-Fisher linear system.
-            fisher_list: diagonal Fisher dicts, one per task (required for fisher modes).
-            key:         parameter key (used to look up Fisher values).
-
-        Returns:
-            merged Omega of shape (B, n, n).
+        Modes: "plain", "diagonal_fisher", or "linear_system".
+        Fisher data is required for Fisher-based modes.
         """
 
     @abstractmethod
@@ -110,10 +95,10 @@ class OFTMerging(RiemannianMerging):
     def __init__(
         self,
         lam: float = 1.0,
-        alpha: Optional[List[float]] = None,
+        alphas: Optional[List[float]] = None,
         device: str = "cpu",
     ):
-        super().__init__(manifold=SOnManifold(), lam=lam, alpha=alpha)
+        super().__init__(manifold=SOnManifold(), lam=lam, alphas=alphas)
         self.device = device
 
     def _vec(self, omega: Tensor) -> Tensor:
@@ -155,9 +140,135 @@ class OFTMerging(RiemannianMerging):
         return all_weights
 
     def load_fishers(self, paths: List[str]) -> List[Dict[str, Tensor]]:
-        pass
+        all_fishers = []
+        for path in paths:
+            if not os.path.exists(path):
+                print(f"[WARNING]: No Fisher file found at {path}, skipping...")
+                continue
+            fisher = load_file(path, device=self.device)
+            all_fishers.append(fisher)
+            print(f"Loaded Fisher: {path}")
+        return all_fishers
 
-    def to_task_vectors(
+    def merge_formula(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: Optional[List[Dict[str, Tensor]]] = None,
+        mode: MergeMode = "plain",
+    ) -> Tensor:
+        T = len(weights_list)
+        alphas = self.alphas if self.alphas is not None else [1.0 / T] * T
+
+        if mode == "plain":
+            return self._plain(weights_list, alphas)
+
+        if mode == "diagonal_fisher":
+            if fisher_list is None:
+                raise ValueError(f"Fisher data is required for mode {mode!r}")
+            return self._diagonal_fisher(weights_list, alphas, fisher_list)
+
+    def _plain(self, weights_list: List[Tensor], alphas: List[float]) -> Tensor:
+        """Weighted average of task vectors in so(n)."""
+        stacked = torch.stack(weights_list, dim=0)  # (T, B, n, n)
+        a = torch.tensor(alphas, dtype=stacked.dtype, device=stacked.device)
+        return torch.einsum("t,t...->...", a, stacked)
+
+    def _diagonal_fisher(
+        self,
+        weights_list: List[Tensor],
+        alphas: List[float],
+        fisher_list: List[Dict[str, Tensor]],
+    ) -> Tensor:
+        """
+        Element-wise Fisher-weighted merge in the vectorised so(n) basis.
+        No matrix solve; each component is an independent scalar problem.
+        """
+        B, n, _ = weights_list[0].shape
+        d = n * (n - 1) // 2
+
+        numer = torch.zeros(B, d, dtype=weights_list[0].dtype, device=weights_list[0].device)
+        denom = torch.full_like(numer, self.lam)
+
+        for a, omega, fisher in zip(weights_list, alphas, fisher_list):
+            v = self._vec(omega)      # (B, d)
+            f = fisher.to(v.device)   # (d,) or broadcastable
+            af = a * f               # (d,)
+            numer = numer + af * v
+            denom = denom + af
+
+        merged_vec = numer / denom  # (B, d)
+        return self._unvec(merged_vec, n)
+
+    def merge(
+        self,
+        adapter_paths: List[str],
+        fisher_paths: Optional[List[str]] = None,
+        mode: MergeMode = "plain",
+    ):
+        print(f"\nMerging {len(adapter_paths)} OFT adapters...")
+
+        # Load weights
+        all_weights = self.load_weights(adapter_paths)
+        if not all_weights:
+            raise ValueError("No valid adapter weights found!")
+
+        # Load Fishers
+        all_fishers = self.load_fishers(fisher_paths) if fisher_paths else None
+
+        merged_weights = {}
+
+        # Merge per key
+        for key in all_weights[0].keys():
+            print(f"  Processing key: {key}")
+
+            if "oft_r" in key or ("oft_" in key.lower() and "classifier" not in key.lower()):
+                weights_list = [
+                    oft_params_to_skew_matrix(weights[key])
+                    for weights in all_weights
+                ]
+
+                fishers_list = None
+                if all_fishers:
+                    fishers_list = [
+                        fisher[key] for fisher in all_fishers
+                    ]
+
+                avg_weight = self.merge_formula(
+                    weights_list=weights_list,
+                    fisher_list=fishers_list,
+                    mode=mode,
+                )
+
+                avg_weight = skew_matrix_to_oft_params(avg_weight)
+                merged_weights[key] = avg_weight
+
+            else:
+                print("[WARNING] Non-OFT weight detected.")
+
+        print(f"  Merged {len(merged_weights)} weight tensors")
+        return merged_weights
+
+if __name__ == "__main__":
+    # Example usage
+    merging = OFTMerging(lam=1.0, alphas=[0.5, 0.5], device="cuda")
+    merged_weights = merging.merge(
+        adapter_paths=[
+            f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_magicoder",
+            f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_numinamath",
+            f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_commonsense",
+            f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_socialiqa",
+            f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_scienceqa",
+        ],
+        fisher_paths=[
+            "data"
+        ],
+        mode="diagonal_fisher",
+    )
+    print(merged_weights.keys())
+
+
+class Unused:
+    def oft_to_skew_matrices(
         self, weights_list: List[Dict[str, Tensor]]
     ) -> Dict[str, List[Tensor]]:
         """Convert OFT raw params to skew-matrix task vectors."""
@@ -181,7 +292,7 @@ class OFTMerging(RiemannianMerging):
         key: Optional[str] = None,
     ) -> Tensor:
         T = len(omegas)
-        alphas = self.alpha if self.alpha is not None else [1.0 / T] * T
+        alphas = self.alphas if self.alphas is not None else [1.0 / T] * T
 
         if mode == "plain":
             return self._plain(omegas, alphas)
@@ -287,7 +398,7 @@ class OFTMerging(RiemannianMerging):
             raise ValueError("No adapter weights loaded; cannot merge.")
         fisher_list  = self.load_fishers(fisher_paths) if fisher_paths else None
 
-        task_vectors = self.to_task_vectors(weights_list)
+        task_vectors = self.oft_to_skew_matrices(weights_list)
 
         merged = {}
         for key, omegas in task_vectors.items():
@@ -295,20 +406,3 @@ class OFTMerging(RiemannianMerging):
             merged[key]  = self.from_task_vector(key, merged_omega)
 
         return merged
-
-if __name__ == "__main__":
-    # Example usage
-    merging = OFTMerging(lam=1.0, alpha=[0.5, 0.5], device="cuda")
-    merged_weights = merging.merge(
-        adapter_paths=[
-            "models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_magicoder",
-            "models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_numinamath",
-            "models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_commonsense",
-            "models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_socialiqa",
-            "models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_scienceqa",
-        ],
-        fisher_paths=["fisher_task1.safetensors", "fisher_task2.safetensors"],
-        mode="diagonal_fisher",
-    )
-    print(merged_weights.keys())
-

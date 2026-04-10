@@ -13,7 +13,7 @@ from safetensors.torch import save_file
 from tqdm import tqdm
 
 from src.utils.path import ROOTDIR, OFT_LLAMA_MODELS_DIR
-from src.fisher import compute_diagonal_fim
+from src.fisher import compute_diagonal_fim, compute_diagonal_fim_asdl
 
 
 # Task definitions: (task_tag, dataset_path, dataset_name, split, doc_to_text)
@@ -45,9 +45,9 @@ ADAPTERS_PATH   = f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters"
 EVAL_TASKS = [
     # (tag, dataset_path, dataset_name, split, doc_to_text, adapter_path)
     ("social_iqa",      "allenai/social_i_qa",    None,      "train", _siqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_socialiqa"),  # noqa: E501
-    ("commonsense_qa",  "tau/commonsense_qa",      None,      "train", _csqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_commonsense"),  # noqa: E501
-    ("minerva_math500", "HuggingFaceH4/MATH-500",  "default", "test",  _minerva_text,  f"{ADAPTERS_PATH}/llama3-1_8b_finetune_numinamath"),  # noqa: E501
-    ("humanevalplus",   "openai/openai_humaneval",  None,      "test",  _humaneval_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_magicoder"),  # noqa: E501
+    # ("commonsense_qa",  "tau/commonsense_qa",      None,      "train", _csqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_commonsense"),  # noqa: E501
+    # ("minerva_math500", "HuggingFaceH4/MATH-500",  "default", "test",  _minerva_text,  f"{ADAPTERS_PATH}/llama3-1_8b_finetune_numinamath"),  # noqa: E501
+    # ("humanevalplus",   "openai/openai_humaneval",  None,      "test",  _humaneval_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_magicoder"),  # noqa: E501
 ]
 
 
@@ -126,7 +126,7 @@ def compute_all_fishers(
         enumerate(EVAL_TASKS, 1), total=total, desc="Computing FIMs"
     ):
         model_tag = os.path.basename(adapter_path.rstrip("/"))
-        save_path = os.path.join(output_dir, f"{model_tag}__{task_tag}.safetensors")
+        save_path = os.path.join(output_dir, f"{model_tag}.safetensors")
         print(f"\n[{i}/{total}] Task: {task_tag}  adapter={model_tag}  split={split}")
         print(f"         Save : {save_path}")
 
@@ -156,6 +156,6 @@ if __name__ == "__main__":
     compute_all_fishers(
         output_dir=f"{ROOTDIR}/data/fishers",
         num_samples=512,
-        batch_size=64,
+        batch_size=8,
         max_length=512,
     )

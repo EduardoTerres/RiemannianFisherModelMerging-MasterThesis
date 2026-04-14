@@ -3,6 +3,10 @@ import os
 import sys
 import shutil
 
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+
 import torch
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -22,13 +26,13 @@ def parse_args():
     parser.add_argument(
         "--merge_mode",
         type=str,
-        choices=["plain", "diagonal_fisher", "linear_system"],
+        choices=["plain", "diagonal_fisher"],
         default="plain",
         help="Merging strategy: 'plain' (weighted average), 'diagonal_fisher' (element-wise Fisher weighting), or 'linear_system' (full transported-Fisher solve).",
     )
     parser.add_argument("--lam", type=float, default=1.0,
                         help="Regularisation coefficient lambda used in fisher merge modes.")
-    parser.add_argument("--alpha", type=float, nargs="+", default=None,
+    parser.add_argument("--alphas", type=float, nargs="+", default=None,
                         help="Per-task weights (must match number of adapters). Defaults to uniform.")
     parser.add_argument("--output_dir", type=str, default="outputs/merged",
                         help="Directory where the merged adapter and optionally the full model are saved.")
@@ -43,7 +47,7 @@ def main():
     args = parse_args()
     device = f"cuda:{args.gpu}" if torch.cuda.is_available() and args.gpu >= 0 else "cpu"
 
-    merging = OFTMerging(lam=args.lam, alpha=args.alpha, device=device)
+    merging = OFTMerging(lam=args.lam, alphas=args.alphas, device=device)
     merged_weights = merging.merge(
         adapter_paths=args.adapter_paths,
         fisher_paths=args.fisher_paths,

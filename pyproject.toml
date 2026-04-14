@@ -3,20 +3,22 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "my-ml-project"
+name = "merging_hessian"
 version = "0.1.0"
 dependencies = [
     "torch==2.2.1",
     "torchvision==0.17.1",
     "torchaudio==2.2.1",
-    "transformers==4.46.0",
+    "transformers==4.47.1",
     "accelerate==0.34.2",
     "safetensors==0.4.5",
-    "huggingface_hub==0.26.2",
+    "peft==0.17.1",
     "tqdm",
     "numpy==1.26.4",
+    "sentencepiece==0.2.0",
+    "protobuf==5.28.2",
+    "huggingface_hub==0.26.2",
     "datasets==3.1.0",
-    "peft==0.18.0",
 ]
 
 [tool.mypy]

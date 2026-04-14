@@ -1,10 +1,10 @@
 torch==2.2.1
 torchvision==0.17.1
 torchaudio==2.2.1
+transformers==4.47.1
 accelerate==0.34.2
 safetensors==0.4.5
-peft==0.18.0
-transformers==4.51.3
+peft==0.17.1
 tqdm
 numpy==1.26.4
 sentencepiece==0.2.0

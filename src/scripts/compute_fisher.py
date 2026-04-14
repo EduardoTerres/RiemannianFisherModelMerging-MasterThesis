@@ -12,9 +12,12 @@ from torch.utils.data import DataLoader
 from safetensors.torch import save_file
 from tqdm import tqdm
 
-from src.utils.path import ROOTDIR, OFT_LLAMA_MODELS_DIR
-from src.fisher import compute_diagonal_fim, compute_diagonal_fim_asdl
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from src.utils.path import ROOTDIR, OFT_LLAMA_MODELS_DIR
+from src.fisher import compute_diagonal_fim
 
 # Task definitions: (task_tag, dataset_path, dataset_name, split, doc_to_text)
 # doc_to_text(doc) -> str   — same format as the eval harness uses
@@ -37,6 +40,26 @@ def _minerva_text(doc):
 def _humaneval_text(doc):
     return doc["prompt"] + doc["canonical_solution"]
 
+def _scienceqa_text(doc):
+    _INDEX_TO_LETTER = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E"}
+
+    question = doc["question"]
+    options = doc["choices"]
+    answer_index = int(doc["answer"])
+    answer_letter = _INDEX_TO_LETTER.get(answer_index, "A")
+
+    choice_lines = []
+    for i, opt in enumerate(options):
+        label = _INDEX_TO_LETTER.get(i, chr(ord("A") + i))
+        choice_lines.append(f"{label}. {opt}")
+    choices_str = "\n".join(choice_lines)
+
+    return (
+        f"Question: {question}\n"
+        f"Choices:\n{choices_str}\n\n"
+        f"Answer: {answer_letter}"
+    )
+
 # Execution parameters
 
 BASE_MODEL_PATH = f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B"
@@ -44,10 +67,11 @@ ADAPTERS_PATH   = f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters"
 
 EVAL_TASKS = [
     # (tag, dataset_path, dataset_name, split, doc_to_text, adapter_path)
-    ("social_iqa",      "allenai/social_i_qa",    None,      "train", _siqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_socialiqa"),  # noqa: E501
+    # ("social_iqa",      "allenai/social_i_qa",    None,      "train", _siqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_socialiqa"),  # noqa: E501
     # ("commonsense_qa",  "tau/commonsense_qa",      None,      "train", _csqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_commonsense"),  # noqa: E501
     # ("minerva_math500", "HuggingFaceH4/MATH-500",  "default", "test",  _minerva_text,  f"{ADAPTERS_PATH}/llama3-1_8b_finetune_numinamath"),  # noqa: E501
     # ("humanevalplus",   "openai/openai_humaneval",  None,      "test",  _humaneval_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_magicoder"),  # noqa: E501
+    ("science_qa",      "derek-thomas/ScienceQA",     None,    "train", _scienceqa_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_scienceqa"),  # noqa: E501
 ]
 
 
@@ -75,6 +99,11 @@ def build_loader(
     dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
     return DataLoader(dataset, batch_size=batch_size)
 
+def _remove_default(fisher: dict) -> dict:
+    """Remove .default suffix from all keys in all Fishers, if present.
+    This is needed to ensure that the keys coincide with the original pretrained.
+    """
+    return {k.replace(".default", ""): v for k, v in fisher.items()}
 
 def compute_and_save_fim(
     base_model_path: str,
@@ -108,7 +137,7 @@ def compute_and_save_fim(
         tokenizer, num_samples, batch_size, max_length,
     )
     diag_fisher = compute_diagonal_fim(model, loader, device)
-    # diag_fisher keys: "base_model.model...oft_R.default.weight"
+    diag_fisher = _remove_default(diag_fisher)
 
     save_file(diag_fisher, save_path)
     print(f"[{task_tag}] Diagonal FIM saved to {save_path}")

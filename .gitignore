@@ -2,10 +2,12 @@
 .mypy_cache/
 *.egg-info
 *.pyc
+*.safetensors
 
 miniconda.sh
 OrthoMerge/models/*
 OrthoMerge/outputs/*
 utils/convert_llama_weights/meta_llama_model/*
 utils/convert_llama_weights/transformers/*
+outputs/*
 __pycache__/**

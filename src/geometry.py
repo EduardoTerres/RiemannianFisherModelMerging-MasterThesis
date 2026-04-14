@@ -86,7 +86,7 @@ class SOnManifold(Manifold):
     def __init__(self, use_scipy_logm: bool = False):
         self.use_scipy_logm = use_scipy_logm
 
-    def _matrix_exp(self, A: Tensor) -> Tensor:
+    def cayley_exp(self, A: Tensor) -> Tensor:
         """
         Cayley map on so(n) -> SO(n):
             Cay(A) = (I - A/2)^{-1} (I + A/2)
@@ -99,7 +99,7 @@ class SOnManifold(Manifold):
         A = 0.5 * (A - A.transpose(-1, -2))  # enforce skew-symmetry
         return torch.linalg.solve(Id - 0.5 * A, Id + 0.5 * A)
 
-    def _matrix_log(self, A: Tensor) -> Tensor:
+    def cayley_inverse_log(self, A: Tensor) -> Tensor:
         """
         Cayley inverse on SO(n)
         """
@@ -117,7 +117,7 @@ class SOnManifold(Manifold):
         Returns tangent vector at base (element of T_base SO(n)).
         """
         relative = base.transpose(-1, -2) @ point   # base^T @ point, in SO(n)
-        omega = self._matrix_log(relative)           # in so(n)
+        omega = self.cayley_inverse_log(relative)           # in so(n)
         return base @ omega                          # tangent vector at base
 
     def exp(self, base: Tensor, tangent: Tensor) -> Tensor:
@@ -126,14 +126,14 @@ class SOnManifold(Manifold):
         tangent is a tangent vector at base, i.e. tangent = base @ Omega.
         """
         omega = base.transpose(-1, -2) @ tangent    # body-frame Omega
-        return base @ self._matrix_exp(omega)
+        return base @ self.cayley_exp(omega)
 
     def task_vector(self, theta_llm: Tensor, theta_t: Tensor) -> Tensor:
         """
         Omega_t = log(theta_LLM^T @ theta_t) in so(n)  [Eq. 4]
         Returns the Lie-algebra task vector in the body frame.
         """
-        return self._matrix_log(theta_llm.transpose(-1, -2) @ theta_t)
+        return self.cayley_inverse_log(theta_llm.transpose(-1, -2) @ theta_t)
 
     def parallel_transport(self, base: Tensor, tangent_vec: Tensor, target: Tensor) -> Tensor:
         """
@@ -147,8 +147,8 @@ class SOnManifold(Manifold):
             target: theta_LLM
         """
         omega_t = self.task_vector(target, base)
-        half_exp     = self._matrix_exp( omega_t / 2)
-        half_exp_inv = self._matrix_exp(-omega_t / 2)
+        half_exp     = self.cayley_exp( omega_t / 2)
+        half_exp_inv = self.cayley_exp(-omega_t / 2)
         return half_exp @ tangent_vec @ half_exp_inv
 
     def transported_hessian(self, hessian_fn, base: Tensor, target_base: Tensor, omega_t: Tensor):
@@ -162,8 +162,8 @@ class SOnManifold(Manifold):
         Returns:
             callable V -> H_tilde_t(V)
         """
-        half_exp     = self._matrix_exp( omega_t / 2)
-        half_exp_inv = self._matrix_exp(-omega_t / 2)
+        half_exp     = self.cayley_exp( omega_t / 2)
+        half_exp_inv = self.cayley_exp(-omega_t / 2)
 
         def transported(V: Tensor) -> Tensor:
             # Pull V back: exp(-Omega/2) @ V @ exp(Omega/2)
@@ -179,5 +179,5 @@ class SOnManifold(Manifold):
         Squared geodesic distance d^2(Q, R) = -(1/2) * tr(log(Q^T @ R)^2)  [Eq. 14]
         Uses skew-symmetry: ||Omega||_F^2 = -tr(Omega^2).
         """
-        omega = self._matrix_log(x.transpose(-1, -2) @ y)
+        omega = self.cayley_inverse_log(x.transpose(-1, -2) @ y)
         return -0.5 * torch.diagonal(omega @ omega, dim1=-2, dim2=-1).sum(-1)

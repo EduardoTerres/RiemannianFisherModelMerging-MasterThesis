@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/eterrescaballe/MasterThesis/src/**)",
+      "Read(//gpfs/home3/eterrescaballe/MasterThesis/src/**)",
+      "Bash(conda activate:*)",
+      "Bash(python -c \"import transformers; print\\(transformers.__version__\\)\")",
+      "Read(//gpfs/home3/eterrescaballe/miniconda3/bin/**)",
+      "Read(//home/eterrescaballe/anaconda3/bin/**)",
+      "Read(//gpfs/home3/eterrescaballe/.conda/**)",
+      "Read(//gpfs/home3/eterrescaballe/miniconda3/envs/**)",
+      "Bash(/home/eterrescaballe/miniconda3/bin/conda env:*)",
+      "Bash(/home/eterrescaballe/miniconda3/envs/OrthoMerge/bin/python -c \"import transformers; print\\(transformers.__version__\\)\")",
+      "Bash(/home/eterrescaballe/miniconda3/envs/OrthoMerge/bin/python -c \"import torch; print\\(torch.get_default_device\\(\\)\\)\")",
+      "Bash(/home/eterrescaballe/miniconda3/envs/OrthoMerge/bin/pip show:*)",
+      "Bash(/home/eterrescaballe/miniconda3/envs/OrthoMerge/bin/python -c \"import transformers; print\\(transformers.__file__\\)\")"
+    ]
+  }
+}

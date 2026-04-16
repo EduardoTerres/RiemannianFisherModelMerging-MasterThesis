@@ -12,7 +12,7 @@ from src.utils.path import OFT_LLAMA_MODELS_DIR, ROOTDIR
 from src.geometry import Manifold, SOnManifold
 
 
-MergeMode = Literal["plain", "diagonal_fisher", "linear_system"]
+MergeMode = Literal["plain", "diagonal_fisher"]
 
 
 class RiemannianMerging(ABC):
@@ -54,7 +54,7 @@ class RiemannianMerging(ABC):
     ) -> Tensor:
         """Merge task vectors into one (B, n, n) Omega.
 
-        Modes: "plain", "diagonal_fisher", or "linear_system".
+        Modes: "plain" or "diagonal_fisher"
         Fisher data is required for Fisher-based modes.
         """
 
@@ -198,7 +198,8 @@ class OFTMerging(RiemannianMerging):
         Ril = R[:, i][:, :, j]
         Rjk = R[:, j][:, :, i]
 
-        Pt = (Rik * Rjl - Ril * Rjk).transpose(1, 2)  # (num_blocks, d, d)
+        # Pt[b, k, a] = M_{ka} = matrix of P_{θ_t → θ_LLM} in upper-triangle basis
+        Pt = Rik * Rjl - Ril * Rjk  # (num_blocks, d, d)
         return Pt
 
     def merge_formula(
@@ -242,16 +243,34 @@ class OFTMerging(RiemannianMerging):
         denom = torch.zeros(num_blocks, son_dimension, dtype=dtype, device=device)
         numer = torch.zeros(num_blocks, son_dimension, dtype=dtype, device=device)
 
+        sum_norm_fisher_ofts = 0.0
+        sum_fisher_ofts = None
         for alpha_t, oft_params_t, fisher_t in zip(alphas, weights_list, fisher_list):
             Pt = self.compute_Pt(oft_params=oft_params_t, block_size=block_size)
             F_tilde = ((Pt ** 2) @ fisher_t.unsqueeze(-1)).squeeze(-1)
 
+            fisher_oft_t = (self.lam + F_tilde) * oft_params_t
+            if sum_fisher_ofts is None:
+                sum_fisher_ofts = fisher_oft_t
+            else:
+                sum_fisher_ofts += fisher_oft_t
+
+            sum_norm_fisher_ofts += fisher_oft_t.norm().item()
+
             denom += alpha_t * F_tilde
-            numer += alpha_t * (self.lam + F_tilde) * oft_params_t
+            numer += alpha_t * fisher_oft_t
 
         denom += self.lam
 
-        return numer / denom
+        merged_oft = numer / denom
+
+        # Apply norm correction
+        # norm_merged_oft = merged_oft.norm().item()
+        # if norm_merged_oft > 0 and sum_norm_fisher_ofts > 0:
+        #     correction = torch.sqrt(torch.tensor(sum_norm_fisher_ofts) / torch.tensor(norm_merged_oft))
+        #     merged_oft = merged_oft * correction
+
+        return merged_oft
 
     def merge(
         self,
@@ -276,9 +295,9 @@ class OFTMerging(RiemannianMerging):
 
         # Merge per key
         for key in all_weights[0].keys():
-            print(f"  Processing key: {key}")
-
             if "oft_r" in key or ("oft_" in key.lower() and "classifier" not in key.lower()):
+                print(f"  Processing key: {key}")
+
                 weights_layer = [weights[key] for weights in all_weights]
 
                 fishers_layer = None

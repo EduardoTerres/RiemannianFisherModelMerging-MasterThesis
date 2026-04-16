@@ -52,7 +52,7 @@ def compute_diagonal_fim_true(
     max_batches: int | None = None,
     topk: int = 50,
     renormalize_topk: bool = True,
-) -> tuple[dict, int]:
+) -> dict:
     """
     Compute the true diagonal Fisher using model probabilities (not labels).
 
@@ -60,6 +60,11 @@ def compute_diagonal_fim_true(
 
     Approximates the inner expectation over the vocabulary using only the top-k
     tokens under the model's distribution at each position.
+
+    Instead of doing B*T*topk backward passes, this vectorizes over all (b, t)
+    positions and does one backward pass per top-k token, reducing to `topk`
+    backward passes per batch. Cross-terms between positions are included in the
+    squared gradient, which is the standard batched-gradient approximation.
 
     Args:
         model:            PEFT-wrapped HuggingFace CausalLM (adapter params require_grad=True)
@@ -70,88 +75,74 @@ def compute_diagonal_fim_true(
         renormalize_topk: if True, renormalize top-k probs to sum to 1
 
     Returns:
-        (diag_fisher, n_positions)
-        diag_fisher:  dict {param_name: tensor} same shape as trainable params, accumulated on CPU
-        n_positions:  total number of token positions processed
+        diag_fisher:  dict {param_name: tensor} same shape as trainable params, on CPU
     """
     trainable_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
-    diag_fisher = {n: torch.zeros_like(p, device="cpu") for n, p in trainable_params}
+    param_names = [n for n, _ in trainable_params]
+    params = [p for _, p in trainable_params]
+
+    diag_fisher = [torch.zeros_like(p, device="cpu") for p in params]
+    n_batches = 0
 
     model.eval()
-    n_positions = 0
 
-    for batch_idx, batch in enumerate(dataloader):
+    for batch_idx, batch in enumerate(tqdm(dataloader)):
         if max_batches is not None and batch_idx >= max_batches:
             break
 
-        input_ids = batch["input_ids"].to(device)                          # (B, T)
+        input_ids = batch["input_ids"].to(device)                   # (B, T)
         attention_mask = batch.get("attention_mask")
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
 
-        with torch.no_grad():
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            logits = outputs.logits                                         # (B, T, V)
-
-        # Valid positions: all but the last token (each predicts the next)
-        logits = logits[:, :-1, :].contiguous()                            # (B, T-1, V)
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        logits = outputs.logits[:, :-1, :].float()                  # (B, T-1, V)
         B, T, _ = logits.shape
 
-        log_probs_all = torch.log_softmax(logits.float(), dim=-1)          # (B, T-1, V)
-        probs_all = log_probs_all.exp()
+        log_probs = torch.log_softmax(logits, dim=-1)               # (B, T-1, V)
 
-        # Select top-k tokens per position
-        topk_probs, topk_ids = probs_all.topk(topk, dim=-1)               # (B, T-1, k)
+        # Weights are detached — no grad needed through p_c
+        with torch.no_grad():
+            topk_probs, topk_ids = log_probs.exp().topk(topk, dim=-1)  # (B, T-1, k)
+            if renormalize_topk:
+                topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
 
-        if renormalize_topk:
-            topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
-
-        # Count valid (non-padding) positions
+        # Float mask over valid (non-padding) positions
         if attention_mask is not None:
-            valid_mask = attention_mask[:, :-1].bool()                     # (B, T-1)
+            valid_mask = attention_mask[:, :-1].float()             # (B, T-1)
         else:
-            valid_mask = torch.ones(B, T, dtype=torch.bool, device=device)
+            valid_mask = torch.ones(B, T, device=device)
 
-        n_positions += valid_mask.sum().item()
+        # One backward pass per top-k rank; vectorized over all (b, t) positions.
+        for ki in range(topk):
+            ids_ki = topk_ids[:, :, ki]                             # (B, T-1)
+            weights_ki = topk_probs[:, :, ki]                       # (B, T-1), detached
 
-        # Accumulate Fisher contribution position by position
-        for b in range(B):
-            for t in range(T):
-                if not valid_mask[b, t]:
-                    continue
+            # log p for the ki-th top token at every position
+            log_p_ki = log_probs.gather(-1, ids_ki.unsqueeze(-1)).squeeze(-1)  # (B, T-1)
 
-                # grad sum_c p(c) [grad log p(c)]^2  at this position
-                fisher_accum = {n: torch.zeros_like(p) for n, p in trainable_params}
+            scalar = (weights_ki * valid_mask * log_p_ki).sum()
 
-                for ki in range(topk):
-                    c = topk_ids[b, t, ki].item()
-                    p_c = topk_probs[b, t, ki]                             # scalar
+            grads = torch.autograd.grad(
+                scalar, params,
+                retain_graph=(ki < topk - 1),
+                create_graph=False,
+                allow_unused=True,
+            )
 
-                    log_p_c = log_probs_all[b, t, c]                      # scalar (with grad)
+            for j, g in enumerate(grads):
+                if g is not None:
+                    diag_fisher[j] += g.detach().float().cpu() ** 2
 
-                    grads = torch.autograd.grad(
-                        log_p_c, [p for _, p in trainable_params],
-                        retain_graph=True,
-                        allow_unused=True,
-                    )
+        n_batches += 1
 
-                    for (n, _), g in zip(trainable_params, grads):
-                        if g is not None:
-                            fisher_accum[n] += p_c.item() * (g.detach() ** 2)
-
-                for n, v in fisher_accum.items():
-                    diag_fisher[n] += v.cpu()
-
-    return diag_fisher, n_positions
+    return {n: f / max(n_batches, 1) for n, f in zip(param_names, diag_fisher)}
 
 
 def compute_empirical_fisher(model, loader, device):
     """
     Compute the empirical diagonal Fisher for the trainable parameters
     of a causal LM / PEFT model.
-
-    Correctly averages per-sequence squared gradients (not the square of the
-    batch-averaged gradient, which would underestimate the Fisher).
 
     Returns
     -------

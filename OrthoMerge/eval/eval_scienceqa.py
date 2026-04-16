@@ -59,7 +59,7 @@ def formatting_prompts_func(example):
 
 
 eval_split_name = "test"
-eval_dataset = test_dataset  
+eval_dataset = test_dataset
 eval_model = AutoModelForCausalLM.from_pretrained(
     merged_dir,
     torch_dtype=torch.bfloat16,

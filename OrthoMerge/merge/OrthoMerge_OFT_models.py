@@ -212,6 +212,7 @@ def merge_oft_adapter_weights_extra(adapter_paths):
                 if key in weights:
                     w = weights[key]
                     w = oft_params_to_skew_matrix(w)
+                    print(f"    Loaded OFT weight, shape: {w.shape}")
                     weights_list.append(w)
 
             if weights_list:

@@ -17,7 +17,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.utils.path import ROOTDIR, OFT_LLAMA_MODELS_DIR
-from src.fisher import compute_diagonal_fim
+from src.fisher import (
+    compute_diagonal_fim,
+    compute_diagonal_fim_true,
+    compute_empirical_fisher,
+)
 
 # Task definitions: (task_tag, dataset_path, dataset_name, split, doc_to_text)
 # doc_to_text(doc) -> str   — same format as the eval harness uses
@@ -67,11 +71,11 @@ ADAPTERS_PATH   = f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters"
 
 EVAL_TASKS = [
     # (tag, dataset_path, dataset_name, split, doc_to_text, adapter_path)
-    # ("social_iqa",      "allenai/social_i_qa",    None,      "train", _siqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_socialiqa"),  # noqa: E501
+    ("social_iqa",      "allenai/social_i_qa",    None,      "train", _siqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_socialiqa"),  # noqa: E501
     # ("commonsense_qa",  "tau/commonsense_qa",      None,      "train", _csqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_commonsense"),  # noqa: E501
     # ("minerva_math500", "HuggingFaceH4/MATH-500",  "default", "test",  _minerva_text,  f"{ADAPTERS_PATH}/llama3-1_8b_finetune_numinamath"),  # noqa: E501
-    # ("humanevalplus",   "openai/openai_humaneval",  None,      "test",  _humaneval_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_magicoder"),  # noqa: E501
-    ("science_qa",      "derek-thomas/ScienceQA",     None,    "train", _scienceqa_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_scienceqa"),  # noqa: E501
+    # ("humanevalplus",   "evalplus/humanevalplus",  None,      "test",  _humaneval_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_magicoder"),  # noqa: E501
+    # ("science_qa",      "derek-thomas/ScienceQA",     None,    "train", _scienceqa_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_scienceqa"),  # noqa: E501
 ]
 
 
@@ -136,7 +140,8 @@ def compute_and_save_fim(
         dataset_path, dataset_name, split, doc_to_text,
         tokenizer, num_samples, batch_size, max_length,
     )
-    diag_fisher = compute_diagonal_fim(model, loader, device)
+    # diag_fisher = compute_diagonal_fim(model, loader, device)
+    diag_fisher = compute_diagonal_fim_true(model, loader, device)
     diag_fisher = _remove_default(diag_fisher)
 
     save_file(diag_fisher, save_path)
@@ -185,6 +190,6 @@ if __name__ == "__main__":
     compute_all_fishers(
         output_dir=f"{ROOTDIR}/data/fishers",
         num_samples=512,
-        batch_size=8,
-        max_length=512,
+        batch_size=64,
+        max_length=32,
     )

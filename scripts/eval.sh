@@ -12,3 +12,6 @@ lm_eval --model hf \
     --batch_size 64 \
     --confirm_run_unsafe_code \
     --trust_remote_code
+
+
+# Eval Original LLM

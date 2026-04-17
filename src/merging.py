@@ -157,7 +157,11 @@ class OFTMerging(RiemannianMerging):
 
         return all_weights
 
-    def load_fishers(self, paths: List[str]) -> List[Dict[str, Tensor]]:
+    def load_fishers(
+        self,
+        paths: List[str],
+        remove_default_ettiquete: bool = True,
+    ) -> List[Dict[str, Tensor]]:
         all_fishers = []
         for path in paths:
             if not os.path.exists(path):
@@ -167,12 +171,13 @@ class OFTMerging(RiemannianMerging):
             all_fishers.append(fisher)
             print(f"Loaded Fisher: {path}")
 
-        # Remove .default from all keys
-        for fisher in all_fishers:
-            for key in list(fisher.keys()):
-                if ".default" in key:
-                    new_key = key.replace(".default", "")
-                    fisher[new_key] = fisher.pop(key)
+        # Remove .default from all keysç
+        if remove_default_ettiquete:
+            for fisher in all_fishers:
+                for key in list(fisher.keys()):
+                    if ".default" in key:
+                        new_key = key.replace(".default", "")
+                        fisher[new_key] = fisher.pop(key)
         return all_fishers
 
     def compute_Pt(self, oft_params: torch.Tensor, block_size: int) -> torch.Tensor:
@@ -212,7 +217,7 @@ class OFTMerging(RiemannianMerging):
         alphas = (
             torch.tensor(self.alphas, dtype=torch.float32)
             if self.alphas is not None
-            else torch.tensor([1.0 / T] * T, dtype=torch.float32)
+            else torch.tensor([0.5] * T, dtype=torch.float32)
         )
         alphas = alphas.to(self.device)
 
@@ -233,42 +238,29 @@ class OFTMerging(RiemannianMerging):
     def _diagonal_fisher(
         self,
         weights_list: List[Tensor],
-        fisher_list: List[Dict[str, Tensor]],
+        fisher_list: List[Tensor],
         alphas: List[float],
     ) -> Tensor:
         num_blocks, son_dimension = weights_list[0].shape
         dtype, device = weights_list[0].dtype, weights_list[0].device
         block_size = int((1 + (1 + 8 * son_dimension) ** 0.5) / 2)
 
-        denom = torch.zeros(num_blocks, son_dimension, dtype=dtype, device=device)
-        numer = torch.zeros(num_blocks, son_dimension, dtype=dtype, device=device)
+        Id = torch.eye(son_dimension, dtype=dtype, device=device).unsqueeze(0)  # (1, d, d)
 
-        sum_norm_fisher_ofts = 0.0
-        sum_fisher_ofts = None
+        A = self.lam * Id.expand(num_blocks, -1, -1).clone()  # (num_blocks, d, d)
+        b = torch.zeros(num_blocks, son_dimension, dtype=dtype, device=device)
+
         for alpha_t, oft_params_t, fisher_t in zip(alphas, weights_list, fisher_list):
             Pt = self.compute_Pt(oft_params=oft_params_t, block_size=block_size)
-            F_tilde = ((Pt ** 2) @ fisher_t.unsqueeze(-1)).squeeze(-1)
 
-            fisher_oft_t = (self.lam + F_tilde) * oft_params_t
-            if sum_fisher_ofts is None:
-                sum_fisher_ofts = fisher_oft_t
-            else:
-                sum_fisher_ofts += fisher_oft_t
+            # Full transported Fisher: (num_blocks, d, d)
+            F_tilde = Pt @ torch.diag_embed(fisher_t) @ Pt.transpose(-2, -1)
 
-            sum_norm_fisher_ofts += fisher_oft_t.norm().item()
+            A += alpha_t * F_tilde
+            b += alpha_t * ((self.lam * Id.squeeze(0) + F_tilde) @ oft_params_t.unsqueeze(-1)).squeeze(-1)
 
-            denom += alpha_t * F_tilde
-            numer += alpha_t * fisher_oft_t
-
-        denom += self.lam
-
-        merged_oft = numer / denom
-
-        # Apply norm correction
-        # norm_merged_oft = merged_oft.norm().item()
-        # if norm_merged_oft > 0 and sum_norm_fisher_ofts > 0:
-        #     correction = torch.sqrt(torch.tensor(sum_norm_fisher_ofts) / torch.tensor(norm_merged_oft))
-        #     merged_oft = merged_oft * correction
+        # Solve A @ omega = b per block
+        merged_oft = torch.linalg.solve(A, b.unsqueeze(-1)).squeeze(-1)
 
         return merged_oft
 

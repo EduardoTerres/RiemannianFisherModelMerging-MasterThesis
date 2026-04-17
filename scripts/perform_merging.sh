@@ -1,5 +1,10 @@
 #!/bin/bash
 
+set -e 
+
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate OrthoMerge
+
 python src/scripts/perform_merging.py \
     --language_model_name "OrthoMerge/models/Llama-3.1-8B/" \
     --adapter_paths \
@@ -14,7 +19,9 @@ python src/scripts/perform_merging.py \
         data/empirical_diagonal_fishers/llama3-1_8b_finetune_commonsense.safetensors \
         data/empirical_diagonal_fishers/llama3-1_8b_finetune_socialiqa.safetensors \
         data/empirical_diagonal_fishers/llama3-1_8b_finetune_scienceqa.safetensors \
-    --output_dir outputs/OrthoMerge_Llama-3.1-8B-fisher \
+    --output_dir outputs/Llama-3.1-8B-merged-fisher \
     --merge_mode "diagonal_fisher" \
     --save_merged_model \
     --gpu 0
+
+bash scripts/eval.sh

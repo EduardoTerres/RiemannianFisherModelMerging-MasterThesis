@@ -72,10 +72,10 @@ ADAPTERS_PATH   = f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters"
 EVAL_TASKS = [
     # (tag, dataset_path, dataset_name, split, doc_to_text, adapter_path)
     ("social_iqa",      "allenai/social_i_qa",    None,      "train", _siqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_socialiqa"),  # noqa: E501
-    # ("commonsense_qa",  "tau/commonsense_qa",      None,      "train", _csqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_commonsense"),  # noqa: E501
-    # ("minerva_math500", "HuggingFaceH4/MATH-500",  "default", "test",  _minerva_text,  f"{ADAPTERS_PATH}/llama3-1_8b_finetune_numinamath"),  # noqa: E501
-    # ("humanevalplus",   "evalplus/humanevalplus",  None,      "test",  _humaneval_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_magicoder"),  # noqa: E501
-    # ("science_qa",      "derek-thomas/ScienceQA",     None,    "train", _scienceqa_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_scienceqa"),  # noqa: E501
+    ("commonsense_qa",  "tau/commonsense_qa",      None,      "train", _csqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_commonsense"),  # noqa: E501
+    ("numinamath", "HuggingFaceH4/MATH-500",  "default", "test",  _minerva_text,  f"{ADAPTERS_PATH}/llama3-1_8b_finetune_numinamath"),  # noqa: E501
+    ("humanevalplus",   "evalplus/humanevalplus",  None,      "test",  _humaneval_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_magicoder"),  # noqa: E501
+    ("science_qa",      "derek-thomas/ScienceQA",     None,    "train", _scienceqa_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_scienceqa"),  # noqa: E501
 ]
 
 

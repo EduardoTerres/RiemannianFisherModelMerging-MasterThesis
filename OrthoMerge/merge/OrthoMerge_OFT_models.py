@@ -119,7 +119,7 @@ else:
     args.device = "cpu"
 
 
-def merge_oft_adapter_weights_standard(adapter_paths):
+def merge_oft_adapter_weights(adapter_paths):
     print(f"\nMerging {len(adapter_paths)} OFT adapters...")
 
     all_weights = []
@@ -177,181 +177,6 @@ def merge_oft_adapter_weights_standard(adapter_paths):
     print(f"  Merged {len(merged_weights)} weight tensors")
     return merged_weights
 
-
-def merge_oft_adapter_weights_extra(adapter_paths):
-    print(f"\nMerging {len(adapter_paths)} OFT adapters...")
-
-    all_weights = []
-    for adapter_path in adapter_paths:
-        model_path = os.path.join(adapter_path, "adapter_model.safetensors")
-        if not os.path.exists(model_path):
-            model_path = os.path.join(adapter_path, "adapter_model.bin")
-            if os.path.exists(model_path):
-                weights = torch.load(model_path, map_location="cpu")
-            else:
-                print(f"Warning: No adapter weights found at {adapter_path}, skipping...")
-                continue
-        else:
-            weights = load_file(model_path)
-
-        all_weights.append(weights)
-        print(f"  Loaded: {adapter_path}")
-
-    if not all_weights:
-        raise ValueError("No valid adapter weights found!")
-
-    merged_weights = {}
-    first_weights = all_weights[0]
-
-    for key in tqdm(first_weights.keys(), desc="Merging adapter keys"):
-        print(f"  Processing key: {key}")
-
-        if "oft_r" in key or ("oft_" in key.lower() and "classifier" not in key.lower()):
-            weights_list = []
-            for weights in all_weights:
-                if key in weights:
-                    w = weights[key]
-                    w = oft_params_to_skew_matrix(w)
-                    print(f"    Loaded OFT weight, shape: {w.shape}")
-                    weights_list.append(w)
-
-            if weights_list:
-                avg_weight = merge_cayley_Q_list(weights_list, correction=False)
-
-                # Apply 1 iteration of fixed-point
-                def lie_bracket(A, B):
-                    return A @ B - B @ A
-
-                A_iter = avg_weight
-                N = 10  # truncation order (Jacobi energy objective)
-                T = len(weights_list)
-                tol = 1e-10
-                for _ in tqdm(range(5), desc="Fixed-point iterations"):
-                    # Per-task correction: C_t = sum_{m=1}^{N} 1/(2m+1)! * ad_{A_t}^{2m}(A_iter)
-                    C_list = []
-                    for A_t in weights_list:
-                        B = A_iter
-                        C_t = torch.zeros_like(A_iter)
-                        for step in range(2 * N):
-                            B = lie_bracket(A_t, B)
-                            if (step + 1) % 2 == 0:  # collect even powers B_{2m}
-                                m = (step + 1) // 2   # m = 1, 2, ..., N
-                                coef = 1.0 / math.factorial(2 * m + 1)
-                                C_t = C_t + coef * B
-                        C_list.append(C_t)
-
-                    A_iter_prev = A_iter.clone()
-                    # A^(k+1) = A_bar - (1/T) * sum_t C_t  (uniform weights)
-                    A_iter = avg_weight - (1.0 / T) * torch.stack(C_list).sum(dim=0)
-
-                    # Print the difference in norm in scientific notation
-                    diff_norm = torch.norm(A_iter - A_iter_prev, p="fro").item()
-                    print(f"    Iteration diff norm: {diff_norm:.2e}")
-
-                    if diff_norm < tol:
-                        print(f"    Converged (tol={tol:.1e}), stopping early.")
-                        break
-
-                # difference in A_iter and avg_weight
-                final_diff_norm = torch.norm(A_iter - avg_weight, p="fro").item()
-                print(f"    Final diff norm from avg_weight: {final_diff_norm:.4f}")
-
-                # average of per-task Frobenius norms
-                avg_norms = sum(torch.norm(w, p="fro").item() for w in weights_list) / len(weights_list)
-                print(f"    Sum of norms: {avg_norms:.4f}")
-
-                # Frobenius norm of merged tensor
-                norm_of_sum = torch.norm(A_iter, p="fro").item()
-                print(f"    Norm of sums: {norm_of_sum:.4f}")
-
-                # ratio = (previous line 1) / (previous line 2)
-                ratio = avg_norms / norm_of_sum if norm_of_sum != 0 else float("inf")
-                print(f"    Ratio (sum norms / norm of sum): {ratio:.4f}")
-
-
-                # Iso-energy rescaling (Theorem 3, eq. 8 from iso-energy PDF):
-                # xi_iso^(N) = sqrt( sum_t alpha_t ||A_t||_F^2
-                #                  / sum_t alpha_t sum_{m=0}^{N} 1/(2m+1)! ||ad_{A_t}^m B||_F^2 )
-                B = A_iter
-                numerator = 0.0
-                denominator = 0.0
-                for A_t in weights_list:
-                    numerator += torch.sum(A_t * A_t).item()  # ||A_t||_F^2
-                    Bm = B.clone()
-                    for m in range(N + 1):
-                        coef = 1.0 / math.factorial(2 * m + 1)
-                        denominator += coef * torch.sum(Bm * Bm).item()  # ||ad_{A_t}^m B||_F^2
-                        if m < N:
-                            Bm = lie_bracket(A_t, Bm)
-
-                print(f"    iso-energy num = {numerator:.4f}, den = {denominator:.4f}")
-                xi_star = math.sqrt(numerator / denominator) if denominator > 1e-12 else 1.0
-                print(f"  Iso-energy rescaling xi_iso = {xi_star:.4f}")
-
-                A_iter = xi_star * A_iter
-
-                A_iter = 0.5 * (A_iter - A_iter.transpose(-1, -2))
-
-                avg_weight = skew_matrix_to_oft_params(A_iter)
-                merged_weights[key] = avg_weight
-                print(f"    Merged shape: {avg_weight.shape}")
-            else:
-                print(f"    Warning: No weights found for key {key}")
-
-        else:
-            weights_list = [weights[key] for weights in all_weights if key in weights]
-            if len(weights_list) > 1:
-                avg_weight = torch.stack(weights_list).mean(dim=0)
-                merged_weights[key] = avg_weight
-                print(f"    Averaged non-OFT weight, shape: {avg_weight.shape}")
-            else:
-                merged_weights[key] = first_weights[key].clone()
-                print(f"    Copied from first adapter, shape: {merged_weights[key].shape}")
-
-    print(f"  Merged {len(merged_weights)} weight tensors")
-    return merged_weights
-
-
-def print_groupwise_avg_correction(
-    weights_list: List[torch.Tensor],
-    max_groups_per_k: Optional[int] = None,
-) -> None:
-    """
-    Print avg correction coefficient c for group sizes k=2..N:
-      c = (sum_i ||Q_i||_F) / ||sum_i Q_i||_F
-    Also prints avg ||sum_i Q_i||_F to monitor growth of the sum.
-    """
-    assert len(weights_list) >= 2, "Need at least 2 tensors"
-    Q_stack = torch.stack(weights_list, dim=0)
-    N = Q_stack.shape[0]
-
-    print("\nGroup-wise average correction growth:")
-    for k in range(2, N + 1):
-        c_vals, sum_norm_vals = [], []
-        groups = itertools.combinations(range(N), k)
-        if max_groups_per_k is not None:
-            groups = itertools.islice(groups, max_groups_per_k)
-
-        for idx in groups:
-            G = Q_stack[list(idx)]                  # (k, ...)
-            sum_q = G.sum(dim=0)
-            norm_sum = torch.norm(sum_q, p="fro")
-            if norm_sum == 0:
-                continue
-            sum_norms = torch.norm(G.reshape(k, -1), p="fro", dim=1).sum()
-            c_vals.append((sum_norms / norm_sum).item())
-            sum_norm_vals.append(norm_sum.item())
-
-        if c_vals:
-            print(
-                f"  k={k:2d} | avg_c={sum(c_vals)/len(c_vals):.6f} "
-                f"| avg_||sumQ||={sum(sum_norm_vals)/len(sum_norm_vals):.6f} "
-                f"| groups={len(c_vals)}"
-            )
-        else:
-            print(f"  k={k:2d} | no valid groups")
-
-
 def create_merged_adapter_with_oft_for_llm(
     base_model_name,
     adapter_paths,
@@ -366,7 +191,7 @@ def create_merged_adapter_with_oft_for_llm(
 
     config_path = os.path.join(adapter_paths[0], "adapter_config.json")
 
-    merged_weights = merge_oft_adapter_weights_extra(adapter_paths)
+    merged_weights = merge_oft_adapter_weights(adapter_paths)
 
     os.makedirs(output_merged_adapter_dir, exist_ok=True)
     merged_adapter_path = os.path.join(output_merged_adapter_dir, "merged_adapter")

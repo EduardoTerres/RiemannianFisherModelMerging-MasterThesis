@@ -19,6 +19,7 @@ dependencies = [
     "protobuf==5.28.2",
     "huggingface_hub==0.26.2",
     "datasets==3.1.0",
+    "matplotlib",
 ]
 
 [tool.mypy]

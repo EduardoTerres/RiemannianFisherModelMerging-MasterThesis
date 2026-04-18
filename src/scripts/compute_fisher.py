@@ -19,8 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.utils.path import ROOTDIR, OFT_LLAMA_MODELS_DIR
 from src.fisher import (
     compute_diagonal_fim,
-    compute_diagonal_fim_true,
     compute_empirical_fisher,
+    compute_empirical_diagonal_fisher,
+    compute_kfac,
 )
 
 # Task definitions: (task_tag, dataset_path, dataset_name, split, doc_to_text)
@@ -103,12 +104,6 @@ def build_loader(
     dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
     return DataLoader(dataset, batch_size=batch_size)
 
-def _remove_default(fisher: dict) -> dict:
-    """Remove .default suffix from all keys in all Fishers, if present.
-    This is needed to ensure that the keys coincide with the original pretrained.
-    """
-    return {k.replace(".default", ""): v for k, v in fisher.items()}
-
 def compute_and_save_fim(
     base_model_path: str,
     adapter_path: str,
@@ -141,12 +136,14 @@ def compute_and_save_fim(
         tokenizer, num_samples, batch_size, max_length,
     )
     # diag_fisher = compute_diagonal_fim(model, loader, device)
-    diag_fisher = compute_diagonal_fim_true(model, loader, device)
-    diag_fisher = _remove_default(diag_fisher)
+    # diag_fisher = compute_empirical_diagonal_fisher(model, loader, device)
+    # fisher = compute_kfac(model, loader, device)
+    fisher = FIM(model=model, loader=loader, representation=PMatDiag)
+    print(fisher)
+    exit(0)
 
-    save_file(diag_fisher, save_path)
-    print(f"[{task_tag}] Diagonal FIM saved to {save_path}")
-
+    save_file(fisher, save_path)
+    print(f"[{task_tag}] Fisher saved to {save_path}")
 
 def compute_all_fishers(
     output_dir: str,
@@ -190,6 +187,6 @@ if __name__ == "__main__":
     compute_all_fishers(
         output_dir=f"{ROOTDIR}/data/fishers",
         num_samples=512,
-        batch_size=64,
-        max_length=32,
+        batch_size=8,
+        max_length=256,
     )

@@ -31,91 +31,8 @@ from src.scripts.compute_fisher import (
 from src.merging import OFTMerging
 from src.geometry import SOnManifold
 
+from src.analysis.utils import fisher_task_vectors, _is_oft_param_name
 
-# ---------------------------------------------------------------------------
-# Task-vector constructors
-# ---------------------------------------------------------------------------
-
-def _is_oft_param_name(name: str) -> bool:
-    """Return True if a parameter name belongs to OFT adapters."""
-    n = name.lower()
-    return ("oft_r" in n or "oft_" in n) and "classifier" not in n
-
-def standard_task_vectors(
-    oft_params_list: List[Tensor],
-) -> List[Tensor]:
-    """
-    Standard task vectors xi_t = log(theta_t) in so(n), as upper-triangle OFT params.
-
-    Args:
-        oft_params_list: list of (num_blocks, d) OFT parameter tensors
-                         (upper-triangle of skew-symmetric matrix).
-
-    Returns:
-        List of (num_blocks, d) task vectors (same representation as input).
-    """
-    return [params.clone() for params in oft_params_list]
-
-def fisher_task_vectors(
-    oft_params_per_task: List[Dict[str, Tensor]],
-    fisher_per_task: List[Dict[str, Tensor]],
-    alphas: List[float],
-    block_size: int,
-    merging: OFTMerging,
-    lam: float = 1.0,
-) -> List[Dict[str, Tensor]]:
-    """
-    Diagonal-Fisher task vectors across T tasks (eq. 11), per layer key:
-
-        xi_t* = (lam*I + sum_{t'} alpha_{t'} * F_tilde_{t'})^{-1} (lam*I + F_tilde_t) xi_t
-
-    where F_tilde_t = P_t @ diag(f_t) @ P_t^T is the transported diagonal Fisher.
-    The shared inverse denominator couples all tasks together.
-
-    Args:
-        oft_params_per_task: T dicts mapping layer key -> (num_blocks, d) OFT params.
-        fisher_per_task:     T dicts mapping layer key -> (num_blocks, d) diagonal Fisher.
-        alphas:              T scalars alpha_t (e.g. uniform 1/T).
-        block_size:          n, the SO(n) block size.
-        merging:             OFTMerging instance (used for compute_Pt).
-        lam:                 regularisation scalar lambda.
-
-    Returns:
-        T dicts mapping layer key -> (num_blocks, d) Fisher-scaled task vector.
-    """
-    keys = list(oft_params_per_task[0].keys())
-    result: List[Dict[str, Tensor]] = [{} for _ in oft_params_per_task]
-
-    for key in keys:
-        print(f"Processing key: {key}...")
-        # Transported Fisher matrices for every task at this layer
-        F_tildes: List[Tensor] = []
-        for t_params, t_fishers in zip(oft_params_per_task, fisher_per_task):
-            xi = t_params[key]
-            Pt = merging.compute_Pt(xi, block_size)                    # (num_blocks, d, d)
-            f = t_fishers[key].to(dtype=xi.dtype, device=xi.device)
-            F_tildes.append(Pt @ torch.diag_embed(f) @ Pt.transpose(-2, -1))
-
-        _, d = oft_params_per_task[0][key].shape
-        dtype, device = oft_params_per_task[0][key].dtype, oft_params_per_task[0][key].device
-        Id = torch.eye(d, dtype=dtype, device=device).unsqueeze(0)    # (1, d, d)
-
-        # Shared inverse denominator: (lam*I + sum_t alpha_t * F_tilde_t)^{-1}
-        denom_inv = torch.linalg.inv(
-            lam * Id + sum(a * F for a, F in zip(alphas, F_tildes))
-        )                                                              # (num_blocks, d, d)
-
-        for i, (t_params, F_tilde) in enumerate(zip(oft_params_per_task, F_tildes)):
-            xi = t_params[key]
-            numer = (lam * Id + F_tilde) @ xi.unsqueeze(-1)           # (num_blocks, d, 1)
-            result[i][key] = (denom_inv @ numer).squeeze(-1)          # (num_blocks, d)
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Interpolation + loss-curve plotting
-# ---------------------------------------------------------------------------
 
 def interpolate_oft_params(
     oft_params_t: Tensor,
@@ -289,7 +206,7 @@ if __name__ == "__main__":
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    MODE = "standard"  # "standard" or "fisher"
+    MODE = "fisher"  # "standard" or "fisher"
     LAM  = 1.0
     BASE: Optional[str] = None  # None -> pretrained (identity). Otherwise adapter tag/path.
     # BASE = "outputs/OrthoMerge_Llama-3.1-8B-fisher/merged_adapter/"
@@ -367,9 +284,9 @@ if __name__ == "__main__":
             all_fisher_dicts.append(fishers)
 
         T = len(TASKS)
-        alphas = [1.0 / T] * T
+        alphas = [0.5] * T
         all_task_vectors = fisher_task_vectors(
-            all_oft_named, all_fisher_dicts, alphas, block_size, merging, LAM,
+            all_oft_named, all_fisher_dicts, alphas, merging, LAM,
         )
         tag_to_task_vectors = {tag: tv for (tag, *_), tv in zip(TASKS, all_task_vectors)}
 

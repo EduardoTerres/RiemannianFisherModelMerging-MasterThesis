@@ -1,6 +1,6 @@
 # SocialIQA, CommonsenseQA, and Minerva Math500
 RELATIVE_PATH="../../.."
-MODEL_PATH="outputs/OrthoMerge_Llama-3.1-8B-fisher/merged_model"
+MODEL_PATH="outputs/Llama-3.1-8B-merged-fisher/merged_model/"
 
 set -e
 source "$(conda info --base)/etc/profile.d/conda.sh"

@@ -229,11 +229,27 @@ class OFTMerging(RiemannianMerging):
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
             return self._diagonal_fisher(weights_list, fisher_list, alphas)
 
+        if mode == "fisher":
+            if fisher_list is None:
+                raise ValueError(f"Fisher data is required for mode {mode!r}")
+            return self._fisher(weights_list, fisher_list, alphas)
+
+        raise ValueError(f"Unsupported merge mode: {mode!r}")
+
     def _plain(self, weights_list: List[Tensor], alphas: List[float]) -> Tensor:
-        """Weighted average of task vectors in so(n)."""
+        """Compute a weighted average of OFT task vectors in so(n).
+
+        Args:
+            weights_list: T tensors of shape (num_blocks, d), the skew-symmetric parameters per task.
+            alphas: T scalars, one mixing coefficient per task.
+
+        Returns:
+            Merged parameters of shape (num_blocks, d).
+        """
         stacked = torch.stack(weights_list, dim=0)  # (T, B, n, n)
         a = torch.tensor(alphas, dtype=stacked.dtype, device=stacked.device)
         return torch.einsum("t,t...->...", a, stacked)
+
 
     def _diagonal_fisher(
         self,
@@ -241,6 +257,16 @@ class OFTMerging(RiemannianMerging):
         fisher_list: List[Tensor],
         alphas: List[float],
     ) -> Tensor:
+        """Merge OFT adapters using diagonal Fisher information as per-parameter weights.
+
+        Args:
+            weights_list: T tensors of shape (num_blocks, d), skew-symmetric parameters per task.
+            fisher_list: T tensors of shape (num_blocks, d), diagonal Fisher estimates per task.
+            alphas: T scalars, one mixing coefficient per task.
+
+        Returns:
+            Merged parameters of shape (num_blocks, d).
+        """
         num_blocks, son_dimension = weights_list[0].shape
         dtype, device = weights_list[0].dtype, weights_list[0].device
         block_size = int((1 + (1 + 8 * son_dimension) ** 0.5) / 2)
@@ -264,13 +290,52 @@ class OFTMerging(RiemannianMerging):
 
         return merged_oft
 
+    def _fisher(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: List[Tensor],
+        alphas: List[float],
+    ) -> Tensor:
+        """Merge OFT adapters using full Fisher information matrices as per-parameter weights.
+
+        Args:
+            weights_list: T tensors of shape (num_blocks, d), skew-symmetric parameters per task.
+            fisher_list: T tensors of shape (num_blocks, d, d), full Fisher matrices per task.
+            alphas: T scalars, one mixing coefficient per task.
+
+        Returns:
+            Merged parameters of shape (num_blocks, d).
+        """
+        num_blocks, son_dimension = weights_list[0].shape
+        dtype, device = weights_list[0].dtype, weights_list[0].device
+        block_size = int((1 + (1 + 8 * son_dimension) ** 0.5) / 2)
+
+        Id = torch.eye(son_dimension, dtype=dtype, device=device).unsqueeze(0)
+
+        A = self.lam * Id.expand(num_blocks, -1, -1).clone()
+        b = torch.zeros(num_blocks, son_dimension, dtype=dtype, device=device)
+
+        for alpha_t, oft_params_t, fisher_t in zip(alphas, weights_list, fisher_list):
+            Pt = self.compute_Pt(oft_params=oft_params_t, block_size=block_size)  # (num_blocks, d, d)
+
+            print("fisher shape:", fisher_t.shape, "Pt shape:", Pt.shape)
+            exit(0)
+
+            F_tilde = Pt @ fisher_t @ Pt.transpose(-2, -1)
+
+            A += alpha_t * F_tilde
+            rhs = (self.lam * Id.squeeze(0) + F_tilde) @ oft_params_t.unsqueeze(-1)
+            b += alpha_t * rhs.squeeze(-1)
+
+        return torch.linalg.solve(A, b.unsqueeze(-1)).squeeze(-1)
+
     def merge(
         self,
         adapter_paths: List[str],
         fisher_paths: Optional[List[str]] = None,
         mode: MergeMode = "plain",
     ):
-        print(f"\nMerging {len(adapter_paths)} OFT adapters...")
+        print(f"\nMerging {len(adapter_paths)} OFT adapters with {mode} mode...")
 
         # Load weights
         all_weights = self.load_weights(adapter_paths)

@@ -26,8 +26,7 @@ def parse_args():
     parser.add_argument(
         "--merge_mode",
         type=str,
-        choices=["plain", "diagonal_fisher"],
-        default="plain",
+        choices=["plain", "diagonal_fisher", "fisher"],
         help="Merging strategy: 'plain' (weighted average), 'diagonal_fisher' (element-wise Fisher weighting), or 'linear_system' (full transported-Fisher solve).",
     )
     parser.add_argument("--lam", type=float, default=1.0,

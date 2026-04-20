@@ -25,6 +25,9 @@ from src.path import (
 from src.dataset.dataset_1 import DATASET_1
 from src.scripts.compute_fisher import build_loader
 
+LOSS_SUBDIR = "loss"
+IMG_SUBDIR = "imgs"
+
 _manifold = SOnManifold()
 _merging = OFTMerging()
 
@@ -212,14 +215,24 @@ def main(args: argparse.Namespace):
             device=device,
         )
 
-        save_path = f"{args.save_path}/{task_tag}.png"
+        # Save losss interpolation to plot
+        LOSS_DIR = Path(args.save_path) / LOSS_SUBDIR
+        IMG_DIR = Path(args.save_path) / IMG_SUBDIR
+        LOSS_DIR.mkdir(parents=True, exist_ok=True)
+        IMG_DIR.mkdir(parents=True, exist_ok=True)
+
+        loss_path = LOSS_DIR / f"{task_tag}.npy"
+        np.save(loss_path, np.array(interpolation_losses))
+        print(f"  Saved losses to {loss_path}")
+
+        img_path = IMG_DIR / f"{task_tag}.png"
         plot_interpolation_curve(
             alphas=interpolation_grid,
             losses=interpolation_losses,
             title=f"Loss interpolation: pretrained -> {task_tag}",
-            save_path=save_path,
+            save_path=str(img_path),
         )
-        print(f"  Saved plot to {save_path}")
+        print(f"  Saved plot to {img_path}")
 
 
 if __name__ == "__main__":
@@ -230,15 +243,18 @@ if __name__ == "__main__":
         help="Number of interpolation points between pretrained and adapter.",
     )
     parser.add_argument(
+        "--num-samples", type=int, default=512,
+        help="Number of dataset samples used to evaluate loss at each interpolation point.")
+    parser.add_argument(
+        "--batch-size", type=int, default=16,
+        help="DataLoader batch size for loss evaluation.")
+    parser.add_argument(
+        "--max-length", type=int, default=1024,
+        help="Maximum token length for input sequences.")
+    parser.add_argument(
         "--save-path", type=str, default=f"{ROOTDIR}/outputs/interpolation",
         help="Directory where interpolation plot PNGs are saved.",
     )
-    parser.add_argument("--num-samples", type=int, default=16,
-        help="Number of dataset samples used to evaluate loss at each interpolation point.")
-    parser.add_argument("--batch-size", type=int, default=16,
-        help="DataLoader batch size for loss evaluation.")
-    parser.add_argument("--max-length", type=int, default=256,
-        help="Maximum token length for input sequences.")
     args = parser.parse_args()
 
     main(args)

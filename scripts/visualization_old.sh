@@ -1,19 +1,18 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=merging
+#SBATCH --job-name=visualization
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=01:00:00
-#SBATCH --output=merging_%A.out
+#SBATCH --output=visualization_%A.out
 
-set -e 
+set -e
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate OrthoMerge
 
-python src/scripts/perform_merging.py \
-    --language_model_name "OrthoMerge/models/Llama-3.1-8B/" \
+python -m src.analysis.visualization \
     --adapter_paths \
         OrthoMerge/models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_magicoder/ \
         OrthoMerge/models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_numinamath/ \
@@ -26,9 +25,6 @@ python src/scripts/perform_merging.py \
         data/empirical_fishers/llama3-1_8b_finetune_commonsense.safetensors \
         data/empirical_fishers/llama3-1_8b_finetune_socialiqa.safetensors \
         data/empirical_fishers/llama3-1_8b_finetune_scienceqa.safetensors \
-    --output_dir outputs/Llama-3.1-8B-merged-fisher \
-    --merge_mode "diagonal_fisher" \
-    --save_merged_model \
-    --gpu 0
-
-bash scripts/eval.sh
+    --task_names magicoder numinamath commonsense socialiqa scienceqa \
+    --lam 1.0 \
+    --output outputs/task_vector_analysis.png

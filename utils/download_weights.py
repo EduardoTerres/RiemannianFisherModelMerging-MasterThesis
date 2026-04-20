@@ -23,9 +23,13 @@ ADAPTERS_URLS = [
     # "https://huggingface.co/SphereLab/Llama-3.1-8B_OFT_adapters",
 ]
 
-LLAMA_MODEL = "https://huggingface.co/meta-llama/Llama-3.1-8B"
+# LLAMA_MODEL = "https://huggingface.co/meta-llama/Llama-3.1-8B"
 # LLAMA_MODEL = "https://huggingface.co/VityaVitalich/Llama3.1-8b"
 
+QWEN_MODEL = "https://huggingface.co/Qwen/Qwen2.5-3B"
+
+BASE_MODEL = QWEN_MODEL
+SAVE_FOLDER = "models/Qwen-2.5-3B"
 
 os.makedirs("models", exist_ok=True)
 
@@ -42,6 +46,6 @@ for url in ADAPTERS_URLS:
 
     snapshot_download(repo_id=repo_id, local_dir=f"models/{repo_id.split('/')[-1]}")
 
-# Download Llama-3.1-8B model
-repo_id = LLAMA_MODEL.split("huggingface.co/")[1]
-snapshot_download(repo_id=repo_id, local_dir="models/Llama-3.1-8B")
+# Download base mdoel
+repo_id = BASE_MODEL.split("huggingface.co/")[1]
+snapshot_download(repo_id=repo_id, local_dir=SAVE_FOLDER)

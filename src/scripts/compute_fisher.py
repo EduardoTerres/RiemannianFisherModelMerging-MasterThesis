@@ -16,7 +16,11 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.path import ROOTDIR, OFT_LLAMA_MODELS_DIR
+from src.path import (
+    ROOTDIR,
+    LLAMA_ADAPTER_PATHS as ADAPTER_PATHS,
+    LLAMA_BASE_MODEL_PATH as BASE_MODEL_PATH,
+)
 from src.fisher import (
     compute_diagonal_fim,
     compute_empirical_fisher,
@@ -24,60 +28,7 @@ from src.fisher import (
     compute_kfac,
 )
 
-# Task definitions: (task_tag, dataset_path, dataset_name, split, doc_to_text)
-# doc_to_text(doc) -> str   — same format as the eval harness uses
-
-def _siqa_text(doc):
-    choices = [doc["answerA"], doc["answerB"], doc["answerC"]]
-    correct = choices[int(doc["label"]) - 1]
-    return f"Q: {doc['context']} {doc['question']}\nA: {correct}"
-
-def _csqa_text(doc):
-    letters = ["A", "B", "C", "D", "E"]
-    choices_text = "\n".join(
-        f"{l}. {t}" for l, t in zip(letters, doc["choices"]["text"])
-    )
-    return f"Question: {doc['question'].strip()}\n{choices_text}\nAnswer: {doc['answerKey']}"
-
-def _minerva_text(doc):
-    return f"Problem:\n{doc['problem']}\n\nSolution:\n{doc['solution']}"
-
-def _humaneval_text(doc):
-    return doc["prompt"] + doc["canonical_solution"]
-
-def _scienceqa_text(example):
-    """Format defined in eval_scienceqa.py in eval-harness."""
-    _INDEX_TO_LETTER = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E"}
-
-    question = example["question"]
-    options = example["choices"]  # List[str]
-
-    choice_lines = []
-    for i, opt in enumerate(options):
-        label = _INDEX_TO_LETTER.get(i, chr(ord("A") + i))
-        choice_lines.append(f"{label}. {opt}")
-    choices_str = "\n".join(choice_lines)
-
-    prompt = (
-        f"Question: {question}\n"
-        f"Choices:\n{choices_str}\n\n"
-        f"Answer:"
-    )
-    return prompt
-
-# Execution parameters
-
-BASE_MODEL_PATH = f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B"
-ADAPTERS_PATH   = f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters"
-
-EVAL_TASKS = [
-    # (tag, dataset_path, dataset_name, split, doc_to_text, adapter_path)
-    ("social_iqa",      "allenai/social_i_qa",    None,      "train", _siqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_socialiqa"),  # noqa: E501
-    ("commonsense_qa",  "tau/commonsense_qa",      None,      "train", _csqa_text,     f"{ADAPTERS_PATH}/llama3-1_8b_finetune_commonsense"),  # noqa: E501
-    ("numinamath", "HuggingFaceH4/MATH-500",  "default", "test",  _minerva_text,  f"{ADAPTERS_PATH}/llama3-1_8b_finetune_numinamath"),  # noqa: E501
-    ("humanevalplus",   "evalplus/humanevalplus",  None,      "test",  _humaneval_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_magicoder"),  # noqa: E501
-    ("science_qa",      "derek-thomas/ScienceQA",     None,    "train", _scienceqa_text, f"{ADAPTERS_PATH}/llama3-1_8b_finetune_scienceqa"),  # noqa: E501
-]
+from src.dataset.dataset_1 import DATASET_1
 
 
 def build_loader(
@@ -135,12 +86,12 @@ def compute_and_save_fim(
         dataset_path, dataset_name, split, doc_to_text,
         tokenizer, num_samples, batch_size, max_length,
     )
+    fisher = dict()
+
     # diag_fisher = compute_diagonal_fim(model, loader, device)
     # diag_fisher = compute_empirical_diagonal_fisher(model, loader, device)
     # fisher = compute_kfac(model, loader, device)
-    fisher = FIM(model=model, loader=loader, representation=PMatDiag)
-    print(fisher)
-    exit(0)
+    # fisher = FIM(model=model, loader=loader, representation=PMatDiag)
 
     save_file(fisher, save_path)
     print(f"[{task_tag}] Fisher saved to {save_path}")
@@ -152,9 +103,9 @@ def compute_all_fishers(
     max_length: int,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
-    total = len(EVAL_TASKS)
-    for i, (task_tag, dataset_path, dataset_name, split, doc_to_text, adapter_path) in tqdm(
-        enumerate(EVAL_TASKS, 1), total=total, desc="Computing FIMs"
+    total = len(DATASET_1)
+    for i, ((task_tag, dataset_path, dataset_name, split, doc_to_text), adapter_path) in tqdm(
+        enumerate(zip(DATASET_1, ADAPTER_PATHS), 1), total=total, desc="Computing FIMs"
     ):
         model_tag = os.path.basename(adapter_path.rstrip("/"))
         save_path = os.path.join(output_dir, f"{model_tag}.safetensors")
@@ -178,7 +129,6 @@ def compute_all_fishers(
             batch_size=batch_size,
             max_length=max_length,
         )
-        print("[OK] Done.")
 
     print(f"All fishers saved to {output_dir}/")
 

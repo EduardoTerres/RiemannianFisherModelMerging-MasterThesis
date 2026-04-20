@@ -7,7 +7,7 @@ import torch
 from torch import Tensor
 from safetensors.torch import load_file
 
-from src.utils.path import OFT_LLAMA_MODELS_DIR, ROOTDIR
+from src.path import OFT_LLAMA_MODELS_DIR, ROOTDIR
 
 from src.geometry import Manifold, SOnManifold
 

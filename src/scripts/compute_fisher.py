@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.utils.path import ROOTDIR, OFT_LLAMA_MODELS_DIR
+from src.path import ROOTDIR, OFT_LLAMA_MODELS_DIR
 from src.fisher import (
     compute_diagonal_fim,
     compute_empirical_fisher,

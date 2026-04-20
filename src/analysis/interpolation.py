@@ -148,7 +148,7 @@ def make_llm_loss_fn(
         with torch.no_grad():
             for name, vec in task_vectors.items():
                 if base_vectors is None:
-                    curr = s * vec
+                    curr = interpolate_oft_params(vec, s)
                 else:
                     assert merging_local is not None
                     assert manifold_local is not None

@@ -21,18 +21,6 @@ class Manifold(ABC):
         """Riemannian exponential map: Exp_base(tangent) -> point on manifold."""
 
     @abstractmethod
-    def parallel_transport(self, base: Tensor, tangent_vec: Tensor, target: Tensor) -> Tensor:
-        """Parallel transport tangent_vec from T_base(M) to T_target(M) along the geodesic."""
-
-    @abstractmethod
-    def transported_hessian(self, hessian_fn, base: Tensor, target_base: Tensor, omega_t: Tensor) -> callable:
-        """
-        Return transported Hessian operator on T_target_base(M).
-        hessian_fn: V -> Hess(loss at base)[V], acts on tangent vectors at base.
-        Returns callable V -> H_tilde_t(V) as in Eq. 4.19 / SO(n) Eq. 10.
-        """
-
-    @abstractmethod
     def dist_sq(self, x: Tensor, y: Tensor) -> Tensor:
         """Squared geodesic distance d^2(x, y)."""
 
@@ -128,51 +116,33 @@ class SOnManifold(Manifold):
         omega = base.transpose(-1, -2) @ tangent    # body-frame Omega
         return base @ self.cayley_exp(omega)
 
-    def task_vector(self, theta_llm: Tensor, theta_t: Tensor) -> Tensor:
+    def compute_Pt(self, skew_matrix: torch.Tensor, block_size: int) -> torch.Tensor:
         """
-        Omega_t = log(theta_LLM^T @ theta_t) in so(n)  [Eq. 4]
-        Returns the Lie-algebra task vector in the body frame.
-        """
-        return self.cayley_inverse_log(theta_llm.transpose(-1, -2) @ theta_t)
+        Compute the parallel transport matrix Pt.
 
-    def parallel_transport(self, base: Tensor, tangent_vec: Tensor, target: Tensor) -> Tensor:
-        """
-        Transport tangent_vec (Lie-algebra component V in so(n)) from theta_t back to theta_LLM.
-        Formula: P_{theta_t -> theta_LLM}(theta_t @ V) = exp(Omega_t/2) @ V @ exp(-Omega_t/2)
-        where Omega_t = log(theta_LLM^T @ theta_t)  [Eq. 6]
+        d = n * (n - 1) / 2 is the dimension of the manifold.
 
         Args:
-            base: theta_t
-            tangent_vec: V in so(n) at theta_t
-            target: theta_LLM
-        """
-        omega_t = self.task_vector(target, base)
-        half_exp     = self.cayley_exp( omega_t / 2)
-        half_exp_inv = self.cayley_exp(-omega_t / 2)
-        return half_exp @ tangent_vec @ half_exp_inv
-
-    def transported_hessian(self, hessian_fn, base: Tensor, target_base: Tensor, omega_t: Tensor):
-        """
-        Transported Hessian H_tilde_t as an endomorphism of so(n)  [Eq. 10]:
-          H_tilde_t(V) = exp(Omega_t/2) @ Hess(theta_t)[exp(-Omega_t/2) @ V @ exp(Omega_t/2)] @ exp(-Omega_t/2)
-
-        Args:
-            hessian_fn: callable V -> Hess(loss at theta_t)[V]
-            omega_t: Lie-algebra task vector log(theta_LLM^T @ theta_t) in so(n)
+            skew_matrix: (num_blocks, block_size, block_size) skew-symmetric matrices.
+            block_size: n, the size of each orthogonal block.
         Returns:
-            callable V -> H_tilde_t(V)
+            Pt: (num_blocks, d, d) parallel transport matrices.
         """
-        half_exp     = self.cayley_exp( omega_t / 2)
-        half_exp_inv = self.cayley_exp(-omega_t / 2)
+        idx = torch.triu_indices(block_size, block_size, offset=1, device=skew_matrix.device)
 
-        def transported(V: Tensor) -> Tensor:
-            # Pull V back: exp(-Omega/2) @ V @ exp(Omega/2)
-            V_back = half_exp_inv @ V @ half_exp
-            HV = hessian_fn(V_back)
-            # Push forward: exp(Omega/2) @ HV @ exp(-Omega/2)
-            return half_exp @ HV @ half_exp_inv
+        # R = theta_t^{1/2} = exp(skew_matrix/2)
+        R = torch.matrix_exp(skew_matrix / 2)  # (num_blocks, n, n)
 
-        return transported
+        i, j = idx[0], idx[1]  # both index sets are the same upper-triangle pairs
+
+        Rik = R[:, i][:, :, i]  # (num_blocks, d, d)
+        Rjl = R[:, j][:, :, j]
+        Ril = R[:, i][:, :, j]
+        Rjk = R[:, j][:, :, i]
+
+        # Pt[b, k, a] = M_{ka} = matrix of P_{θ_t → θ_LLM} in upper-triangle basis
+        Pt = Rik * Rjl - Ril * Rjk  # (num_blocks, d, d)
+        return Pt
 
     def dist_sq(self, x: Tensor, y: Tensor) -> Tensor:
         """

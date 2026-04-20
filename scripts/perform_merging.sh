@@ -20,7 +20,7 @@ python src/scripts/perform_merging.py \
         data/empirical_fishers/llama3-1_8b_finetune_socialiqa.safetensors \
         data/empirical_fishers/llama3-1_8b_finetune_scienceqa.safetensors \
     --output_dir outputs/Llama-3.1-8B-merged-fisher \
-    --merge_mode "plain" \
+    --merge_mode "diagonal_fisher" \
     --save_merged_model \
     --gpu 0
 

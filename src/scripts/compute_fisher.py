@@ -45,13 +45,12 @@ def _minerva_text(doc):
 def _humaneval_text(doc):
     return doc["prompt"] + doc["canonical_solution"]
 
-def _scienceqa_text(doc):
+def _scienceqa_text(example):
+    """Format defined in eval_scienceqa.py in eval-harness."""
     _INDEX_TO_LETTER = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E"}
 
-    question = doc["question"]
-    options = doc["choices"]
-    answer_index = int(doc["answer"])
-    answer_letter = _INDEX_TO_LETTER.get(answer_index, "A")
+    question = example["question"]
+    options = example["choices"]  # List[str]
 
     choice_lines = []
     for i, opt in enumerate(options):
@@ -59,11 +58,12 @@ def _scienceqa_text(doc):
         choice_lines.append(f"{label}. {opt}")
     choices_str = "\n".join(choice_lines)
 
-    return (
+    prompt = (
         f"Question: {question}\n"
         f"Choices:\n{choices_str}\n\n"
-        f"Answer: {answer_letter}"
+        f"Answer:"
     )
+    return prompt
 
 # Execution parameters
 

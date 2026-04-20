@@ -89,6 +89,7 @@ class OFTMerging(RiemannianMerging):
         device: str = "cpu",
     ):
         super().__init__(manifold=SOnManifold(), lam=lam, alphas=alphas)
+        self.manifold: SOnManifold
         self.device = device
 
     def oft_params_to_skew_matrix(
@@ -180,33 +181,6 @@ class OFTMerging(RiemannianMerging):
                         fisher[new_key] = fisher.pop(key)
         return all_fishers
 
-    def compute_Pt(self, oft_params: torch.Tensor, block_size: int) -> torch.Tensor:
-        """
-        Args:
-            oft_params: (num_blocks, d) OFT parameters, upper-triangle entries of skew-symmetric matrices.
-            block_size: n, the size of each orthogonal block.
-        Returns:
-            Pt: (num_blocks, d, d) parallel transport matrices.
-        """
-        idx = torch.triu_indices(block_size, block_size, offset=1, device=oft_params.device)
-
-        # Reconstruct skew-symmetric matrices
-        S = self.oft_params_to_skew_matrix(oft_params, block_size)  # (num_blocks, n, n)
-
-        # R = theta_t^{1/2} = exp(S/2)
-        R = torch.matrix_exp(S / 2)  # (num_blocks, n, n)
-
-        i, j = idx[0], idx[1]  # both index sets are the same upper-triangle pairs
-
-        Rik = R[:, i][:, :, i]  # (num_blocks, d, d)
-        Rjl = R[:, j][:, :, j]
-        Ril = R[:, i][:, :, j]
-        Rjk = R[:, j][:, :, i]
-
-        # Pt[b, k, a] = M_{ka} = matrix of P_{θ_t → θ_LLM} in upper-triangle basis
-        Pt = Rik * Rjl - Ril * Rjk  # (num_blocks, d, d)
-        return Pt
-
     def merge_formula(
         self,
         weights_list: List[Tensor],
@@ -246,7 +220,7 @@ class OFTMerging(RiemannianMerging):
         Returns:
             Merged parameters of shape (num_blocks, d).
         """
-        stacked = torch.stack(weights_list, dim=0)  # (T, B, n, n)
+        stacked = torch.stack(weights_list, dim=0)  # (T, num_blocks, n, n)
         a = torch.tensor(alphas, dtype=stacked.dtype, device=stacked.device)
         return torch.einsum("t,t...->...", a, stacked)
 
@@ -277,7 +251,8 @@ class OFTMerging(RiemannianMerging):
         b = torch.zeros(num_blocks, son_dimension, dtype=dtype, device=device)
 
         for alpha_t, oft_params_t, fisher_t in zip(alphas, weights_list, fisher_list):
-            Pt = self.compute_Pt(oft_params=oft_params_t, block_size=block_size)
+            skew_matrix = self.oft_params_to_skew_matrix(oft_params_t, block_size)  # (num_blocks, n, n)
+            Pt = self.manifold.compute_Pt(skew_matrix=skew_matrix, block_size=block_size)  # (num_blocks, d, d)
 
             # Full transported Fisher: (num_blocks, d, d)
             F_tilde = Pt @ torch.diag_embed(fisher_t) @ Pt.transpose(-2, -1)
@@ -316,7 +291,9 @@ class OFTMerging(RiemannianMerging):
         b = torch.zeros(num_blocks, son_dimension, dtype=dtype, device=device)
 
         for alpha_t, oft_params_t, fisher_t in zip(alphas, weights_list, fisher_list):
-            Pt = self.compute_Pt(oft_params=oft_params_t, block_size=block_size)  # (num_blocks, d, d)
+            # Reconstruct skew-symmetric matrices
+            skew_matrix = self.oft_params_to_skew_matrix(basis_vector, block_size)  # (num_blocks, n, n)
+            Pt = self.manifold.compute_Pt(skew_matrix, block_size)  # (num_blocks, d, d)
 
             print("fisher shape:", fisher_t.shape, "Pt shape:", Pt.shape)
             exit(0)

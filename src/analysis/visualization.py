@@ -27,7 +27,7 @@ def _layerwise_cosine(vi: Tensor, vj: Tensor) -> float:
     Frobenius cosine similarity between two so(n) task vectors at one layer.
 
     vi, vj: (num_blocks, d) — upper-triangle so(n) parameters per block.
-    For skew-symmetric matrices <A,B>_F = 2(a·b) and ||A||_F = sqrt(2)||a||,
+    For skew-symmetric matrices <A,B>_F = 2(a.b) and ||A||_F = sqrt(2)||a||,
     so the cosine cancels the factor-of-2 and reduces to cosine on the flat param vector.
     """
     fi, fj = vi.flatten(), vj.flatten()

@@ -15,7 +15,7 @@ LLAMA_ADAPTER_PATHS = [
     f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_numinamath",
     f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_magicoder",
     f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_scienceqa",
-    "data/output_models/Llama-3.1-8B-merged-fisher/merged_adapter",
+    "outputs/models/Llama-3.1-8B-merged-fisher/merged_adapter",
 ]
 
 # Qwen 2.5 3B and its OFT adapters fine-tuned on 5 tasks
@@ -28,5 +28,5 @@ QWEN_ADAPTER_PATHS = [
     f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_numinamath",
     f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_magicoder",
     f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_scienceqa",
-    "data/output_models/Qwen-2.5-3B-merged/merged_adapter",
+    "outputs/models/Qwen-2.5-3B-merged/merged_adapter",
 ]

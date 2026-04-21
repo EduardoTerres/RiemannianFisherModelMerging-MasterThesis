@@ -1,3 +1,4 @@
+import os
 import torch
 from datasets import load_dataset
 from transformers import (
@@ -6,6 +7,7 @@ from transformers import (
 )
 import re
 import argparse
+from tqdm import tqdm
 
 
 dataset_name = "derek-thomas/ScienceQA"
@@ -18,7 +20,7 @@ parser.add_argument('--merged_dir',
 
 args = parser.parse_args()
 
-merged_dir = args.merged_dir
+merged_dir = os.path.abspath(args.merged_dir)
 
 raw_test_dataset = load_dataset(dataset_name, split="test")
 
@@ -100,7 +102,8 @@ def evaluate_on_scienceqa(model, tokenizer, dataset, max_samples=None):
     correct = 0
     total = 0
 
-    for i, example in enumerate(dataset):
+    total_samples = min(max_samples, len(dataset)) if max_samples is not None else len(dataset)
+    for i, example in enumerate(tqdm(dataset, total=total_samples)):
         if max_samples is not None and i >= max_samples:
             break
 
@@ -115,7 +118,8 @@ def evaluate_on_scienceqa(model, tokenizer, dataset, max_samples=None):
                 **inputs,
                 max_new_tokens=16,
                 do_sample=False,
-                temperature=0.0
+                temperature=0.0,
+                pad_token_id=tokenizer.eos_token_id,
             )
 
         generated = tokenizer.decode(

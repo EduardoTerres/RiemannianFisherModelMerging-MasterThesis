@@ -26,7 +26,7 @@ conda activate OrthoMerge
 #         data/empirical_fishers/llama3-1_8b_finetune_commonsense.safetensors \
 #         data/empirical_fishers/llama3-1_8b_finetune_socialiqa.safetensors \
 #         data/empirical_fishers/llama3-1_8b_finetune_scienceqa.safetensors \
-#     --output_dir data/output_models/Llama-3.1-8B-merged-fisher \
+#     --output_dir outputs/models/Llama-3.1-8B-merged-fisher \
 #     --merge_mode "standard" \
 #     --save_merged_model \
 #     --gpu 0
@@ -43,7 +43,7 @@ python src/scripts/perform_merging.py \
         data/models/Qwen-2.5-3B_OFT_adapters/qwen2.5_3b_finetune_commonsense/ \
         data/models/Qwen-2.5-3B_OFT_adapters/qwen2.5_3b_finetune_socialiqa/ \
         data/models/Qwen-2.5-3B_OFT_adapters/qwen2.5_3b_finetune_scienceqa/ \
-    --output_dir data/output_models/Qwen-2.5-3B-merged \
+    --output_dir outputs/models/Qwen-2.5-3B-merged \
     --merge_mode "standard" \
     --save_merged_model \
     --gpu 0

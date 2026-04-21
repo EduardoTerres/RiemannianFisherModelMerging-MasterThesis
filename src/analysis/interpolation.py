@@ -24,8 +24,7 @@ from src.path import (
     QWEN_ADAPTER_PATHS,
     QWEN_BASE_MODEL_PATH,
 )
-from src.dataset.dataset_1 import DATASET_1
-from src.scripts.compute_fisher import build_loader
+from src.dataset.dataset_1 import DATASET_1_TRAIN as DATASET_1, build_loader
 
 LOSS_SUBDIR = "loss"
 IMG_SUBDIR = "imgs"
@@ -133,8 +132,7 @@ def logl_loss(
         for batch in loader:
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            labels = input_ids.clone()
-            labels[attention_mask == 0] = -100
+            labels = batch["labels"].to(device)
             loss = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels).loss
             total_loss += loss.item()
             n_batches += 1

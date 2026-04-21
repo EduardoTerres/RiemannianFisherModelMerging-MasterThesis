@@ -1,0 +1,5 @@
+Computing FIMs:   0%|          | 0/5 [00:00<?, ?it/s]
+[1/5] Task: social_iqa  adapter=llama3-1_8b_finetune_socialiqa  split=train
+         Save : data/diagonal_fishers/llama3.1/llama3-1_8b_finetune_socialiqa.safetensors
+
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s][A

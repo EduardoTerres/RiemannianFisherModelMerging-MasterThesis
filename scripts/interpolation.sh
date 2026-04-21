@@ -17,5 +17,5 @@ python src/analysis/interpolation.py \
     --num-samples 64 \
     --batch-size 64 \
     --max-length 256 \
-    --model-family qwen2.5 \
+    --model-family llama3.1 \
     --save-path outputs/interpolation

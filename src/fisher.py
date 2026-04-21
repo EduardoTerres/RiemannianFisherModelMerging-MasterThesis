@@ -1,12 +1,26 @@
-"""
-Fisher Information Matrix computations (math only).
-All I/O (model/dataset loading, file saving) lives in src/scripts/compute_fisher.py.
-"""
+"""Fisher Information Matrix computations and entrypoint to compute and save FIMs."""
+import argparse
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
+from safetensors.torch import save_file
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 
+from src.path import (
+    ROOTDIR,
+    LLAMA_ADAPTER_PATHS,
+    LLAMA_BASE_MODEL_PATH,
+    QWEN_BASE_MODEL_PATH,
+    QWEN_ADAPTER_PATHS,
+)
+from src.dataset.dataset_1 import DATASET_1_TRAIN as DATASET_1, build_loader
 
 def compute_diagonal_fim(
     model: torch.nn.Module,
@@ -15,34 +29,55 @@ def compute_diagonal_fim(
 ) -> dict:
     """
     Compute the diagonal empirical Fisher: E[grad log p]^2.
-
     Args:
         model:  an already-loaded, eval-mode CausalLM
         loader: DataLoader yielding dicts with 'input_ids' and 'attention_mask'
         device: torch device string
-
     Returns:
         dict mapping parameter name -> diagonal Fisher tensor (on CPU)
     """
-    diag_fisher = {
-        n: torch.zeros_like(p, device="cpu")
-        for n, p in model.named_parameters() if p.requires_grad
-    }
+    fisher = {}
+    for n, p in model.named_parameters():
+        if p.requires_grad:
+            fisher[n] = torch.zeros_like(p, device=device)
 
-    for batch in tqdm(loader):
+    model.eval()
+    count = 0
+
+    for batch in tqdm(loader, desc="Computing Diagonal FIM"):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
 
+        # Standard causal LM: predict next token
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        shift_logits = outputs.logits[:, :-1, :]
+        shift_labels = input_ids[:, 1:]
+        shift_mask = attention_mask[:, 1:]
+
+        log_probs = F.log_softmax(shift_logits, dim=-1)
+        # Per-token NLL, masked and averaged
+        token_nll = F.nll_loss(
+            log_probs.view(-1, log_probs.size(-1)),
+            shift_labels.reshape(-1),
+            reduction="none",
+        ).view(shift_labels.shape)
+
+        loss = (token_nll * shift_mask).sum() / shift_mask.sum()
+
         model.zero_grad()
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
-        outputs.loss.backward()
+        loss.backward()
 
         for n, p in model.named_parameters():
             if p.requires_grad and p.grad is not None:
-                diag_fisher[n] += p.grad.detach().cpu() ** 2
+                fisher[n] += p.grad.data ** 2
 
-    n_batches = len(loader)
-    return {n: v / n_batches for n, v in diag_fisher.items()}
+        count += 1
+
+    for n in fisher:
+        fisher[n] /= count
+        fisher[n] = fisher[n].cpu()
+
+    return fisher
 
 
 def compute_empirical_diagonal_fisher(model, loader, device):
@@ -293,3 +328,118 @@ def compute_kfac(model, loader, device):
         raise ValueError("No sequences processed.")
 
     return {n: (A[n] / n_samples, G[n] / n_samples) for n in A}
+
+
+def compute_and_save_fim(
+    base_model_path: str,
+    adapter_path: str,
+    task_tag: str,
+    dataset_path: str,
+    dataset_name: str | None,
+    split: str,
+    doc_to_text,
+    save_path: str,
+    device: str,
+    num_samples: int = 512,
+    batch_size: int = 4,
+    max_length: int = 512,
+) -> None:
+    tokenizer = AutoTokenizer.from_pretrained(base_model_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model_path, torch_dtype=torch.float32, device_map=None
+    )
+    model = PeftModel.from_pretrained(base, adapter_path, is_trainable=True)
+    model.enable_adapter_layers()
+    model.to(device)
+    model.eval()
+
+    loader = build_loader(
+        dataset_path, dataset_name, split, doc_to_text,
+        tokenizer, num_samples, batch_size, max_length,
+    )
+    fisher = dict()
+
+    fisher = compute_diagonal_fim(model, loader, device)
+    # fisher = compute_empirical_diagonal_fisher(model, loader, device)
+    # fisher = compute_kfac(model, loader, device)
+
+    save_file(fisher, save_path)
+    print(f"[{task_tag}] Fisher saved to {save_path}")
+
+
+def compute_all_fishers(
+    base_model_path: str,
+    adapter_paths: list,
+    output_dir: str,
+    device: str,
+    num_samples: int,
+    batch_size: int,
+    max_length: int,
+) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+    total = len(DATASET_1)
+    for i, ((task_tag, dataset_path, dataset_name, split, doc_to_text), adapter_path) in tqdm(
+        enumerate(zip(DATASET_1, adapter_paths), 1), total=total, desc="Computing FIMs"
+    ):
+        model_tag = os.path.basename(adapter_path.rstrip("/"))
+        save_path = os.path.join(output_dir, f"{model_tag}.safetensors")
+        print(f"\n[{i}/{total}] Task: {task_tag}  adapter={model_tag}  split={split}")
+        print(f"         Save : {save_path}")
+
+        if os.path.exists(save_path):
+            print("[WARNING] Already exists, skipping.")
+            continue
+
+        compute_and_save_fim(
+            base_model_path=base_model_path,
+            adapter_path=adapter_path,
+            task_tag=task_tag,
+            dataset_path=dataset_path,
+            dataset_name=dataset_name,
+            split=split,
+            doc_to_text=doc_to_text,
+            save_path=save_path,
+            device=device,
+            num_samples=num_samples,
+            batch_size=batch_size,
+            max_length=max_length,
+        )
+
+    print(f"All fishers saved to {output_dir}/")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model-family", type=str, default="llama3.1", choices=["llama3.1", "qwen2.5"],
+        dest="model_family", help="Model family to use: 'llama3.1' or 'qwen2.5'.",
+    )
+    parser.add_argument("--output-dir", type=str, default=f"{ROOTDIR}/data/fishers")
+    parser.add_argument("--num-samples", type=int, default=512)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--max-length", type=int, default=256)
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if args.model_family == "llama3.1":
+        base_model_path = LLAMA_BASE_MODEL_PATH
+        adapter_paths = LLAMA_ADAPTER_PATHS
+    elif args.model_family == "qwen2.5":
+        base_model_path = QWEN_BASE_MODEL_PATH
+        adapter_paths = QWEN_ADAPTER_PATHS
+    else:
+        raise ValueError(f"Unsupported model family: {args.model_family}")
+
+    compute_all_fishers(
+        base_model_path=base_model_path,
+        adapter_paths=adapter_paths,
+        output_dir=args.output_dir,
+        device=device,
+        num_samples=args.num_samples,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+    )

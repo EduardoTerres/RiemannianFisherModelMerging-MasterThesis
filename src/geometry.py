@@ -113,8 +113,8 @@ class SOnManifold(Manifold):
         and eigendecomposition; preferred when accuracy matters.
     """
 
-    def __init__(self, use_scipy_logm: bool = False):
-        self.use_scipy_logm = use_scipy_logm
+    def __init__(self):
+        super().__init__()
 
     def cayley_exp(self, A: Tensor) -> Tensor:
         """

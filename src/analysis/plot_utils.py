@@ -166,3 +166,18 @@ def plot_layer_cosine_agreement(
         cmap="Blues", colorbar_label="Avg pairwise cosine similarity",
         save_path=save_path, ax=ax,
     )
+
+
+def plot_layer_geodesic_agreement(
+    values: np.ndarray,
+    labels: List[str],
+    title: str = "Per-layer avg pairwise geodesic distance (SO(n))",
+    save_path: Optional[str] = None,
+    ax: Optional[plt.Axes] = None,
+) -> None:
+    """Strip plot where each cell = avg pairwise geodesic distance across model pairs."""
+    _plot_layer_strip(
+        values, labels, title,
+        cmap="Oranges", colorbar_label="Avg pairwise geodesic distance",
+        save_path=save_path, ax=ax,
+    )

@@ -16,18 +16,21 @@ from tqdm import tqdm
 from src.analysis.plot_utils import (
     plot_cosine_similarity_matrix,
     plot_layer_cosine_agreement,
+    plot_layer_geodesic_agreement,
     plot_layer_norm_variance,
     plot_norm_distributions,
 )
+from src.geometry import SOnManifold
 from src.merging import OFTMerging
 from src.path import (
     ROOTDIR,
-    LLAMA_ADAPTER_PATHS as ADAPTER_PATHS,
+    LLAMA_ADAPTER_PATHS,
+    QWEN_ADAPTER_PATHS,
 )
 
-IMG_SUBDIR = "imgs"
-
-_merging = OFTMerging()
+_device = "cuda" if torch.cuda.is_available() else "cpu"
+_manifold = SOnManifold()
+_merging = OFTMerging(device=_device)
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,14 @@ def _layerwise_cosine(vi: torch.Tensor, vj: torch.Tensor) -> float:
     return (fi @ fj / (fi.norm().clamp(min=1e-8) * fj.norm().clamp(min=1e-8))).item()
 
 
+def _geodesic_distance(Qi: torch.Tensor, Qj: torch.Tensor) -> float:
+    """d(Q, R) = sqrt(dist_sq(Q, R)), averaged over blocks."""
+    if Qi.dim() == 2:
+        Qi, Qj = Qi.unsqueeze(0), Qj.unsqueeze(0)
+    dist_sq = _manifold.dist_sq(Qi, Qj)  # (num_blocks,)
+    return dist_sq.clamp(min=0).sqrt().mean().item()
+
+
 # ---------------------------------------------------------------------------
 
 def compute_cosine_similarity_matrix(
@@ -75,6 +86,27 @@ def compute_cosine_similarity_matrix(
             sims = [_layerwise_cosine(task_vectors[i][k], task_vectors[j][k]) for k in keys]
             sim_matrix[i, j] = float(np.mean(sims))
     return sim_matrix
+
+
+def compute_geodesic_distance_matrix(
+    task_vectors: List[Dict[str, torch.Tensor]],
+) -> np.ndarray:
+    """Build a (T, T) matrix of avg layerwise geodesic distances on SO(n).
+
+    Args:
+        task_vectors: T dicts, each mapping layer key -> (num_blocks, d, d).
+
+    Returns:
+        (T, T) float64 array.
+    """
+    T = len(task_vectors)
+    keys = _oft_keys(task_vectors)
+    dist_matrix = np.zeros((T, T))
+    for i in tqdm(range(T), desc="Geodesic distance"):
+        for j in range(T):
+            dists = [_geodesic_distance(task_vectors[i][k], task_vectors[j][k]) for k in keys]
+            dist_matrix[i, j] = float(np.mean(dists))
+    return dist_matrix
 
 
 def compute_layer_norms(
@@ -130,12 +162,40 @@ def compute_layer_cosine_agreement(
     return np.array(values), _layer_labels(keys)
 
 
+def compute_layer_geodesic_agreement(
+    task_vectors: List[Dict[str, torch.Tensor]],
+) -> tuple[np.ndarray, List[str]]:
+    """Avg pairwise geodesic distance on SO(n) across tasks, per layer.
+
+    Returns:
+        values: (L,) array of mean geodesic distance scalars.
+        labels: layer index strings for axis tick labels.
+    """
+    keys = _oft_keys(task_vectors)
+    T = len(task_vectors)
+    values = []
+    for k in tqdm(keys, desc="Geodesic agreement"):
+        dists = [
+            _geodesic_distance(task_vectors[i][k], task_vectors[j][k])
+            for i in range(T) for j in range(i + 1, T)
+        ]
+        values.append(float(np.mean(dists)) if dists else 0.0)
+    return np.array(values), _layer_labels(keys)
+
+
 def main(args: argparse.Namespace):
-    task_names = args.task_names or [Path(p).name for p in ADAPTER_PATHS]
+    if args.model_family == "llama3.1":
+        adapter_paths = LLAMA_ADAPTER_PATHS
+    elif args.model_family == "qwen2.5":
+        adapter_paths = QWEN_ADAPTER_PATHS
+    else:
+        raise ValueError(f"Unsupported model family: {args.model_family}")
 
-    task_vectors = _merging.load_weights(ADAPTER_PATHS)
+    task_names = args.task_names or [Path(p).name for p in adapter_paths]
 
-    IMG_DIR = Path(args.save_path) / IMG_SUBDIR
+    task_vectors = _merging.load_weights(adapter_paths)
+
+    IMG_DIR = Path(args.save_path) / args.model_family
     IMG_DIR.mkdir(parents=True, exist_ok=True)
 
     # --- Cosine similarity matrix ---
@@ -147,6 +207,16 @@ def main(args: argparse.Namespace):
         save_path=str(IMG_DIR / "cosine_similarity.png"),
     )
     print(f"Saved -> {IMG_DIR / 'cosine_similarity.png'}")
+
+    # --- Geodesic distance matrix ---
+    dist_matrix = compute_geodesic_distance_matrix(task_vectors)
+    plot_cosine_similarity_matrix(
+        sim_matrix=dist_matrix,
+        task_names=task_names,
+        title="Avg. geodesic distance (SO(n))",
+        save_path=str(IMG_DIR / "geodesic_distance.png"),
+    )
+    print(f"Saved -> {IMG_DIR / 'geodesic_distance.png'}")
 
     # --- Norm distributions ---
     norms_per_task = compute_layer_norms(task_vectors)
@@ -175,6 +245,15 @@ def main(args: argparse.Namespace):
     )
     print(f"Saved -> {IMG_DIR / 'cosine_agreement.png'}")
 
+    # --- Per-layer geodesic agreement strip ---
+    geodesic_values, labels = compute_layer_geodesic_agreement(task_vectors)
+    plot_layer_geodesic_agreement(
+        values=geodesic_values,
+        labels=labels,
+        save_path=str(IMG_DIR / "geodesic_agreement.png"),
+    )
+    print(f"Saved -> {IMG_DIR / 'geodesic_agreement.png'}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize OFT task-vector geometry.")
@@ -185,6 +264,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save-path", type=str, default=f"{ROOTDIR}/outputs/visualization", dest="save_path",
         help="Directory where output PNGs are saved.",
+    )
+    parser.add_argument(
+        "--model-family", type=str, default="llama3.1", choices=["llama3.1", "qwen2.5"],
+        dest="model_family", help="Model family to use: 'llama3.1' or 'qwen2.5'.",
     )
     args = parser.parse_args()
 

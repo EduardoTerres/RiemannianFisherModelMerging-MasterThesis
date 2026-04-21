@@ -19,8 +19,10 @@ from src.geometry import SOnManifold
 from src.merging import OFTMerging
 from src.path import (
     ROOTDIR,
-    LLAMA_ADAPTER_PATHS as ADAPTER_PATHS,
-    LLAMA_BASE_MODEL_PATH as BASE_MODEL_PATH,
+    LLAMA_ADAPTER_PATHS,
+    LLAMA_BASE_MODEL_PATH,
+    QWEN_ADAPTER_PATHS,
+    QWEN_BASE_MODEL_PATH,
 )
 from src.dataset.dataset_1 import DATASET_1
 from src.scripts.compute_fisher import build_loader
@@ -28,8 +30,9 @@ from src.scripts.compute_fisher import build_loader
 LOSS_SUBDIR = "loss"
 IMG_SUBDIR = "imgs"
 
+_device = "cuda" if torch.cuda.is_available() else "cpu"
 _manifold = SOnManifold()
-_merging = OFTMerging()
+_merging = OFTMerging(device=_device)
 
 
 def interpolate(
@@ -171,21 +174,28 @@ def interpolate_model(
 
 
 def main(args: argparse.Namespace):
+    if args.model_family == "llama3.1":
+        base_model_path = LLAMA_BASE_MODEL_PATH
+        adapter_paths = LLAMA_ADAPTER_PATHS
+    else:
+        base_model_path = QWEN_BASE_MODEL_PATH
+        adapter_paths = QWEN_ADAPTER_PATHS
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     interpolation_grid = np.linspace(0, 1, args.num_points).tolist()
 
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
+    tokenizer = AutoTokenizer.from_pretrained(base_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     base = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL_PATH, torch_dtype=torch.float32, device_map=None
+        base_model_path, torch_dtype=torch.float32, device_map=None
     )
 
     start_model = None  # pretrained = Identity on all SO(n) blocks
 
     for (task_tag, dataset_path, dataset_name, split, doc_to_text), adapter_path in tqdm(
-        zip(DATASET_1, ADAPTER_PATHS), desc="Interpolating..."
+        zip(DATASET_1, adapter_paths), desc="Interpolating..."
     ):
         print(f"\n[{task_tag}] Loading adapter: {adapter_path}")
 
@@ -216,8 +226,8 @@ def main(args: argparse.Namespace):
         )
 
         # Save losss interpolation to plot
-        LOSS_DIR = Path(args.save_path) / LOSS_SUBDIR
-        IMG_DIR = Path(args.save_path) / IMG_SUBDIR
+        LOSS_DIR = Path(args.save_path) / args.model_family / LOSS_SUBDIR
+        IMG_DIR = Path(args.save_path) / args.model_family / IMG_SUBDIR
         LOSS_DIR.mkdir(parents=True, exist_ok=True)
         IMG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -254,6 +264,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save-path", type=str, default=f"{ROOTDIR}/outputs/interpolation",
         help="Directory where interpolation plot PNGs are saved.",
+    )
+    parser.add_argument(
+        "--model-family", type=str, default="llama3.1", choices=["llama3.1", "qwen2.5"],
+        help="Model family to use: 'llama3.1' or 'qwen2.5'.",
     )
     args = parser.parse_args()
 

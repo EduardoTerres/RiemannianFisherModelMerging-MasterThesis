@@ -13,5 +13,6 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate OrthoMerge
 
 python -m src.analysis.visualization \
-    --task-names magicoder numinamath commonsense socialiqa scienceqa \
+    --task-names magicoder numinamath commonsense socialiqa scienceqa merged \
+    --model-family qwen2.5 \
     --save-path outputs/visualization

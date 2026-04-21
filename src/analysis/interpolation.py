@@ -1,344 +1,274 @@
-"""
-Loss-curve interpolation between pretrained weights (R=I) and finetuned OFT models.
-
-Two task-vector flavours:
-  - standard_task_vectors : xi_t = log(theta_t)  (plain Lie-algebra vectors)
-  - fisher_task_vectors   : transported Fisher-weighted vectors F_tilde_t * xi_t
-"""
-
 from __future__ import annotations
-
-import os
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from typing import Callable, Dict, List, Optional
+import argparse
 
+import numpy as np
 import torch
-import matplotlib.pyplot as plt
-from torch import Tensor
+from typing import Dict, List, Optional
+from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 from tqdm import tqdm
 
-from src.utils.path import ROOTDIR, OFT_LLAMA_MODELS_DIR
-from src.scripts.compute_fisher import (
-    build_loader,
-    _siqa_text, _csqa_text, _minerva_text, _humaneval_text, _scienceqa_text,
-)
-from src.merging import OFTMerging
+from src.analysis.plot_utils import plot_interpolation_curve
 from src.geometry import SOnManifold
+from src.merging import OFTMerging
+from src.path import (
+    ROOTDIR,
+    LLAMA_ADAPTER_PATHS,
+    LLAMA_BASE_MODEL_PATH,
+    QWEN_ADAPTER_PATHS,
+    QWEN_BASE_MODEL_PATH,
+)
+from src.dataset.dataset_1 import DATASET_1
+from src.scripts.compute_fisher import build_loader
 
-from src.analysis.utils import fisher_task_vectors, _is_oft_param_name
+LOSS_SUBDIR = "loss"
+IMG_SUBDIR = "imgs"
+
+_device = "cuda" if torch.cuda.is_available() else "cpu"
+_manifold = SOnManifold()
+_merging = OFTMerging(device=_device)
 
 
-def interpolate_oft_params(
-    oft_params_t: Tensor,
-    s: float,
-) -> Tensor:
-    """
-    Geodesic interpolation theta(s) = exp(s * log(theta_t)) for s in [0, 1].
-
-    Since OFT params store the upper-triangle of log(theta_t), scaling by s gives
-    the interpolated skew-symmetric matrix, returned as upper-triangle params.
+def interpolate(
+    start_model: Optional[Dict[str, torch.Tensor]],
+    end_model: Dict[str, torch.Tensor],
+    alpha: float,
+) -> Dict[str, torch.Tensor]:
+    """Geodesic interpolation on SO(n) between two OFT adapter weight dicts.
 
     Args:
-        oft_params_t: (num_blocks, d) OFT parameters of the finetuned model.
-        s: interpolation coefficient (0 = pretrained I, 1 = finetuned theta_t).
+        start_model: OFT weights {key: (num_blocks, d)}. None = pretrained (Identity on all blocks).
+        end_model:   OFT weights {key: (num_blocks, d)} for the fine-tuned target.
+        alpha:       Interpolation position in [0, 1]. 0 = start, 1 = end.
 
     Returns:
-        (num_blocks, d) OFT parameters of theta(s).
+        Dict {key: (num_blocks, d)} with geodesically interpolated OFT parameters.
     """
-    return s * oft_params_t
+    interpolated: Dict[str, torch.Tensor] = {}
+
+    for key, end_params in end_model.items():
+        is_oft = "oft_r" in key or ("oft_" in key.lower() and "classifier" not in key.lower())
+        if not is_oft:
+            interpolated[key] = end_params
+            continue
+
+        num_blocks, d = end_params.shape
+        block_size = int((1 + (1 + 8 * d) ** 0.5) / 2)
+
+        end_skew = _merging.oft_params_to_skew_matrix(end_params, block_size)
+        R_end = torch.matrix_exp(end_skew)
+
+        if start_model is None:
+            R_start = torch.eye(block_size, dtype=end_params.dtype, device=end_params.device)
+            R_start = R_start.unsqueeze(0).expand(num_blocks, -1, -1)
+        else:
+            start_params = start_model[key]
+            start_skew = _merging.oft_params_to_skew_matrix(start_params, block_size)
+            R_start = torch.matrix_exp(start_skew)
+
+        tangent = _manifold.exact_log(R_start, R_end)
+        R_interp = _manifold.exact_exp(R_start, alpha * tangent)
+        omega_interp = _manifold.exact_log(R_start, R_interp)
+        interpolated[key] = _merging.skew_matrix_to_oft_params(omega_interp)
+
+    return interpolated
 
 
-def interpolate_oft_params_between(
-    oft_params_base: Tensor,
-    oft_params_target: Tensor,
-    s: float,
-    merging: OFTMerging,
-    manifold: SOnManifold,
-) -> Tensor:
-    """
-    Left-trivialized geodesic interpolation between two non-identity OFT points.
+def naive_interpolate(
+    end_model: Dict[str, torch.Tensor],
+    alpha: float,
+) -> Dict[str, torch.Tensor]:
+    def _is_oft(k: str) -> bool:
+        return "oft_r" in k or "oft_" in k.lower()
 
-    theta(s) = theta_base * Exp(s * Log_{theta_base}(theta_target)),  s in [0, 1].
-    """
-    d = oft_params_base.shape[-1]
-    block_size = int((1 + (1 + 8 * d) ** 0.5) / 2)
+    return {k: alpha * v if _is_oft(k) else v for k, v in end_model.items()}
 
-    S_base = merging.oft_params_to_skew_matrix(oft_params_base, block_size)
-    S_target = merging.oft_params_to_skew_matrix(oft_params_target, block_size)
 
-    theta_base = manifold.cayley_exp(S_base)
-    theta_target = manifold.cayley_exp(S_target)
-
-    tangent_at_base = manifold.log(theta_base, theta_target)
-    theta_s = manifold.exp(theta_base, s * tangent_at_base)
-    S_s = manifold.cayley_inverse_log(theta_s)
-
-    return merging.skew_matrix_to_oft_params(S_s)
-
-def plot_loss_curves(
-    loss_fn: Callable[[float], float],
-    label: str,
-    num_points: int = 11,
-    save_path: Optional[str] = None,
-) -> None:
-    """
-    Plot loss curve along the geodesic from I (pretrained, s=0) to finetuned theta_t (s=1).
+def logl_loss(
+    model: torch.nn.Module,
+    weights: Dict[str, torch.Tensor],
+    loader,
+    device: str,
+) -> float:
+    """Apply interpolated OFT weights to a PeftModel and return average cross-entropy loss.
 
     Args:
-        loss_fn: callable (s: float) -> scalar loss. Must inject s-scaled task vectors
-                 into the model internally.
-        label: curve label shown in the plot.
-        num_points: number of uniformly-spaced interpolation steps.
-        save_path: if provided, saves the figure; otherwise shows it.
+        model:   PeftModel with OFT adapter layers already loaded.
+        weights: OFT weight dict {param_name: (num_blocks, d)}.
+        loader:  DataLoader yielding batches with 'input_ids' and 'attention_mask'.
+        device:  Torch device string.
+
+    Returns:
+        Scalar average cross-entropy loss over the loader.
     """
-    alphas = torch.linspace(0.0, 1.0, num_points).tolist()
-    losses = [
-        loss_fn(s)
-        for s in tqdm(alphas, desc=f"Interpolating {label}", leave=False)
-    ]
+    param_dict = dict(model.named_parameters())
+    n_matched = 0
+    for key, val in weights.items():
+        # named_parameters inserts the adapter name: oft_R.weight -> oft_R.default.weight
+        peft_key = key.replace(".weight", ".default.weight")
+        target = param_dict.get(peft_key)
+        if target is None:
+            target = param_dict.get(key)
+        if target is not None:
+            target.data.copy_(val.to(device))
+            n_matched += 1
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(alphas, losses, marker="o", markersize=3, label=label)
-    ax.axvline(0.0, color="gray", linewidth=0.8, linestyle=":")
-    ax.axvline(1.0, color="gray", linewidth=0.8, linestyle=":")
-    ax.set_xlabel("s  (0 = pretrained I,  1 = finetuned theta_t)")
-    ax.set_ylabel("Loss")
-    ax.set_title(f"Loss curve -- {label}")
-    ax.legend(fontsize=8)
-    fig.tight_layout()
+    if n_matched == 0:
+        raise RuntimeError(
+            f"No weight keys matched. "
+            f"\n  weights sample:     {list(weights.keys())[:3]}"
+            f"\n  param_dict sample:  {list(param_dict.keys())[:3]}"
+        )
 
-    if save_path:
-        fig.savefig(save_path, dpi=150)
-        print(f"Saved -> {save_path}")
-    else:
-        plt.show()
-    plt.close(fig)
+    model.eval()
+    total_loss = 0.0
+    n_batches = 0
+    with torch.no_grad():
+        for batch in loader:
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = input_ids.clone()
+            labels[attention_mask == 0] = -100
+            loss = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels).loss
+            total_loss += loss.item()
+            n_batches += 1
+
+    return total_loss / max(n_batches, 1)
 
 
-def make_llm_loss_fn(
-    model,
+def interpolate_model(
+    start_model: Optional[Dict[str, torch.Tensor]],
+    end_model: Dict[str, torch.Tensor],
+    interpolation_grid: List[float],
+    model: torch.nn.Module,
     loader,
-    task_vectors: Dict[str, Tensor],
     device: str,
-    base_vectors: Optional[Dict[str, Tensor]] = None,
-) -> Callable[[float], float]:
+) -> List[float]:
+    """Sweep an interpolation grid between two models and collect losses at each point.
+
+    Args:
+        start_model:        OFT weights {key: (num_blocks, d)}, or None for pretrained.
+        end_model:          OFT weights {key: (num_blocks, d)} for the fine-tuned target.
+        interpolation_grid: Sequence of alpha values in [0, 1].
+        model:              PeftModel used for loss evaluation.
+        loader:             DataLoader for the evaluation dataset.
+        device:             Torch device string.
+
+    Returns:
+        List of scalar losses, one per alpha in interpolation_grid.
     """
-    Return `loss_fn(s: float) -> float`.
+    interpolation_losses = []
+    with tqdm(interpolation_grid, desc="Interpolating...") as pbar:
+        for alpha in pbar:
+            interpolated_weights = interpolate(start_model, end_model, alpha=alpha)
+            loss = logl_loss(model, interpolated_weights, loader, device)
+            pbar.set_postfix(alpha=f"{alpha:.2f}", loss=f"{loss:.4f}")
+            interpolation_losses.append(loss)
+    return interpolation_losses
 
-    For each `s`:
-      - if `base_vectors is None`: inject `s * task_vectors` (pretrained -> task),
-      - else: inject left-trivialized geodesic interpolation (base -> task).
-    """
-    # TODO: remove the defaults
-    model_params = {name.replace(".default", ""): p for name, p in model.named_parameters() if name.replace(".default", "") in task_vectors}
 
-    merging_local: Optional[OFTMerging] = None
-    manifold_local: Optional[SOnManifold] = None
-    if base_vectors is not None:
-        merging_local = OFTMerging(device=device)
-        manifold_local = SOnManifold()
-
-    def loss_fn(s: float) -> float:
-        with torch.no_grad():
-            for name, vec in task_vectors.items():
-                if base_vectors is None:
-                    curr = interpolate_oft_params(vec, s)
-                else:
-                    assert merging_local is not None
-                    assert manifold_local is not None
-                    curr = interpolate_oft_params_between(
-                        oft_params_base=base_vectors[name],
-                        oft_params_target=vec,
-                        s=s,
-                        merging=merging_local,
-                        manifold=manifold_local,
-                    )
-                model_params[name].data.copy_(curr.to(device))
-
-            total, n = 0.0, 0
-            for batch in loader:
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch.get("attention_mask")
-                if attention_mask is not None:
-                    attention_mask = attention_mask.to(device)
-                    labels = input_ids.masked_fill(attention_mask == 0, -100)
-                else:
-                    labels = input_ids
-
-                out = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                )
-                total += out.loss.item()
-                n += 1
-        return total / max(n, 1)
-
-    return loss_fn
-
-# MAIN
-if __name__ == "__main__":
-    BASE_MODEL    = f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B"
-    ADAPTERS_DIR  = f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters"
-    FISHER_DIR    = f"{ROOTDIR}/data/empirical_diagonal_fishers"
-    OUTPUT_DIR    = f"{ROOTDIR}/outputs/loss_curves"
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    # Each entry: (tag, dataset_path, dataset_name, split, doc_to_text)
-    # Datasets mirror those used in compute_fisher.py / eval harness.
-    TASKS = [
-        ("socialiqa",   "allenai/social_i_qa",       None,      "validation", _siqa_text),
-        ("commonsense", "tau/commonsense_qa",          None,      "validation", _csqa_text),
-        ("numinamath",  "HuggingFaceH4/MATH-500",     "default", "test",  _minerva_text),
-        ("magicoder",   "evalplus/humanevalplus",      None,      "test",  _humaneval_text),
-        ("scienceqa",   "derek-thomas/ScienceQA",      None,      "test", _scienceqa_text),
-    ]
+def main(args: argparse.Namespace):
+    if args.model_family == "llama3.1":
+        base_model_path = LLAMA_BASE_MODEL_PATH
+        adapter_paths = LLAMA_ADAPTER_PATHS
+    else:
+        base_model_path = QWEN_BASE_MODEL_PATH
+        adapter_paths = QWEN_ADAPTER_PATHS
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    interpolation_grid = np.linspace(0, 1, args.num_points).tolist()
 
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    tokenizer = AutoTokenizer.from_pretrained(base_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    MODE = "fisher"  # "standard" or "fisher"
-    LAM  = 1.0
-    BASE: Optional[str] = None  # None -> pretrained (identity). Otherwise adapter tag/path.
-    # BASE = "outputs/OrthoMerge_Llama-3.1-8B-fisher/merged_adapter/"
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model_path, torch_dtype=torch.float32, device_map=None
+    )
 
-    def resolve_adapter_path(base: str) -> str:
-        if "/" in base:
-            return base
-        return f"{ADAPTERS_DIR}/llama3-1_8b_finetune_{base}"
+    start_model = None  # pretrained = Identity on all SO(n) blocks
 
-    # Optional non-identity base adapter (for base -> task interpolation)
-    base_oft_named: Optional[Dict[str, Tensor]] = None
-    if BASE is not None:
-        if MODE != "standard":
-            raise ValueError("Non-identity BASE currently supports MODE='standard' only.")
+    for (task_tag, dataset_path, dataset_name, split, doc_to_text), adapter_path in tqdm(
+        zip(DATASET_1, adapter_paths), desc="Interpolating..."
+    ):
+        print(f"\n[{task_tag}] Loading adapter: {adapter_path}")
 
-        base_adapter_path = resolve_adapter_path(BASE)
-        base_model = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL,
-            torch_dtype=torch.float32,
-            device_map=None,
-        )
-        base_peft = PeftModel.from_pretrained(
-            base_model,
-            base_adapter_path,
-            is_trainable=False,
-        )
-        if hasattr(base_peft, "enable_adapter_layers"):
-            base_peft.enable_adapter_layers()
-        base_peft.to(device).eval()
+        end_model = load_file(f"{adapter_path}/adapter_model.safetensors", device="cpu")
 
-        base_oft_named = {
-            name: p.data.clone()
-            for name, p in base_peft.named_parameters()
-            if _is_oft_param_name(name)
-        }
-        if not base_oft_named:
-            raise RuntimeError(f"No OFT parameters found for BASE adapter: {base_adapter_path}")
-
-        del base_peft, base_model
-        torch.cuda.empty_cache()
-
-    # Pass 1 (fisher mode): collect OFT params and Fishers for all tasks jointly
-    all_oft_named: List[Dict[str, Tensor]] = []
-    all_fisher_dicts: List[Dict[str, Tensor]] = []
-    block_size: Optional[int] = None
-
-    if MODE == "fisher":
-        merging = OFTMerging(lam=LAM, device=device)
-        print("Pre-loading OFT params and Fishers for all tasks...")
-        for tag, *_ in TASKS:
-            adapter_path = f"{ADAPTERS_DIR}/llama3-1_8b_finetune_{tag}"
-            fisher_path  = f"{FISHER_DIR}/llama3-1_8b_finetune_{tag}.safetensors"
-
-            _base = AutoModelForCausalLM.from_pretrained(
-                BASE_MODEL, torch_dtype=torch.float32, device_map=None
-            )
-            _model = PeftModel.from_pretrained(_base, adapter_path, is_trainable=False)
-            if hasattr(_model, "enable_adapter_layers"):
-                _model.enable_adapter_layers()
-
-            oft_named = {name.replace(".default", ""): p.data.clone().to(device)
-                         for name, p in _model.named_parameters()
-                         if _is_oft_param_name(name)}
-            del _model, _base
-            torch.cuda.empty_cache()
-
-            if not oft_named:
-                raise RuntimeError(f"No OFT params found for adapter: {tag}")
-            if block_size is None:
-                d = next(iter(oft_named.values())).shape[-1]
-                block_size = int((1 + (1 + 8 * d) ** 0.5) / 2)
-
-            fishers = merging.load_fishers([fisher_path])[0]
-            all_oft_named.append(oft_named)
-            all_fisher_dicts.append(fishers)
-
-        T = len(TASKS)
-        alphas = [0.5] * T
-        all_task_vectors = fisher_task_vectors(
-            all_oft_named, all_fisher_dicts, alphas, merging, LAM,
-        )
-        tag_to_task_vectors = {tag: tv for (tag, *_), tv in zip(TASKS, all_task_vectors)}
-
-    # Pass 2: load each model and evaluate interpolation curve
-    for tag, dataset_path, dataset_name, split, doc_to_text in TASKS:
-        adapter_path = f"{ADAPTERS_DIR}/llama3-1_8b_finetune_{tag}"
-
-        print(f"\n=== {tag} ===")
-        base = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL, torch_dtype=torch.float32, device_map=None
-        )
         model = PeftModel.from_pretrained(base, adapter_path, is_trainable=False)
-        if hasattr(model, "enable_adapter_layers"):
-            model.enable_adapter_layers()
-        model.to(device).eval()
-
-        oft_named = {name.replace(".default", ""): p.data.clone()
-                     for name, p in model.named_parameters()
-                     if _is_oft_param_name(name)}
-
-        if not oft_named:
-            raise RuntimeError(
-                "No OFT parameters found in model.named_parameters(). "
-                "Check adapter loading and OFT key filtering."
-            )
-
-        if base_oft_named is not None:
-            missing = set(oft_named) - set(base_oft_named)
-            if missing:
-                raise RuntimeError(
-                    f"BASE adapter is missing {len(missing)} OFT keys required by task '{tag}'."
-                )
-
-        task_vectors = tag_to_task_vectors[tag] if MODE == "fisher" else oft_named
+        model.enable_adapter_layers()
+        model.to(device)
 
         loader = build_loader(
-            dataset_path, dataset_name, split, doc_to_text,
-            tokenizer, num_samples=128, batch_size=64, max_length=32,
+            dataset_path=dataset_path,
+            dataset_name=dataset_name,
+            split=split,
+            doc_to_text=doc_to_text,
+            tokenizer=tokenizer,
+            num_samples=args.num_samples,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
         )
 
-        plot_loss_curves(
-            loss_fn=make_llm_loss_fn(
-                model,
-                loader,
-                task_vectors,
-                device,
-                base_vectors=base_oft_named,
-            ),
-            label=f"{tag} ({MODE})",
-            num_points=7,
-            save_path=f"{OUTPUT_DIR}/{tag}_{MODE}.png",
+        interpolation_losses = interpolate_model(
+            start_model=start_model,
+            end_model=end_model,
+            interpolation_grid=interpolation_grid,
+            model=model,
+            loader=loader,
+            device=device,
         )
 
-        del model, base
-        torch.cuda.empty_cache()
+        # Save losss interpolation to plot
+        LOSS_DIR = Path(args.save_path) / args.model_family / LOSS_SUBDIR
+        IMG_DIR = Path(args.save_path) / args.model_family / IMG_SUBDIR
+        LOSS_DIR.mkdir(parents=True, exist_ok=True)
+        IMG_DIR.mkdir(parents=True, exist_ok=True)
+
+        loss_path = LOSS_DIR / f"{task_tag}.npy"
+        np.save(loss_path, np.array(interpolation_losses))
+        print(f"  Saved losses to {loss_path}")
+
+        img_path = IMG_DIR / f"{task_tag}.png"
+        plot_interpolation_curve(
+            alphas=interpolation_grid,
+            losses=interpolation_losses,
+            title=f"Loss interpolation: pretrained -> {task_tag}",
+            save_path=str(img_path),
+        )
+        print(f"  Saved plot to {img_path}")
+
+
+if __name__ == "__main__":
+    # Input args
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--num-points", type=int, default=5,
+        help="Number of interpolation points between pretrained and adapter.",
+    )
+    parser.add_argument(
+        "--num-samples", type=int, default=512,
+        help="Number of dataset samples used to evaluate loss at each interpolation point.")
+    parser.add_argument(
+        "--batch-size", type=int, default=16,
+        help="DataLoader batch size for loss evaluation.")
+    parser.add_argument(
+        "--max-length", type=int, default=1024,
+        help="Maximum token length for input sequences.")
+    parser.add_argument(
+        "--save-path", type=str, default=f"{ROOTDIR}/outputs/interpolation",
+        help="Directory where interpolation plot PNGs are saved.",
+    )
+    parser.add_argument(
+        "--model-family", type=str, default="llama3.1", choices=["llama3.1", "qwen2.5"],
+        help="Model family to use: 'llama3.1' or 'qwen2.5'.",
+    )
+    args = parser.parse_args()
+
+    main(args)

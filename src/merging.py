@@ -7,12 +7,12 @@ import torch
 from torch import Tensor
 from safetensors.torch import load_file
 
-from src.utils.path import OFT_LLAMA_MODELS_DIR, ROOTDIR
+from src.path import MODELS_DIR, ROOTDIR
 
 from src.geometry import Manifold, SOnManifold
 
 
-MergeMode = Literal["plain", "diagonal_fisher"]
+MergeMode = Literal["standard", "diagonal_fisher"]
 
 
 class RiemannianMerging(ABC):
@@ -50,11 +50,11 @@ class RiemannianMerging(ABC):
         self,
         weights_list: List[Tensor],
         fisher_list: Optional[List[Dict[str, Tensor]]] = None,
-        mode: MergeMode = "plain",
+        mode: MergeMode = "standard",
     ) -> Tensor:
         """Merge task vectors into one (B, n, n) Omega.
 
-        Modes: "plain" or "diagonal_fisher"
+        Modes: "standard" or "diagonal_fisher"
         Fisher data is required for Fisher-based modes.
         """
 
@@ -63,7 +63,7 @@ class RiemannianMerging(ABC):
         self,
         adapter_paths: List[str],
         fisher_paths: Optional[List[str]] = None,
-        mode: MergeMode = "plain",
+        mode: MergeMode = "standard",
     ) -> Dict[str, Tensor]:
         """
         Full merging pipeline
@@ -76,7 +76,7 @@ class OFTMerging(RiemannianMerging):
 
     Three merge modes
     -----------------
-    plain           Weighted average of Lie-algebra task vectors. No Fisher.
+    standard           Weighted average of Lie-algebra task vectors. No Fisher.
     diagonal_fisher Element-wise Fisher weighting in the vectorised so(n) basis.
                     Each component j of the merged vector is
                         Omega*_j = (sum_t alpha_t f_(t,j) Omega_(t,j)) / (lama + sum_t alpha_t f_(t,j))
@@ -185,7 +185,7 @@ class OFTMerging(RiemannianMerging):
         self,
         weights_list: List[Tensor],
         fisher_list: Optional[List[Dict[str, Tensor]]] = None,
-        mode: MergeMode = "plain",
+        mode: MergeMode = "standard",
     ) -> Tensor:
         T = len(weights_list)
         alphas = (
@@ -195,22 +195,22 @@ class OFTMerging(RiemannianMerging):
         )
         alphas = alphas.to(self.device)
 
-        if mode == "plain":
-            return self._plain(weights_list, alphas)
+        if mode == "standard":
+            return self._standard_merging(weights_list, alphas)
 
         if mode == "diagonal_fisher":
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
-            return self._diagonal_fisher(weights_list, fisher_list, alphas)
+            return self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
 
         if mode == "fisher":
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
-            return self._fisher(weights_list, fisher_list, alphas)
+            return self._fisher_merging(weights_list, fisher_list, alphas)
 
         raise ValueError(f"Unsupported merge mode: {mode!r}")
 
-    def _plain(self, weights_list: List[Tensor], alphas: List[float]) -> Tensor:
+    def _standard_merging(self, weights_list: List[Tensor], alphas: List[float]) -> Tensor:
         """Compute a weighted average of OFT task vectors in so(n).
 
         Args:
@@ -225,7 +225,7 @@ class OFTMerging(RiemannianMerging):
         return torch.einsum("t,t...->...", a, stacked)
 
 
-    def _diagonal_fisher(
+    def _diagonal_fisher_merging(
         self,
         weights_list: List[Tensor],
         fisher_list: List[Tensor],
@@ -265,7 +265,7 @@ class OFTMerging(RiemannianMerging):
 
         return merged_oft
 
-    def _fisher(
+    def _fisher_merging(
         self,
         weights_list: List[Tensor],
         fisher_list: List[Tensor],
@@ -310,7 +310,7 @@ class OFTMerging(RiemannianMerging):
         self,
         adapter_paths: List[str],
         fisher_paths: Optional[List[str]] = None,
-        mode: MergeMode = "plain",
+        mode: MergeMode = "standard",
     ):
         print(f"\nMerging {len(adapter_paths)} OFT adapters with {mode} mode...")
 

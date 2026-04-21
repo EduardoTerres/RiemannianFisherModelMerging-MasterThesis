@@ -1,260 +1,274 @@
-"""Visualization utilities for OFT task vectors: cosine similarity and norm distributions."""
+"""Visualize OFT task-vector geometry: pairwise cosine similarity and norm distributions."""
+from __future__ import annotations
 
-from typing import Dict, List, Optional
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+import argparse
 import re
+
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
-from torch import Tensor
+from typing import Dict, List
 from tqdm import tqdm
+
+from src.analysis.plot_utils import (
+    plot_cosine_similarity_matrix,
+    plot_layer_cosine_agreement,
+    plot_layer_geodesic_agreement,
+    plot_layer_norm_variance,
+    plot_norm_distributions,
+)
+from src.geometry import SOnManifold
+from src.merging import OFTMerging
+from src.path import (
+    ROOTDIR,
+    LLAMA_ADAPTER_PATHS,
+    QWEN_ADAPTER_PATHS,
+)
+
+_device = "cuda" if torch.cuda.is_available() else "cpu"
+_manifold = SOnManifold()
+_merging = OFTMerging(device=_device)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _oft_keys(task_vectors: List[Dict[str, Tensor]]) -> List[str]:
-    return sorted(task_vectors[0].keys(), key=lambda k: int(next(iter(re.findall(r"\d+", k)), 0)))
+def _oft_keys(task_vectors: List[Dict[str, torch.Tensor]]) -> List[str]:
+    return sorted(
+        task_vectors[0].keys(),
+        key=lambda k: int(next(iter(re.findall(r"\d+", k)), 0)),
+    )
 
 
-def _frobenius_norm(v: Tensor) -> float:
-    """Frobenius norm of a (num_blocks, d) tensor, treating it as a flat matrix."""
+def _layer_labels(keys: List[str]) -> List[str]:
+    return [next(iter(re.findall(r"\d+", k)), k) for k in keys]
+
+
+def _frobenius_norm(v: torch.Tensor) -> float:
     return v.norm(p="fro").item()
 
 
-def _layerwise_cosine(vi: Tensor, vj: Tensor) -> float:
-    """
-    Frobenius cosine similarity between two so(n) task vectors at one layer.
-
-    vi, vj: (num_blocks, d) — upper-triangle so(n) parameters per block.
-    For skew-symmetric matrices <A,B>_F = 2(a.b) and ||A||_F = sqrt(2)||a||,
-    so the cosine cancels the factor-of-2 and reduces to cosine on the flat param vector.
-    """
+def _layerwise_cosine(vi: torch.Tensor, vj: torch.Tensor) -> float:
     fi, fj = vi.flatten(), vj.flatten()
     return (fi @ fj / (fi.norm().clamp(min=1e-8) * fj.norm().clamp(min=1e-8))).item()
 
 
-# ---------------------------------------------------------------------------
-# Function 1 — Pairwise layerwise cosine-similarity matrix
+def _geodesic_distance(Qi: torch.Tensor, Qj: torch.Tensor) -> float:
+    """d(Q, R) = sqrt(dist_sq(Q, R)), averaged over blocks."""
+    if Qi.dim() == 2:
+        Qi, Qj = Qi.unsqueeze(0), Qj.unsqueeze(0)
+    dist_sq = _manifold.dist_sq(Qi, Qj)  # (num_blocks,)
+    return dist_sq.clamp(min=0).sqrt().mean().item()
+
+
 # ---------------------------------------------------------------------------
 
-def plot_cosine_similarity_matrix(
-    task_vectors: List[Dict[str, Tensor]],
-    task_names: Optional[List[str]] = None,
-    title: str = "Avg. layerwise cosine similarity",
-    ax: Optional[plt.Axes] = None,
+def compute_cosine_similarity_matrix(
+    task_vectors: List[Dict[str, torch.Tensor]],
 ) -> np.ndarray:
-    """
-    For T tasks, build a (T, T) matrix where entry (i, j) is the cosine similarity
-    averaged over all OFT layers.
+    """Build a (T, T) matrix of avg layerwise cosine similarities.
 
-    task_vectors: T dicts, each mapping layer key -> (num_blocks, d)
-    Returns the (T, T) similarity matrix.
+    Args:
+        task_vectors: T dicts, each mapping layer key -> (num_blocks, d).
+
+    Returns:
+        (T, T) float64 array.
     """
     T = len(task_vectors)
     keys = _oft_keys(task_vectors)
-    names = task_names or [f"Task {i}" for i in range(T)]
-
     sim_matrix = np.zeros((T, T))
     for i in tqdm(range(T), desc="Cosine similarity"):
         for j in range(T):
             sims = [_layerwise_cosine(task_vectors[i][k], task_vectors[j][k]) for k in keys]
             sim_matrix[i, j] = float(np.mean(sims))
-
-    if ax is None:
-        _, ax = plt.subplots(figsize=(max(4, T), max(3, T - 1)))
-
-    im = ax.imshow(sim_matrix, vmin=-1, vmax=1, cmap="RdBu_r")
-    ax.set_xticks(range(T))
-    ax.set_xticklabels(names, rotation=45, ha="right")
-    ax.set_yticks(range(T))
-    ax.set_yticklabels(names)
-    for i in range(T):
-        for j in range(T):
-            ax.text(j, i, f"{sim_matrix[i, j]:.2f}", ha="center", va="center", fontsize=8)
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_title(title)
     return sim_matrix
 
 
-# ---------------------------------------------------------------------------
-# Function 2 — Distribution of task-vector Frobenius norms
-# ---------------------------------------------------------------------------
+def compute_geodesic_distance_matrix(
+    task_vectors: List[Dict[str, torch.Tensor]],
+) -> np.ndarray:
+    """Build a (T, T) matrix of avg layerwise geodesic distances on SO(n).
 
-def plot_norm_distributions(
-    standard_task_vectors: List[Dict[str, Tensor]],
-    fisher_task_vectors: List[Dict[str, Tensor]],
-    task_names: Optional[List[str]] = None,
-    axes: Optional[List[plt.Axes]] = None,
-) -> None:
+    Args:
+        task_vectors: T dicts, each mapping layer key -> (num_blocks, d, d).
+
+    Returns:
+        (T, T) float64 array.
     """
-    For each task, plot the distribution (histogram + KDE) of per-layer Frobenius norms,
-    comparing standard vs. Fisher-rescaled task vectors side by side.
+    T = len(task_vectors)
+    keys = _oft_keys(task_vectors)
+    dist_matrix = np.zeros((T, T))
+    for i in tqdm(range(T), desc="Geodesic distance"):
+        for j in range(T):
+            dists = [_geodesic_distance(task_vectors[i][k], task_vectors[j][k]) for k in keys]
+            dist_matrix[i, j] = float(np.mean(dists))
+    return dist_matrix
 
-    standard_task_vectors: T dicts, each mapping layer key -> (num_blocks, d)
-    fisher_task_vectors:   T dicts, each mapping layer key -> (num_blocks, d)
+
+def compute_layer_norms(
+    task_vectors: List[Dict[str, torch.Tensor]],
+) -> List[List[float]]:
+    """Compute per-layer Frobenius norms for each task.
+
+    Args:
+        task_vectors: T dicts, each mapping layer key -> (num_blocks, d).
+
+    Returns:
+        T lists, each containing one norm scalar per layer key.
     """
-    T = len(standard_task_vectors)
-    names = task_names or [f"Task {i}" for i in range(T)]
-    keys = _oft_keys(standard_task_vectors)
-
-    if axes is None:
-        _, axes = plt.subplots(1, T, figsize=(5 * T, 4), sharey=False)
-        if T == 1:
-            axes = [axes]
-
-    for t, ax in enumerate(axes):
-        # Per-layer Frobenius norms — one scalar per layer key
-        std_norms = [_frobenius_norm(standard_task_vectors[t][k]) for k in keys]
-        fsh_norms = [_frobenius_norm(fisher_task_vectors[t][k]) for k in keys]
-
-        bins = 30
-        ax.hist(std_norms, bins=bins, alpha=0.6, label="Standard", color="steelblue", density=True)
-        ax.hist(fsh_norms, bins=bins, alpha=0.6, label="Fisher", color="darkorange", density=True)
-        ax.set_title(names[t])
-        ax.set_xlabel("Frobenius norm")
-        ax.set_ylabel("Density")
-        ax.legend(fontsize=8)
-
-    plt.suptitle("Per-layer Frobenius norm distribution", y=1.02)
+    keys = _oft_keys(task_vectors)
+    return [[_frobenius_norm(tv[k]) for k in keys] for tv in task_vectors]
 
 
-# ---------------------------------------------------------------------------
-# Function 3 — Per-layer strip plots
-# ---------------------------------------------------------------------------
+def compute_layer_norm_variance(
+    task_vectors: List[Dict[str, torch.Tensor]],
+) -> tuple[np.ndarray, List[str]]:
+    """Variance of Frobenius norms across tasks, per layer.
 
-def _plot_layer_strip(values: np.ndarray, keys: List[str], title: str,
-                      cmap: str, colorbar_label: str,
-                      ax: Optional[plt.Axes] = None) -> None:
-    """Render a 1×L strip of squares; color encodes `values`, text shows the value."""
-    L = len(keys)
-    if ax is None:
-        _, ax = plt.subplots(figsize=(max(8, L // 2), 2))
-    im = ax.imshow(values[np.newaxis, :], cmap=cmap, aspect="auto")
-    labels = [next(iter(re.findall(r"\d+", k)), k) for k in keys]
-    ax.set_xticks(range(L))
-    ax.set_xticklabels(labels, rotation=90, fontsize=5)
-    ax.set_yticks([])
-    for j, v in enumerate(values):
-        ax.text(j, 0, f"{v:.2f}", ha="center", va="center", fontsize=4, color="black")
-    plt.colorbar(im, ax=ax, label=colorbar_label, fraction=0.046, pad=0.04)
-    ax.set_title(title)
-
-
-def plot_layer_norm_variance(
-    task_vectors: List[Dict[str, Tensor]],
-    title: str = "Per-layer norm variance across models",
-    ax: Optional[plt.Axes] = None,
-) -> None:
-    """Strip where each cell = variance of Frobenius norms across tasks."""
-    keys = sorted(task_vectors[0].keys(), key=lambda k: int(next(iter(re.findall(r"\d+", k)), 0)))
+    Returns:
+        values: (L,) array of variance scalars.
+        labels: layer index strings for axis tick labels.
+    """
+    keys = _oft_keys(task_vectors)
     values = np.array([
         float(np.var([_frobenius_norm(tv[k]) for tv in task_vectors]))
-        for k in tqdm(keys, desc=title)
+        for k in tqdm(keys, desc="Norm variance")
     ])
-    _plot_layer_strip(values, keys, title, cmap="Greens",
-                      colorbar_label="Norm variance across models", ax=ax)
+    return values, _layer_labels(keys)
 
 
-def plot_layer_cosine_agreement(
-    task_vectors: List[Dict[str, Tensor]],
-    title: str = "Per-layer avg pairwise cosine similarity",
-    ax: Optional[plt.Axes] = None,
-) -> None:
-    """Strip where each cell = average pairwise cosine similarity across all model pairs."""
-    keys = sorted(task_vectors[0].keys(), key=lambda k: int(next(iter(re.findall(r"\d+", k)), 0)))
+def compute_layer_cosine_agreement(
+    task_vectors: List[Dict[str, torch.Tensor]],
+) -> tuple[np.ndarray, List[str]]:
+    """Avg pairwise cosine similarity across tasks, per layer.
+
+    Returns:
+        values: (L,) array of mean cosine scalars.
+        labels: layer index strings for axis tick labels.
+    """
+    keys = _oft_keys(task_vectors)
     T = len(task_vectors)
     values = []
-    for k in tqdm(keys, desc=title):
-        sims = []
-        for i in range(T):
-            for j in range(i + 1, T):
-                vi, vj = task_vectors[i][k], task_vectors[j][k]
-                sims.append(_layerwise_cosine(vi, vj))
+    for k in tqdm(keys, desc="Cosine agreement"):
+        sims = [
+            _layerwise_cosine(task_vectors[i][k], task_vectors[j][k])
+            for i in range(T) for j in range(i + 1, T)
+        ]
         values.append(float(np.mean(sims)) if sims else 0.0)
-    _plot_layer_strip(np.array(values), keys, title, cmap="Blues",
-                      colorbar_label="Avg pairwise cosine similarity", ax=ax)
+    return np.array(values), _layer_labels(keys)
 
 
-# ---------------------------------------------------------------------------
-# Entry-point
-# ---------------------------------------------------------------------------
+def compute_layer_geodesic_agreement(
+    task_vectors: List[Dict[str, torch.Tensor]],
+) -> tuple[np.ndarray, List[str]]:
+    """Avg pairwise geodesic distance on SO(n) across tasks, per layer.
+
+    Returns:
+        values: (L,) array of mean geodesic distance scalars.
+        labels: layer index strings for axis tick labels.
+    """
+    keys = _oft_keys(task_vectors)
+    T = len(task_vectors)
+    values = []
+    for k in tqdm(keys, desc="Geodesic agreement"):
+        dists = [
+            _geodesic_distance(task_vectors[i][k], task_vectors[j][k])
+            for i in range(T) for j in range(i + 1, T)
+        ]
+        values.append(float(np.mean(dists)) if dists else 0.0)
+    return np.array(values), _layer_labels(keys)
+
+
+def main(args: argparse.Namespace):
+    if args.model_family == "llama3.1":
+        adapter_paths = LLAMA_ADAPTER_PATHS
+    elif args.model_family == "qwen2.5":
+        adapter_paths = QWEN_ADAPTER_PATHS
+    else:
+        raise ValueError(f"Unsupported model family: {args.model_family}")
+
+    task_names = args.task_names or [Path(p).name for p in adapter_paths]
+
+    task_vectors = _merging.load_weights(adapter_paths)
+
+    IMG_DIR = Path(args.save_path) / args.model_family
+    IMG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # --- Cosine similarity matrix ---
+    sim_matrix = compute_cosine_similarity_matrix(task_vectors)
+    plot_cosine_similarity_matrix(
+        sim_matrix=sim_matrix,
+        task_names=task_names,
+        title="Avg. layerwise cosine similarity",
+        save_path=str(IMG_DIR / "cosine_similarity.png"),
+    )
+    print(f"Saved -> {IMG_DIR / 'cosine_similarity.png'}")
+
+    # --- Geodesic distance matrix ---
+    dist_matrix = compute_geodesic_distance_matrix(task_vectors)
+    plot_cosine_similarity_matrix(
+        sim_matrix=dist_matrix,
+        task_names=task_names,
+        title="Avg. geodesic distance (SO(n))",
+        save_path=str(IMG_DIR / "geodesic_distance.png"),
+    )
+    print(f"Saved -> {IMG_DIR / 'geodesic_distance.png'}")
+
+    # --- Norm distributions ---
+    norms_per_task = compute_layer_norms(task_vectors)
+    plot_norm_distributions(
+        norms_per_task=norms_per_task,
+        task_names=task_names,
+        save_path=str(IMG_DIR / "norm_distributions.png"),
+    )
+    print(f"Saved -> {IMG_DIR / 'norm_distributions.png'}")
+
+    # --- Per-layer norm variance strip ---
+    variance_values, labels = compute_layer_norm_variance(task_vectors)
+    plot_layer_norm_variance(
+        values=variance_values,
+        labels=labels,
+        save_path=str(IMG_DIR / "norm_variance.png"),
+    )
+    print(f"Saved -> {IMG_DIR / 'norm_variance.png'}")
+
+    # --- Per-layer cosine agreement strip ---
+    cosine_values, labels = compute_layer_cosine_agreement(task_vectors)
+    plot_layer_cosine_agreement(
+        values=cosine_values,
+        labels=labels,
+        save_path=str(IMG_DIR / "cosine_agreement.png"),
+    )
+    print(f"Saved -> {IMG_DIR / 'cosine_agreement.png'}")
+
+    # --- Per-layer geodesic agreement strip ---
+    geodesic_values, labels = compute_layer_geodesic_agreement(task_vectors)
+    plot_layer_geodesic_agreement(
+        values=geodesic_values,
+        labels=labels,
+        save_path=str(IMG_DIR / "geodesic_agreement.png"),
+    )
+    print(f"Saved -> {IMG_DIR / 'geodesic_agreement.png'}")
+
 
 if __name__ == "__main__":
-    import argparse
-    from src.merging import OFTMerging
-    from src.analysis.utils import fisher_task_vectors
-
-    parser = argparse.ArgumentParser(description="Visualize OFT task vectors.")
-    parser.add_argument("--adapter_paths", nargs="+", required=True,
-                        help="Paths to OFT adapter dirs")
-    parser.add_argument("--fisher_paths", nargs="+", required=True,
-                        help="Paths to Fisher .safetensors files")
-    parser.add_argument("--task_names", nargs="+", default=None,
-                        help="Human-readable task labels")
-    parser.add_argument("--lam",    type=float, default=1.0, help="Regularisation lambda")
-    parser.add_argument("--output", type=str,   default="task_vector_analysis.png")
+    parser = argparse.ArgumentParser(description="Visualize OFT task-vector geometry.")
+    parser.add_argument(
+        "--task-names", nargs="+", default=None, dest="task_names",
+        help="Human-readable task labels.",
+    )
+    parser.add_argument(
+        "--save-path", type=str, default=f"{ROOTDIR}/outputs/visualization", dest="save_path",
+        help="Directory where output PNGs are saved.",
+    )
+    parser.add_argument(
+        "--model-family", type=str, default="llama3.1", choices=["llama3.1", "qwen2.5"],
+        dest="model_family", help="Model family to use: 'llama3.1' or 'qwen2.5'.",
+    )
     args = parser.parse_args()
 
-    T = len(args.adapter_paths)
-    alphas = [1.0 / T] * T
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    merging = OFTMerging(lam=args.lam, alphas=alphas, device=device)
-
-    std_tvs = merging.load_weights(args.adapter_paths)
-    fishers  = merging.load_fishers(args.fisher_paths)
-    fsh_tvs  = fisher_task_vectors(
-        oft_params_per_task=std_tvs,
-        fisher_per_task=fishers,
-        alphas=alphas,
-        merging=merging,
-        lam=args.lam,
-    )
-
-    merged_std = merging.merge(args.adapter_paths, mode="plain")
-    merged_fsh = merging.merge(args.adapter_paths, args.fisher_paths, mode="diagonal_fisher")
-
-    all_std_tvs = std_tvs + [merged_std]
-    all_fsh_tvs = fsh_tvs + [merged_fsh]
-    base_names  = args.task_names or [f"Task {i}" for i in range(T)]
-    all_names   = base_names + ["merged"]
-
-    base, ext = args.output.rsplit(".", 1) if "." in args.output else (args.output, "png")
-
-    # --- Figure 1: cosine similarity matrices ---
-    fig1, (ax_sim_std, ax_sim_fsh) = plt.subplots(1, 2, figsize=(12, 6))
-    plot_cosine_similarity_matrix(all_std_tvs, all_names, title="Standard — avg cosine similarity", ax=ax_sim_std)
-    plot_cosine_similarity_matrix(all_fsh_tvs, all_names, title="Fisher — avg cosine similarity",   ax=ax_sim_fsh)
-    fig1.tight_layout()
-    p1 = f"{base}_cosine_similarity.{ext}"
-    fig1.savefig(p1, bbox_inches="tight")
-    print(f"Saved → {p1}")
-
-    # --- Figure 2: norm distributions (all tasks + merged) ---
-    N = T + 1
-    fig2, axes_norm = plt.subplots(1, N, figsize=(5 * N, 4), sharey=False)
-    if N == 1:
-        axes_norm = [axes_norm]
-    plot_norm_distributions(all_std_tvs, all_fsh_tvs, task_names=all_names, axes=list(axes_norm))
-    fig2.tight_layout()
-    p2 = f"{base}_norm_distributions.{ext}"
-    fig2.savefig(p2, bbox_inches="tight")
-    print(f"Saved → {p2}")
-
-    # --- Figure 3: per-layer norm variance strip ---
-    fig3, (ax3_std, ax3_fsh) = plt.subplots(2, 1, figsize=(20, 5))
-    plot_layer_norm_variance(all_std_tvs, title="Standard — per-layer norm variance", ax=ax3_std)
-    plot_layer_norm_variance(all_fsh_tvs, title="Fisher — per-layer norm variance",   ax=ax3_fsh)
-    fig3.tight_layout()
-    p3 = f"{base}_norm_variance.{ext}"
-    fig3.savefig(p3, bbox_inches="tight")
-    print(f"Saved → {p3}")
-
-    # --- Figure 3b: per-layer avg pairwise cosine similarity strip ---
-    fig3b, (ax3b_std, ax3b_fsh) = plt.subplots(2, 1, figsize=(20, 5))
-    plot_layer_cosine_agreement(all_std_tvs, title="Standard — per-layer avg pairwise cosine similarity", ax=ax3b_std)
-    plot_layer_cosine_agreement(all_fsh_tvs, title="Fisher — per-layer avg pairwise cosine similarity",   ax=ax3b_fsh)
-    fig3b.tight_layout()
-    p3b = f"{base}_cosine_agreement.{ext}"
-    fig3b.savefig(p3b, bbox_inches="tight")
-    print(f"Saved → {p3b}")
+    main(args)

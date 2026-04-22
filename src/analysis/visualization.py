@@ -15,17 +15,17 @@ from tqdm import tqdm
 
 from src.analysis.plot_utils import (
     plot_cosine_similarity_matrix,
-    plot_layer_cosine_agreement,
-    plot_layer_geodesic_agreement,
+    plot_layer_cosine_similarity,
+    plot_layer_geodesic_distance,
     plot_layer_norm_variance,
+    plot_module_layer_distributions,
     plot_norm_distributions,
 )
 from src.geometry import SOnManifold
 from src.merging import OFTMerging
-from src.constants import (
+from src.paths import (
     ROOTDIR,
-    LLAMA_ADAPTER_PATHS,
-    QWEN_ADAPTER_PATHS,
+    MODEL_FAMILIES,
 )
 from src.utils import parse_device
 
@@ -142,7 +142,7 @@ def compute_layer_norm_variance(
     return values, _layer_labels(keys)
 
 
-def compute_layer_cosine_agreement(
+def compute_layer_cosine_similarity(
     task_vectors: List[Dict[str, torch.Tensor]],
 ) -> tuple[np.ndarray, List[str]]:
     """Avg pairwise cosine similarity across tasks, per layer.
@@ -154,7 +154,7 @@ def compute_layer_cosine_agreement(
     keys = _oft_keys(task_vectors)
     T = len(task_vectors)
     values = []
-    for k in tqdm(keys, desc="Cosine agreement"):
+    for k in tqdm(keys, desc="Cosine similarity"):
         sims = [
             _layerwise_cosine(task_vectors[i][k], task_vectors[j][k])
             for i in range(T) for j in range(i + 1, T)
@@ -163,7 +163,50 @@ def compute_layer_cosine_agreement(
     return np.array(values), _layer_labels(keys)
 
 
-def compute_layer_geodesic_agreement(
+def compute_module_layer_distributions(
+    task_vectors: List[Dict[str, torch.Tensor]],
+) -> dict:
+    """Avg geodesic dist, cosine sim and norm variance per module per layer.
+
+    Keys are parsed as layers.{N}.{module}.
+    Returns a dict suitable for plot_module_layer_distributions.
+    """
+    keys = _oft_keys(task_vectors)
+    T = len(task_vectors)
+    module_buckets: dict[str, dict[int, dict]] = {}
+    for k in keys:
+        m = re.search(r"layers?\.(\d+)\.(.+?)(?:\.oft_\w+)?$", k)
+        if m is None:
+            continue
+        layer, mod = int(m.group(1)), m.group(2)
+        bucket = module_buckets.setdefault(mod, {})
+        pairs_geo = [
+            _geodesic_distance(task_vectors[i][k], task_vectors[j][k])
+            for i in range(T) for j in range(i + 1, T)
+        ]
+        pairs_cos = [
+            _layerwise_cosine(task_vectors[i][k], task_vectors[j][k])
+            for i in range(T) for j in range(i + 1, T)
+        ]
+        norms = [_frobenius_norm(tv[k]) for tv in task_vectors]
+        bucket[layer] = {
+            "geo": float(np.mean(pairs_geo)) if pairs_geo else 0.0,
+            "cos": float(np.mean(pairs_cos)) if pairs_cos else 0.0,
+            "mean": float(np.mean(norms)),
+        }
+    result = {}
+    for mod, layers_dict in sorted(module_buckets.items()):
+        sorted_layers = sorted(layers_dict)
+        result[mod] = {
+            "layers": sorted_layers,
+            "geo": [layers_dict[n]["geo"] for n in sorted_layers],
+            "cos": [layers_dict[n]["cos"] for n in sorted_layers],
+            "mean": [layers_dict[n]["mean"] for n in sorted_layers],
+        }
+    return result
+
+
+def compute_layer_geodesic_distance(
     task_vectors: List[Dict[str, torch.Tensor]],
 ) -> tuple[np.ndarray, List[str]]:
     """Avg pairwise geodesic distance on SO(n) across tasks, per layer.
@@ -175,7 +218,7 @@ def compute_layer_geodesic_agreement(
     keys = _oft_keys(task_vectors)
     T = len(task_vectors)
     values = []
-    for k in tqdm(keys, desc="Geodesic agreement"):
+    for k in tqdm(keys, desc="Geodesic distance"):
         dists = [
             _geodesic_distance(task_vectors[i][k], task_vectors[j][k])
             for i in range(T) for j in range(i + 1, T)
@@ -185,18 +228,19 @@ def compute_layer_geodesic_agreement(
 
 
 def main(args: argparse.Namespace):
-    if args.model_family == "llama3.1":
-        adapter_paths = LLAMA_ADAPTER_PATHS
-    elif args.model_family == "qwen2.5":
-        adapter_paths = QWEN_ADAPTER_PATHS
-    else:
-        raise ValueError(f"Unsupported model family: {args.model_family}")
+    for family_name in args.model_family:
+        _run(family_name, args)
+
+
+def _run(family_name: str, args: argparse.Namespace):
+    model_family = MODEL_FAMILIES[family_name]
+    adapter_paths = model_family.adapter_paths
 
     task_names = args.task_names or [Path(p).name for p in adapter_paths]
 
     task_vectors = _merging.load_weights(adapter_paths)
 
-    IMG_DIR = Path(args.save_path) / args.model_family
+    IMG_DIR = Path(args.save_path) / family_name
     IMG_DIR.mkdir(parents=True, exist_ok=True)
 
     # --- Cosine similarity matrix ---
@@ -237,23 +281,31 @@ def main(args: argparse.Namespace):
     )
     print(f"Saved -> {IMG_DIR / 'norm_variance.png'}")
 
-    # --- Per-layer cosine agreement strip ---
-    cosine_values, labels = compute_layer_cosine_agreement(task_vectors)
-    plot_layer_cosine_agreement(
+    # --- Per-layer cosine similarity strip ---
+    cosine_values, labels = compute_layer_cosine_similarity(task_vectors)
+    plot_layer_cosine_similarity(
         values=cosine_values,
         labels=labels,
-        save_path=str(IMG_DIR / "cosine_agreement.png"),
+        save_path=str(IMG_DIR / "cosine_similarity_per_layer.png"),
     )
-    print(f"Saved -> {IMG_DIR / 'cosine_agreement.png'}")
+    print(f"Saved -> {IMG_DIR / 'cosine_similarity_per_layer.png'}")
 
-    # --- Per-layer geodesic agreement strip ---
-    geodesic_values, labels = compute_layer_geodesic_agreement(task_vectors)
-    plot_layer_geodesic_agreement(
+    # --- Per-layer geodesic distance strip ---
+    geodesic_values, labels = compute_layer_geodesic_distance(task_vectors)
+    plot_layer_geodesic_distance(
         values=geodesic_values,
         labels=labels,
-        save_path=str(IMG_DIR / "geodesic_agreement.png"),
+        save_path=str(IMG_DIR / "geodesic_distance_per_layer.png"),
     )
-    print(f"Saved -> {IMG_DIR / 'geodesic_agreement.png'}")
+    print(f"Saved -> {IMG_DIR / 'geodesic_distance_per_layer.png'}")
+
+    # --- Per-module layer distributions ---
+    module_data = compute_module_layer_distributions(task_vectors)
+    plot_module_layer_distributions(
+        module_data=module_data,
+        save_path=str(IMG_DIR / "module_layer_distributions.png"),
+    )
+    print(f"Saved -> {IMG_DIR / 'module_layer_distributions.png'}")
 
 
 if __name__ == "__main__":
@@ -267,11 +319,11 @@ if __name__ == "__main__":
         help="Directory where output PNGs are saved.",
     )
     parser.add_argument(
-        "--model-family", type=str, default="llama3.1", choices=["llama3.1", "qwen2.5"],
-        dest="model_family", help="Model family to use: 'llama3.1' or 'qwen2.5'.",
+        "--model-family", nargs="+", default=list(MODEL_FAMILIES), choices=list(MODEL_FAMILIES),
+        dest="model_family", help="One or more model families to process.",
     )
     parser.add_argument(
-        "--device", type=str, default="cuda:0",
+        "--device", type=str, default="cuda",
         help="Device to use for interpolation and loss evaluation (e.g., 'gpu', 'cpu').",
     )
     args = parser.parse_args()

@@ -153,7 +153,7 @@ def plot_layer_norm_variance(
     )
 
 
-def plot_layer_cosine_agreement(
+def plot_layer_cosine_similarity(
     values: np.ndarray,
     labels: List[str],
     title: str = "Per-layer avg pairwise cosine similarity",
@@ -168,7 +168,7 @@ def plot_layer_cosine_agreement(
     )
 
 
-def plot_layer_geodesic_agreement(
+def plot_layer_geodesic_distance(
     values: np.ndarray,
     labels: List[str],
     title: str = "Per-layer avg pairwise geodesic distance (SO(n))",
@@ -181,3 +181,39 @@ def plot_layer_geodesic_agreement(
         cmap="Oranges", colorbar_label="Avg pairwise geodesic distance",
         save_path=save_path, ax=ax,
     )
+
+
+def plot_module_layer_distributions(
+    module_data: dict,
+    save_path: Optional[str] = None,
+) -> None:
+    """Three-panel plot: geodesic dist, cosine sim, norm variance — one line per module, x = layer.
+
+    Args:
+        module_data: {module_name: {"layers": [int], "geo": [float], "cos": [float], "mean": [float]}}
+    """
+    metrics = [
+        ("geo", "Avg geodesic distance (SO(n))", "Oranges"),
+        ("cos", "Avg cosine similarity",         "Blues"),
+        ("mean", "Mean norm",                     "Greens"),
+    ]
+    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=False)
+    for ax, (key, ylabel, cmap) in zip(axes, metrics):
+        cmap_fn = plt.get_cmap(cmap)
+        modules = list(module_data.keys())
+        colors = [cmap_fn(0.4 + 0.5 * i / max(len(modules) - 1, 1)) for i in range(len(modules))]
+        for mod, color in zip(modules, colors):
+            d = module_data[mod]
+            ax.plot(d["layers"], d[key], marker="o", markersize=3, linewidth=1.2, label=mod, color=color)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel("Layer")
+        ax.legend(fontsize=7, ncol=4, loc="upper right")
+        ax.grid(True, linestyle="--", alpha=0.4)
+    fig.suptitle("Per-module layer distributions (all models vs. all models)", y=1.01)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        plt.show()

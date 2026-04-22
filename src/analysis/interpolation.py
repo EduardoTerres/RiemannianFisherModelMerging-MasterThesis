@@ -17,12 +17,9 @@ from tqdm import tqdm
 from src.analysis.plot_utils import plot_interpolation_curve
 from src.geometry import SOnManifold
 from src.merging import OFTMerging
-from src.constants import (
+from src.paths import (
     ROOTDIR,
-    LLAMA_ADAPTER_PATHS,
-    LLAMA_BASE_MODEL_PATH,
-    QWEN_ADAPTER_PATHS,
-    QWEN_BASE_MODEL_PATH,
+    MODEL_FAMILIES,
 )
 from src.dataset.dataset_1 import DATASET_1_TRAIN as DATASET_1, build_loader
 from src.utils import parse_device
@@ -173,12 +170,14 @@ def interpolate_model(
 
 
 def main(args: argparse.Namespace):
-    if args.model_family == "llama3.1":
-        base_model_path = LLAMA_BASE_MODEL_PATH
-        adapter_paths = LLAMA_ADAPTER_PATHS
-    else:
-        base_model_path = QWEN_BASE_MODEL_PATH
-        adapter_paths = QWEN_ADAPTER_PATHS
+    for family_name in args.model_family:
+        _run(family_name, args)
+
+
+def _run(family_name: str, args: argparse.Namespace):
+    model_family = MODEL_FAMILIES[family_name]
+    base_model_path = model_family.base_model_path
+    adapter_paths = model_family.adapter_paths
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     interpolation_grid = np.linspace(0, 1, args.num_points).tolist()
@@ -196,7 +195,7 @@ def main(args: argparse.Namespace):
     for (task_tag, dataset_path, dataset_name, split, doc_to_text), adapter_path in tqdm(
         zip(DATASET_1, adapter_paths), desc="Interpolating..."
     ):
-        print(f"\n[{task_tag}] Loading adapter: {adapter_path}")
+        print(f"\n---[{task_tag}]--- Loading adapter: {adapter_path}")
 
         end_model = load_file(f"{adapter_path}/adapter_model.safetensors", device="cpu")
 
@@ -225,8 +224,8 @@ def main(args: argparse.Namespace):
         )
 
         # Save losss interpolation to plot
-        LOSS_DIR = Path(args.save_path) / args.model_family / LOSS_SUBDIR
-        IMG_DIR = Path(args.save_path) / args.model_family / IMG_SUBDIR
+        LOSS_DIR = Path(args.save_path) / family_name / LOSS_SUBDIR
+        IMG_DIR = Path(args.save_path) / family_name / IMG_SUBDIR
         LOSS_DIR.mkdir(parents=True, exist_ok=True)
         IMG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -265,11 +264,11 @@ if __name__ == "__main__":
         help="Directory where interpolation plot PNGs are saved.",
     )
     parser.add_argument(
-        "--model-family", type=str, default="llama3.1", choices=["llama3.1", "qwen2.5"],
-        help="Model family to use: 'llama3.1' or 'qwen2.5'.",
+        "--model-family", nargs="+", default=list(MODEL_FAMILIES), choices=list(MODEL_FAMILIES),
+        help="One or more model families to process.",
     )
     parser.add_argument(
-        "--device", type=str, default="cuda:0",
+        "--device", type=str, default="cuda",
         help="Device to use for interpolation and loss evaluation (e.g., 'gpu', 'cpu').",
     )
     args = parser.parse_args()

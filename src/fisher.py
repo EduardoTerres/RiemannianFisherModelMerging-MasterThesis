@@ -13,12 +13,9 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from src.constants import (
+from src.paths import (
     ROOTDIR,
-    LLAMA_ADAPTER_PATHS,
-    LLAMA_BASE_MODEL_PATH,
-    QWEN_BASE_MODEL_PATH,
-    QWEN_ADAPTER_PATHS,
+    MODEL_FAMILIES,
 )
 from src.dataset.dataset_1 import DATASET_1_TRAIN as DATASET_1, build_loader
 from src.utils import parse_device
@@ -415,28 +412,23 @@ def compute_all_fishers(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--model-family", type=str, default="llama3.1", choices=["llama3.1", "qwen2.5"],
-        dest="model_family", help="Model family to use: 'llama3.1' or 'qwen2.5'.",
+        "--model-family", type=str, default="llama3.1", choices=list(MODEL_FAMILIES),
+        dest="model_family", help="Model family to use.",
     )
     parser.add_argument("--output-dir", type=str, default=f"{ROOTDIR}/data/fishers")
     parser.add_argument("--num-samples", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument(
-        "--device", type=str, default="cuda:0",
+        "--device", type=str, default="cuda",
         help="Device to use for FIM computation (e.g., 'gpu', 'cpu').",
     )
     args = parser.parse_args()
     args.device = parse_device(args.device)
 
-    if args.model_family == "llama3.1":
-        base_model_path = LLAMA_BASE_MODEL_PATH
-        adapter_paths = LLAMA_ADAPTER_PATHS
-    elif args.model_family == "qwen2.5":
-        base_model_path = QWEN_BASE_MODEL_PATH
-        adapter_paths = QWEN_ADAPTER_PATHS
-    else:
-        raise ValueError(f"Unsupported model family: {args.model_family}")
+    model_family = MODEL_FAMILIES[args.model_family]
+    base_model_path = model_family.base_model_path
+    adapter_paths = model_family.adapter_paths
 
     compute_all_fishers(
         base_model_path=base_model_path,

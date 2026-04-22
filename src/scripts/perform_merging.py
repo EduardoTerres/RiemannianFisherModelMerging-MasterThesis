@@ -14,22 +14,13 @@ from peft import PeftModel
 
 from src.merging import OFTMerging
 from src.utils import parse_device
+from src.paths import MODEL_FAMILIES
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Merge OFT adapters with Riemannian merging.")
     parser.add_argument(
-        "--model_family", type=str, choices=["llama3.1_8b", "qwen2.5_3b"], required=True,
-    )
-    parser.add_argument(
-        "--language_model_name", type=str, required=True,
-        help="Base LLM name or local path (e.g. 'models/Llama-3.1-8B/').",
-    )
-    parser.add_argument(
-        "--adapter_paths", type=str, nargs="+", required=True,
-        help="Paths to OFT adapter directories to merge.")
-    parser.add_argument("--fisher_paths", type=str, nargs="+", default=None,
-                        help="Paths to diagonal Fisher dicts, one per adapter. Required for fisher merge modes.",  # noqa: E501
+        "--model_family", type=str, choices=list(MODEL_FAMILIES), required=True,
     )
     parser.add_argument(
         "--merge_mode", type=str, choices=["standard", "diagonal_fisher", "fisher"],
@@ -52,7 +43,7 @@ def parse_args():
         help="If set, bake the merged adapter into the base model and save the full merged model.",
     )
     parser.add_argument(
-        "--device", type=str, default="cuda:0",
+        "--device", type=str, default="cuda",
         help="Device to use (e.g., 'gpu', 'cpu').",
     )
     return parser.parse_args()
@@ -62,10 +53,15 @@ def main():
     args = parse_args()
     args.device = parse_device(args.device)
 
+    model_family = MODEL_FAMILIES[args.model_family]
+    base_model_path = model_family.base_model_path
+    adapter_paths = model_family.adapter_paths
+    fisher_paths = model_family.fisher_paths
+
     merging = OFTMerging(lam=args.lam, alphas=args.alphas, device=args.device)
     merged_weights = merging.merge(
-        adapter_paths=args.adapter_paths,
-        fisher_paths=args.fisher_paths,
+        adapter_paths=adapter_paths,
+        fisher_paths=fisher_paths,
         mode=args.merge_mode,
     )
 
@@ -73,7 +69,7 @@ def main():
     os.makedirs(merged_adapter_dir, exist_ok=True)
     save_file(merged_weights, os.path.join(merged_adapter_dir, "adapter_model.safetensors"))
 
-    config_src = os.path.join(args.adapter_paths[0], "adapter_config.json")
+    config_src = os.path.join(adapter_paths[0], "adapter_config.json")
     if os.path.exists(config_src):
         shutil.copy(config_src, os.path.join(merged_adapter_dir, "adapter_config.json"))
 
@@ -83,17 +79,17 @@ def main():
         sys.exit(0)
 
     base_model = AutoModelForCausalLM.from_pretrained(
-        args.language_model_name,
+        base_model_path,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else None,
-        device_map=None,
-    ).to(args.device)
+        device_map=args.device,
+    )
 
     merged_model = PeftModel.from_pretrained(base_model, merged_adapter_dir).merge_and_unload()
 
     model_save_dir = os.path.join(args.output_dir, "merged_model")
     os.makedirs(model_save_dir, exist_ok=True)
     merged_model.save_pretrained(model_save_dir)
-    AutoTokenizer.from_pretrained(args.language_model_name).save_pretrained(model_save_dir)
+    AutoTokenizer.from_pretrained(base_model_path).save_pretrained(model_save_dir)
     print(f"Saved merged model to: {model_save_dir}")
 
 

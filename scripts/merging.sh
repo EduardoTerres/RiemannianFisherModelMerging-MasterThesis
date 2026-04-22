@@ -14,20 +14,20 @@ conda activate OrthoMerge
 
 python src/scripts/perform_merging.py \
     --model_family llama3.1 \
-    --language_model_name "data/models/Llama-3.1-8B/" \
     --merge_mode "standard" \
+    --output_dir outputs/models/Llama-3.1-8B-merged-fisher \
     --save_merged_model \
-    --output_dir outputs/models/Llama-3.1-8B-merged-fisher
+    --device gpu
 
-bash scripts/eval.sh
+# bash scripts/eval.sh
 
 
 # Qwen
-python src/scripts/perform_merging.py \
-    --model_family qwen2.5 \
-    --language_model_name "data/models/Qwen-2.5-3B/" \
-    --merge_mode "standard" \
-    --save_merged_model \
-    --output_dir outputs/models/Qwen-2.5-3B-merged
+# python src/scripts/perform_merging.py \
+#     --model_family qwen2.5 \
+#     --merge_mode "standard" \
+#     --output_dir outputs/models/Qwen-2.5-3B-merged-std \
+#     --save_merged_model \
+#     --device gpu
 
-bash scripts/eval.sh
+# bash scripts/eval.sh

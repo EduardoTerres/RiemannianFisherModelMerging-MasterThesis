@@ -17,7 +17,7 @@ from tqdm import tqdm
 from src.analysis.plot_utils import plot_interpolation_curve
 from src.geometry import SOnManifold
 from src.merging import OFTMerging
-from src.path import (
+from src.constants import (
     ROOTDIR,
     LLAMA_ADAPTER_PATHS,
     LLAMA_BASE_MODEL_PATH,
@@ -25,6 +25,7 @@ from src.path import (
     QWEN_BASE_MODEL_PATH,
 )
 from src.dataset.dataset_1 import DATASET_1_TRAIN as DATASET_1, build_loader
+from src.utils import parse_device
 
 LOSS_SUBDIR = "loss"
 IMG_SUBDIR = "imgs"
@@ -267,6 +268,11 @@ if __name__ == "__main__":
         "--model-family", type=str, default="llama3.1", choices=["llama3.1", "qwen2.5"],
         help="Model family to use: 'llama3.1' or 'qwen2.5'.",
     )
+    parser.add_argument(
+        "--device", type=str, default="cuda:0",
+        help="Device to use for interpolation and loss evaluation (e.g., 'gpu', 'cpu').",
+    )
     args = parser.parse_args()
+    args.device = parse_device(args.device)
 
     main(args)

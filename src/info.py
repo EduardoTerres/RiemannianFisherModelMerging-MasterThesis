@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.path import (
+from src.constants import (
     LLAMA_BASE_MODEL_PATH, LLAMA_ADAPTERS_FOLDER,
     QWEN_BASE_MODEL_PATH, QWEN_ADAPTERS_FOLDER,
 )

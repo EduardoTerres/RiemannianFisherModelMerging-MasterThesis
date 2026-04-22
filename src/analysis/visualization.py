@@ -22,11 +22,12 @@ from src.analysis.plot_utils import (
 )
 from src.geometry import SOnManifold
 from src.merging import OFTMerging
-from src.path import (
+from src.constants import (
     ROOTDIR,
     LLAMA_ADAPTER_PATHS,
     QWEN_ADAPTER_PATHS,
 )
+from src.utils import parse_device
 
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 _manifold = SOnManifold()
@@ -269,6 +270,11 @@ if __name__ == "__main__":
         "--model-family", type=str, default="llama3.1", choices=["llama3.1", "qwen2.5"],
         dest="model_family", help="Model family to use: 'llama3.1' or 'qwen2.5'.",
     )
+    parser.add_argument(
+        "--device", type=str, default="cuda:0",
+        help="Device to use for interpolation and loss evaluation (e.g., 'gpu', 'cpu').",
+    )
     args = parser.parse_args()
+    args.device = parse_device(args.device)
 
     main(args)

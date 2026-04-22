@@ -1,6 +1,6 @@
 import torch
 from transformers import AutoModelForCausalLM
-from src.path import OFT_LLAMA_MODELS_DIR
+from src.constants import OFT_LLAMA_MODELS_DIR
 from peft import PeftModel
 
 

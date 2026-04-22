@@ -13,40 +13,56 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
 from src.merging import OFTMerging
+from src.utils import parse_device
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Merge OFT adapters with Riemannian merging.")
-    parser.add_argument("--language_model_name", type=str, required=True,
-                        help="Base LLM name or local path (e.g. 'models/Llama-3.1-8B/').")
-    parser.add_argument("--adapter_paths", type=str, nargs="+", required=True,
-                        help="Paths to OFT adapter directories to merge.")
-    parser.add_argument("--fisher_paths", type=str, nargs="+", default=None,
-                        help="Paths to diagonal Fisher dicts, one per adapter. Required for fisher merge modes.")
     parser.add_argument(
-        "--merge_mode",
-        type=str,
-        choices=["standard", "diagonal_fisher", "fisher"],
-        help="Merging strategy: 'standard' (weighted average), 'diagonal_fisher' (element-wise Fisher weighting), or 'linear_system' (full transported-Fisher solve).",
+        "--model_family", type=str, choices=["llama3.1_8b", "qwen2.5_3b"], required=True,
     )
-    parser.add_argument("--lam", type=float, default=1.0,
-                        help="Regularisation coefficient lambda used in fisher merge modes.")
-    parser.add_argument("--alphas", type=float, nargs="+", default=None,
-                        help="Per-task weights (must match number of adapters). Defaults to uniform.")
-    parser.add_argument("--output_dir", type=str, default="outputs/merged",
-                        help="Directory where the merged adapter and optionally the full model are saved.")
-    parser.add_argument("--save_merged_model", action="store_true",
-                        help="If set, bake the merged adapter into the base model and save the full merged model.")
-    parser.add_argument("--gpu", type=int, default=0,
-                        help="GPU id to use (-1 for CPU).")
+    parser.add_argument(
+        "--language_model_name", type=str, required=True,
+        help="Base LLM name or local path (e.g. 'models/Llama-3.1-8B/').",
+    )
+    parser.add_argument(
+        "--adapter_paths", type=str, nargs="+", required=True,
+        help="Paths to OFT adapter directories to merge.")
+    parser.add_argument("--fisher_paths", type=str, nargs="+", default=None,
+                        help="Paths to diagonal Fisher dicts, one per adapter. Required for fisher merge modes.",  # noqa: E501
+    )
+    parser.add_argument(
+        "--merge_mode", type=str, choices=["standard", "diagonal_fisher", "fisher"],
+        help="Merging strategy: 'standard' (weighted average), 'diagonal_fisher' (element-wise Fisher weighting), or 'linear_system' (full transported-Fisher solve).",  # noqa: E501
+    )
+    parser.add_argument(
+        "--lam", type=float, default=1.0,
+        help="Regularisation coefficient lambda used in fisher merge modes.",
+    )
+    parser.add_argument(
+        "--alphas", type=float, nargs="+", default=None,
+        help="Per-task weights (must match number of adapters). Defaults to uniform.",
+    )
+    parser.add_argument(
+        "--output_dir", type=str, default="outputs/merged",
+        help="Directory where the merged adapter and optionally the full model are saved.",
+    )
+    parser.add_argument(
+        "--save_merged_model", action="store_true",
+        help="If set, bake the merged adapter into the base model and save the full merged model.",
+    )
+    parser.add_argument(
+        "--device", type=str, default="cuda:0",
+        help="Device to use (e.g., 'gpu', 'cpu').",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    device = f"cuda:{args.gpu}" if torch.cuda.is_available() and args.gpu >= 0 else "cpu"
+    args.device = parse_device(args.device)
 
-    merging = OFTMerging(lam=args.lam, alphas=args.alphas, device=device)
+    merging = OFTMerging(lam=args.lam, alphas=args.alphas, device=args.device)
     merged_weights = merging.merge(
         adapter_paths=args.adapter_paths,
         fisher_paths=args.fisher_paths,
@@ -70,7 +86,7 @@ def main():
         args.language_model_name,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else None,
         device_map=None,
-    ).to(device)
+    ).to(args.device)
 
     merged_model = PeftModel.from_pretrained(base_model, merged_adapter_dir).merge_and_unload()
 

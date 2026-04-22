@@ -13,7 +13,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from src.path import (
+from src.constants import (
     ROOTDIR,
     LLAMA_ADAPTER_PATHS,
     LLAMA_BASE_MODEL_PATH,
@@ -21,6 +21,7 @@ from src.path import (
     QWEN_ADAPTER_PATHS,
 )
 from src.dataset.dataset_1 import DATASET_1_TRAIN as DATASET_1, build_loader
+from src.utils import parse_device
 
 def compute_diagonal_fim(
     model: torch.nn.Module,
@@ -421,9 +422,12 @@ if __name__ == "__main__":
     parser.add_argument("--num-samples", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int, default=256)
+    parser.add_argument(
+        "--device", type=str, default="cuda:0",
+        help="Device to use for FIM computation (e.g., 'gpu', 'cpu').",
+    )
     args = parser.parse_args()
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    args.device = parse_device(args.device)
 
     if args.model_family == "llama3.1":
         base_model_path = LLAMA_BASE_MODEL_PATH
@@ -438,7 +442,7 @@ if __name__ == "__main__":
         base_model_path=base_model_path,
         adapter_paths=adapter_paths,
         output_dir=args.output_dir,
-        device=device,
+        device=args.device,
         num_samples=args.num_samples,
         batch_size=args.batch_size,
         max_length=args.max_length,

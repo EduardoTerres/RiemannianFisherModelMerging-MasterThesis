@@ -12,40 +12,22 @@ set -e
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate OrthoMerge
 
-# python src/scripts/perform_merging.py \
-#     --language_model_name "data/models/Llama-3.1-8B/" \
-#     --adapter_paths \
-#         data/models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_magicoder/ \
-#         data/models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_numinamath/ \
-#         data/models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_commonsense/ \
-#         data/models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_socialiqa/ \
-#         data/models/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_scienceqa/ \
-#     --fisher_paths \
-#         data/empirical_fishers/llama3-1_8b_finetune_magicoder.safetensors \
-#         data/empirical_fishers/llama3-1_8b_finetune_numinamath.safetensors \
-#         data/empirical_fishers/llama3-1_8b_finetune_commonsense.safetensors \
-#         data/empirical_fishers/llama3-1_8b_finetune_socialiqa.safetensors \
-#         data/empirical_fishers/llama3-1_8b_finetune_scienceqa.safetensors \
-#     --output_dir outputs/models/Llama-3.1-8B-merged-fisher \
-#     --merge_mode "standard" \
-#     --save_merged_model \
-#     --gpu 0
+python src/scripts/perform_merging.py \
+    --model_family llama3.1 \
+    --language_model_name "data/models/Llama-3.1-8B/" \
+    --merge_mode "standard" \
+    --save_merged_model \
+    --output_dir outputs/models/Llama-3.1-8B-merged-fisher
 
-# bash scripts/eval.sh
+bash scripts/eval.sh
 
 
 # Qwen
 python src/scripts/perform_merging.py \
+    --model_family qwen2.5 \
     --language_model_name "data/models/Qwen-2.5-3B/" \
-    --adapter_paths \
-        data/models/Qwen-2.5-3B_OFT_adapters/qwen2.5_3b_finetune_magicoder/ \
-        data/models/Qwen-2.5-3B_OFT_adapters/qwen2.5_3b_finetune_numinamath/ \
-        data/models/Qwen-2.5-3B_OFT_adapters/qwen2.5_3b_finetune_commonsense/ \
-        data/models/Qwen-2.5-3B_OFT_adapters/qwen2.5_3b_finetune_socialiqa/ \
-        data/models/Qwen-2.5-3B_OFT_adapters/qwen2.5_3b_finetune_scienceqa/ \
-    --output_dir outputs/models/Qwen-2.5-3B-merged \
     --merge_mode "standard" \
     --save_merged_model \
-    --gpu 0
+    --output_dir outputs/models/Qwen-2.5-3B-merged
 
 bash scripts/eval.sh

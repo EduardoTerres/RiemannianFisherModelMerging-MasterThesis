@@ -217,3 +217,41 @@ def plot_module_layer_distributions(
         plt.close(fig)
     else:
         plt.show()
+
+
+def plot_oft_covariance_eigenvalues(
+    eigenvalues: np.ndarray,
+    labels: List[str],
+    title: str = "Top eigenvalues of per-layer OFT covariance",
+    save_path: Optional[str] = None,
+    ax: Optional[plt.Axes] = None,
+) -> None:
+    """Line plot: x = layer depth, one line per top-k eigenvalue rank.
+
+    Args:
+        eigenvalues: (L, K) array; eigenvalues[:, 0] is the largest eigenvalue.
+    """
+    L, K = eigenvalues.shape
+    fig = None
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(min(max(8, L // 4), 40), 4))
+
+    for i in range(K):
+        ax.plot(range(L), eigenvalues[:, i], linewidth=1.5, label=f"$\\lambda_{{{i+1}}}$")
+
+    ax.set_xticks(range(L))
+    ax.set_xticklabels(labels, rotation=90, fontsize=5)
+    ax.set_xlabel("Layer depth")
+    ax.set_ylabel("Eigenvalue")
+    ax.set_title(title)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, linestyle="--", alpha=0.4)
+
+    if fig is not None:
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+        else:
+            plt.show()

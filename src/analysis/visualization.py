@@ -10,7 +10,7 @@ import re
 
 import numpy as np
 import torch
-from typing import Dict, List
+from typing import Dict, List, Optional
 from tqdm import tqdm
 
 from src.analysis.plot_utils import (
@@ -20,6 +20,7 @@ from src.analysis.plot_utils import (
     plot_layer_norm_variance,
     plot_module_layer_distributions,
     plot_norm_distributions,
+    plot_oft_covariance_eigenvalues,
 )
 from src.geometry import SOnManifold
 from src.merging import OFTMerging
@@ -206,6 +207,48 @@ def compute_module_layer_distributions(
     return result
 
 
+def _skew_repr(params: torch.Tensor) -> torch.Tensor:
+    """OFT (num_blocks, d) upper-triangular skew params -> flat vector xi."""
+    return params.flatten()
+
+
+def compute_oft_covariance_eigenvalues(
+    task_vectors: List[Dict[str, torch.Tensor]],
+    top_k: int = 5,
+    alpha: Optional[List[float]] = None,
+) -> tuple[np.ndarray, List[str]]:
+    """Per-layer covariance Sigma^(l) = sum_t alpha_t * xi_t^(l) @ xi_t^(l).T; return top-k eigenvalues.
+
+    Args:
+        task_vectors: T dicts mapping layer key -> rotation tensor.
+        top_k:        Number of leading eigenvalues to track.
+        alpha:        Per-task weights (uniform 1/T if None).
+
+    Returns:
+        eigenvalues: (L, top_k) array, column 0 = largest eigenvalue per layer.
+        labels:      Layer index strings for axis tick labels.
+    """
+    keys = _oft_keys(task_vectors)
+    T = len(task_vectors)
+    if alpha is None:
+        alpha = [1.0 / T] * T
+
+    eigenvalues = []
+    for k in tqdm(keys, desc="OFT covariance eigenvalues"):
+        xis = [_skew_repr(tv[k]).float().cpu() for tv in task_vectors]
+        # X is (T, D); Sigma = X^T diag(alpha) X has the same non-zero eigenvalues
+        # as the T×T gram G = X diag(alpha) X^T, avoiding the huge D×D matrix.
+        X = torch.stack(xis)  # (T, D)
+        a_sqrt = torch.tensor(alpha).sqrt().unsqueeze(1)  # (T, 1)
+        X_scaled = a_sqrt * X  # (T, D)
+        G = X_scaled @ X_scaled.T  # (T, T)
+        vals = torch.linalg.eigvalsh(G).flip(0)[:top_k].numpy()
+        if len(vals) < top_k:
+            vals = np.pad(vals, (0, top_k - len(vals)))
+        eigenvalues.append(vals)
+    return np.array(eigenvalues), _layer_labels(keys)
+
+
 def compute_layer_geodesic_distance(
     task_vectors: List[Dict[str, torch.Tensor]],
 ) -> tuple[np.ndarray, List[str]]:
@@ -306,6 +349,15 @@ def _run(family_name: str, args: argparse.Namespace):
         save_path=str(IMG_DIR / "module_layer_distributions.png"),
     )
     print(f"Saved -> {IMG_DIR / 'module_layer_distributions.png'}")
+
+    # --- Per-layer OFT covariance eigenvalues ---
+    cov_eigenvalues, labels = compute_oft_covariance_eigenvalues(task_vectors)
+    plot_oft_covariance_eigenvalues(
+        eigenvalues=cov_eigenvalues,
+        labels=labels,
+        save_path=str(IMG_DIR / "oft_covariance_eigenvalues.png"),
+    )
+    print(f"Saved -> {IMG_DIR / 'oft_covariance_eigenvalues.png'}")
 
 
 if __name__ == "__main__":

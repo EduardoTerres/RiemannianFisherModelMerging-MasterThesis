@@ -55,10 +55,10 @@ def interpolate(
             interpolated[key] = end_params
             continue
 
-        num_blocks, d = end_params.shape
-        block_size = int((1 + (1 + 8 * d) ** 0.5) / 2)
+        num_blocks, son_dimension = end_params.shape
+        block_size = int((1 + (1 + 8 * son_dimension) ** 0.5) / 2)
 
-        end_skew = _merging.oft_params_to_skew_matrix(end_params, block_size)
+        end_skew = _merging.oft_params_to_skew_matrix(end_params, son_dimension)
         R_end = torch.matrix_exp(end_skew)
 
         if start_model is None:
@@ -66,7 +66,7 @@ def interpolate(
             R_start = R_start.unsqueeze(0).expand(num_blocks, -1, -1)
         else:
             start_params = start_model[key]
-            start_skew = _merging.oft_params_to_skew_matrix(start_params, block_size)
+            start_skew = _merging.oft_params_to_skew_matrix(start_params, son_dimension)
             R_start = torch.matrix_exp(start_skew)
 
         tangent = _manifold.exact_log(R_start, R_end)
@@ -180,7 +180,7 @@ def _run(family_name: str, args: argparse.Namespace):
     adapter_paths = model_family.adapter_paths
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    interpolation_grid = np.linspace(0, 1, args.num_points).tolist()
+    interpolation_grid = np.linspace(0, 2, args.num_points).tolist()
 
     tokenizer = AutoTokenizer.from_pretrained(base_model_path)
     if tokenizer.pad_token is None:

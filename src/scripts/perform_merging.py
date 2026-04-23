@@ -8,13 +8,64 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 import torch
+import wandb
 from safetensors.torch import save_file
+from torch import Tensor
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from src.merging import OFTMerging
+from src.merging import OFTMerging, WudiOFTMerging, AdaMergingPP, WANDB_PROJECT
 from src.utils import parse_device
-from src.paths import MODEL_FAMILIES
+from src.paths import MODEL_FAMILIES, ModelFamily
+from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
+
+
+def _build_adamerging(
+    model_family: ModelFamily,
+    device: str,
+    num_samples: int = 256,
+    batch_size: int = 16,
+    max_length: int = 32,
+) -> dict[str, Tensor]:
+    tokenizer = AutoTokenizer.from_pretrained(model_family.base_model_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    task_names = [tag for tag, *_ in DATASET_1_TEST]
+    task_loaders = [
+        build_loader(
+            dataset_path=ds_path,
+            dataset_name=ds_name,
+            split=split,
+            doc_to_text=doc_to_text,
+            tokenizer=tokenizer,
+            num_samples=num_samples,
+            batch_size=batch_size,
+            max_length=max_length,
+        )
+        for _, ds_path, ds_name, split, doc_to_text in DATASET_1_TEST
+    ]
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_family.base_model_path, torch_dtype=torch.float32, device_map=None
+    )
+    peft_model = PeftModel.from_pretrained(
+        base_model, model_family.adapter_paths[0], is_trainable=False
+    )
+    peft_model.enable_adapter_layers()
+    peft_model.to(device)
+    peft_model.eval()
+
+    wandb.init(project=WANDB_PROJECT, name=f"adamerging-{model_family.name}")
+
+    merging = AdaMergingPP(device=device)
+    merged_weights = merging.merge(
+        adapter_paths=model_family.adapter_paths,
+        model=peft_model,
+        task_loaders=task_loaders,
+        task_names=task_names,
+    )
+    return merged_weights
 
 
 def parse_args():
@@ -56,14 +107,10 @@ def main():
     model_family = MODEL_FAMILIES[args.model_family]
     base_model_path = model_family.base_model_path
     adapter_paths = model_family.adapter_paths
-    fisher_paths = model_family.fisher_paths
 
-    merging = OFTMerging(lam=args.lam, alphas=args.alphas, device=args.device)
-    merged_weights = merging.merge(
-        adapter_paths=adapter_paths,
-        fisher_paths=fisher_paths,
-        mode=args.merge_mode,
-    )
+    # merging = OFTMerging(lam=args.lam, alphas=args.alphas, device=args.device)
+    # merging = WudiOFTMerging(device=args.device)
+    merged_weights = _build_adamerging(model_family=model_family, device=args.device)
 
     merged_adapter_dir = os.path.join(args.output_dir, "merged_adapter")
     os.makedirs(merged_adapter_dir, exist_ok=True)

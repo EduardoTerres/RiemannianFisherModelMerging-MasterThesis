@@ -6,7 +6,7 @@
 
 data/*
 outputs/*
-
+wandb/*
 miniconda.sh
 OrthoMerge/models/*
 OrthoMerge/outputs/*

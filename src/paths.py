@@ -29,7 +29,7 @@ LLAMA_ADAPTER_PATHS = [
     f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_numinamath",
     f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_magicoder",
     f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_scienceqa",
-    "outputs/models/Llama-3.1-8B-merged-std/merged_adapter",
+    # "outputs/models/Llama-3.1-8B-merged-std/merged_adapter",
 ]
 LLAMA_FISHER_PATHS = [
     f"{FISHERS_DIR}/llama3-1_8b_finetune_magicoder.safetensors",
@@ -50,7 +50,7 @@ QWEN_ADAPTER_PATHS = [
     f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_numinamath",
     f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_magicoder",
     f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_scienceqa",
-    "outputs/models/Qwen-2.5-3B-merged-std/merged_adapter",
+    # "outputs/models/Qwen-2.5-3B-merged-std/merged_adapter",
 ]
 QWEN_FISHER_PATHS = [
     f"{FISHERS_DIR}/qwen2.5_3b_finetune_magicoder.safetensors",

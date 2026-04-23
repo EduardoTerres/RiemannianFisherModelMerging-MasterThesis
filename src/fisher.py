@@ -3,9 +3,11 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import List
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
+from torch import Tensor
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from safetensors.torch import save_file
@@ -24,7 +26,7 @@ def compute_diagonal_fim(
     model: torch.nn.Module,
     loader: DataLoader,
     device: str,
-) -> dict:
+    ) -> dict:
     """
     Compute the diagonal empirical Fisher: E[grad log p]^2.
     Args:

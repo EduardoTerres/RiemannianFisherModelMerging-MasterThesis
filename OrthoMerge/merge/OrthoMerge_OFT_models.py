@@ -16,7 +16,6 @@ def merge_cayley_Q_list(
     weights_list: List[torch.Tensor],
     correction: Optional[bool] = True,
 ) -> torch.Tensor:
-    print("product C")
     assert len(weights_list) > 0, "weights_list none"
     n_task = len(weights_list)
 
@@ -165,6 +164,8 @@ def merge_oft_adapter_weights(adapter_paths):
                 print(f"    Warning: No weights found for key {key}")
 
         else:
+            print("    !!!!!!!!!!!!!!!! Non-OFT weight, averaging or copying...")
+            exit(0)
             weights_list = [weights[key] for weights in all_weights if key in weights]
             if len(weights_list) > 1:
                 avg_weight = torch.stack(weights_list).mean(dim=0)

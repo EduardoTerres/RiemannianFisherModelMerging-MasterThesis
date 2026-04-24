@@ -15,6 +15,9 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
+from nngeometry.metrics import FIM
+from nngeometry.object import PMatDense, PMatDiag, PMatKFAC
+
 from src.paths import (
     ROOTDIR,
     MODEL_FAMILIES,
@@ -22,10 +25,11 @@ from src.paths import (
 from src.dataset.dataset_1 import DATASET_1_TRAIN as DATASET_1, build_loader
 from src.utils import parse_device
 
-def compute_diagonal_fim(
+def compute_empirical_diagonal_fisher(
     model: torch.nn.Module,
     loader: DataLoader,
     device: str,
+    tokenizer=None,
     ) -> dict:
     """
     Compute the diagonal empirical Fisher: E[grad log p]^2.
@@ -47,22 +51,34 @@ def compute_diagonal_fim(
     for batch in tqdm(loader, desc="Computing Diagonal FIM"):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
 
-        # Standard causal LM: predict next token
         outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         shift_logits = outputs.logits[:, :-1, :]
-        shift_labels = input_ids[:, 1:]
-        shift_mask = attention_mask[:, 1:]
+        shift_labels = labels[:, 1:]
+        label_mask = (shift_labels != -100).float()
+
+        # Clamp -100 to 0 so nll_loss doesn't index out of bounds; masked out below
+        shift_labels_safe = shift_labels.clone()
+        shift_labels_safe[shift_labels == -100] = 0
 
         log_probs = F.log_softmax(shift_logits, dim=-1)
-        # Per-token NLL, masked and averaged
         token_nll = F.nll_loss(
             log_probs.view(-1, log_probs.size(-1)),
-            shift_labels.reshape(-1),
+            shift_labels_safe.reshape(-1),
             reduction="none",
         ).view(shift_labels.shape)
 
-        loss = (token_nll * shift_mask).sum() / shift_mask.sum()
+        loss = (token_nll * label_mask).sum() / label_mask.sum().clamp(min=1)
+
+        if count == 0 and tokenizer is not None:
+            for b in range(input_ids.shape[0]):
+                prompt = tokenizer.decode(input_ids[b], skip_special_tokens=False)
+                fisher_ids = shift_labels[b][label_mask[b].bool()].tolist()
+                answer = tokenizer.decode(fisher_ids, skip_special_tokens=False)
+                print(f"\n--- Sample {b} ---")
+                print(f"Prompt: {prompt!r}")
+                print(f"Answer: {answer!r}")
 
         model.zero_grad()
         loss.backward()
@@ -80,7 +96,7 @@ def compute_diagonal_fim(
     return fisher
 
 
-def compute_empirical_diagonal_fisher(model, loader, device):
+def compute_diagonal_fisher(model, loader, device, tokenizer=None):
     """
     Compute the empirical diagonal Fisher for the trainable parameters
     of a causal LM / PEFT model.
@@ -105,16 +121,33 @@ def compute_empirical_diagonal_fisher(model, loader, device):
         attention_mask = batch.get("attention_mask")
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
+        labels = batch["labels"].to(device)
+
+        answer_mask = (labels[:, 1:] != -100).float()  # (B, T-1)
+
+        with torch.no_grad():
+            logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+            sampled = torch.multinomial(
+                F.softmax(logits[:, :-1, :].reshape(-1, logits.shape[-1]), dim=-1), 1
+            ).reshape(input_ids.shape[0], -1)  # (B, T-1)
 
         outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         log_probs = F.log_softmax(outputs.logits[:, :-1, :], dim=-1)
-        token_log_probs = log_probs.gather(-1, input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
-
-        if attention_mask is not None:
-            token_log_probs = token_log_probs * attention_mask[:, 1:].to(token_log_probs.dtype)
+        token_log_probs = log_probs.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)
+        token_log_probs = token_log_probs * answer_mask
 
         seq_log_probs = token_log_probs.sum(dim=-1)   # (B,)
         batch_size = seq_log_probs.shape[0]
+
+        if n_sequences == 0 and tokenizer is not None:
+            for b in range(batch_size):
+                prompt = tokenizer.decode(input_ids[b], skip_special_tokens=False)
+                ans_mask_b = answer_mask[b].bool()
+                backprop_ids = sampled[b][ans_mask_b].tolist()
+                backprop_text = tokenizer.decode(backprop_ids, skip_special_tokens=False)
+                print(f"\n--- Sample {b} ---")
+                print(f"Prompt:  {prompt!r}")
+                print(f"Backprop: {backprop_text!r}")
 
         for i in range(batch_size):
             model.zero_grad(set_to_none=True)
@@ -255,79 +288,12 @@ def compute_kfac(model, loader, device):
     dict[str, tuple[Tensor, Tensor]]
         {module_name: (A, G)} both on CPU.
     """
-    model.eval()
-    model.to(device)
-
-    A, G = {}, {}
-    handles = []
-
-    # Capture forward inputs and backward output-gradients for every Linear layer.
-    acts, grads = {}, {}
-    for name, mod in model.named_modules():
-        if not isinstance(mod, torch.nn.Linear):
-            continue
-
-        def _fwd(n):
-            def hook(_, inp, __):
-                acts[n] = inp[0].detach().float()
-            return hook
-
-        def _bwd(n):
-            def hook(_, __, g_out):
-                grads[n] = g_out[0].detach().float()
-            return hook
-
-        handles += [
-            mod.register_forward_hook(_fwd(name)),
-            mod.register_full_backward_hook(_bwd(name)),
-        ]
-
-    n_samples = 0
-    for batch in tqdm(loader, desc="Computing K-FAC"):
-        batch = {k: v.to(device) for k, v in batch.items()}
-        for s in range(batch["input_ids"].size(0)):
-            model.zero_grad(set_to_none=True)
-            sample = {k: v[s:s+1] for k, v in batch.items()}
-
-            # Mask padding in labels so loss (and its gradients) ignores pad tokens.
-            labels = sample["input_ids"].clone()
-            if "attention_mask" in sample:
-                labels[sample["attention_mask"] == 0] = -100
-            model(**sample, labels=labels).loss.backward()
-
-            # attention_mask: (1, T) → boolean mask over token positions
-            mask = sample.get("attention_mask")  # (1, T) or None
-            if mask is not None:
-                mask = mask[0].bool().cpu()  # (T,)
-
-            for name in list(acts.keys() & grads.keys()):
-                a = acts[name].reshape(-1, acts[name].shape[-1]).cpu()   # (T, d_in)
-                g = grads[name].reshape(-1, grads[name].shape[-1]).cpu() # (T, d_out)
-
-                if mask is not None and mask.shape[0] == a.shape[0]:
-                    a = a[mask]
-                    g = g[mask]
-
-                T = a.shape[0]
-                if T == 0:
-                    continue
-
-                if name not in A:
-                    A[name] = torch.zeros(a.shape[1], a.shape[1])
-                    G[name] = torch.zeros(g.shape[1], g.shape[1])
-
-                A[name].addmm_(a.t(), a, alpha=1.0 / T)
-                G[name].addmm_(g.t(), g, alpha=1.0 / T)
-
-            n_samples += 1
-
-    for h in handles:
-        h.remove()
-
-    if n_samples == 0:
-        raise ValueError("No sequences processed.")
-
-    return {n: (A[n] / n_samples, G[n] / n_samples) for n in A}
+    F_kfac = FIM(
+        model=model,
+        loader=loader,
+        representation=PMatKFAC,
+        variant="classif_logits",
+    )
 
 
 def compute_and_save_fim(
@@ -362,8 +328,8 @@ def compute_and_save_fim(
     )
     fisher = dict()
 
-    fisher = compute_diagonal_fim(model, loader, device)
-    # fisher = compute_empirical_diagonal_fisher(model, loader, device)
+    # fisher = compute_diagonal_fim(model, loader, device, tokenizer)
+    fisher = compute_empirical_diagonal_fisher(model, loader, device, tokenizer)
     # fisher = compute_kfac(model, loader, device)
 
     save_file(fisher, save_path)
@@ -384,6 +350,8 @@ def compute_all_fishers(
     for i, ((task_tag, dataset_path, dataset_name, split, doc_to_text), adapter_path) in tqdm(
         enumerate(zip(DATASET_1, adapter_paths), 1), total=total, desc="Computing FIMs"
     ):
+        if task_tag != "commonsense_qa":
+            continue
         model_tag = os.path.basename(adapter_path.rstrip("/"))
         save_path = os.path.join(output_dir, f"{model_tag}.safetensors")
         print(f"\n[{i}/{total}] Task: {task_tag}  adapter={model_tag}  split={split}")

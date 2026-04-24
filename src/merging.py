@@ -19,9 +19,6 @@ from src.paths import ROOTDIR
 
 MergeMode = Literal["standard", "diagonal_fisher"]
 
-WANDB_PROJECT = "edu-thesis"
-
-
 class RiemannianMerging(ABC):
     """
     Abstract Riemannian merging interface.
@@ -303,6 +300,7 @@ class OFTMerging(RiemannianMerging):
         Returns:
             Merged parameters of shape (num_blocks, d).
         """
+        raise NotImplementedError("Full Fisher merging is not implemented yet.")
         num_blocks, son_dimension = weights_list[0].shape
         dtype, device = weights_list[0].dtype, weights_list[0].device
         block_size = int((1 + (1 + 8 * son_dimension) ** 0.5) / 2)
@@ -314,11 +312,8 @@ class OFTMerging(RiemannianMerging):
 
         for alpha_t, oft_params_t, fisher_t in zip(alphas, weights_list, fisher_list):
             # Reconstruct skew-symmetric matrices
-            skew_matrix = self.oft_params_to_skew_matrix(basis_vector, block_size)  # (num_blocks, n, n)
+            skew_matrix = self.oft_params_to_skew_matrix(oft_params_t, son_dimension)  # (num_blocks, n, n)
             Pt = self.manifold.compute_Pt(skew_matrix, block_size)  # (num_blocks, d, d)
-
-            print("fisher shape:", fisher_t.shape, "Pt shape:", Pt.shape)
-            exit(0)
 
             F_tilde = Pt @ fisher_t @ Pt.transpose(-2, -1)
 
@@ -467,7 +462,7 @@ class WudiOFTMerging(OFTMerging):
     the same oft_params format as the other merging methods.
     """
 
-    def __init__(self, n_steps: int = 100, lr: float = 1e-3, device: str = "cpu"):
+    def __init__(self, n_steps: int = 200, lr: float = 1e-3, device: str = "cpu"):
         super().__init__(lam=1.0, alphas=None, device=device)
         self.n_steps = n_steps
         self.lr = lr
@@ -489,251 +484,223 @@ class WudiOFTMerging(OFTMerging):
             Merged OFT parameters of shape (num_blocks, d).
         """
         task_vectors = None
-        if fisher_list is not None:
-            alphas = torch.tensor(self.alphas, dtype=torch.float32) if self.alphas is not None else torch.tensor([1] * len(weights_list), dtype=torch.float32)
+        if "fisher" in mode:
+            alphas = torch.tensor(self.alphas, dtype=torch.float32) if self.alphas is not None else torch.tensor([0.5] * len(weights_list), dtype=torch.float32)
             task_vectors = self.fisher_full_task_vectors(weights_list, fisher_list, alphas)
-        else:
+        elif mode == "standard":
             task_vectors = weights_list
+        else:
+            raise ValueError(f"Unsupported merge mode for WUDI: {mode!r}")
         return self._wudi_merging(task_vectors)
 
     def _wudi_merging(self, weights_list: List[Tensor]) -> Tensor:
         """
-        Algorithm: WUDI-Merging for OFT on SO(n).
+        Algorithm 1: WUDI-Merging adapted for OFT on SO(n).
 
-        Optimises directly in oft_params (upper-tri coordinate) space — no
-        projection needed.  A differentiable to_skew converts coordinates to
-        the skew matrix only for the loss computation.
+        Operates in skew-symmetric (Lie algebra) space.
+        The task vectors here are the skew matrices themselves.
+
+        Loss (Eq. 21):
+            L = sum_i (1 / ||tau_i||^2_F) * ||(tau_m - tau_i)(tau_i)^T||^2_F
 
         Args:
-            weights_list: T tensors of shape (num_blocks, d).
-
+            weights_list: T tensors of shape (num_blocks, d),
+                        each being OFT upper-tri coordinates (task vectors).
         Returns:
             Merged coordinates of shape (num_blocks, d).
         """
         T = len(weights_list)
         _, son_dimension = weights_list[0].shape
 
-        # Precompute task skew matrices and squared Frobenius norms
-        xi_list, norm_sq_list = [], []
+        # Convert task vectors from upper-tri coordinates to skew matrices
+        # tau_{i,l} in paper corresponds to skew matrices here
+        tau_list = []
+        tau_norm_sq_list = []
         for w in weights_list:
-            xi_t = self.oft_params_to_skew_matrix(w.float(), son_dimension).detach()
-            xi_list.append(xi_t)
-            norm_sq_list.append(xi_t.pow(2).sum(dim=(-2, -1)).clamp(min=1e-8))
+            tau = self.oft_params_to_skew_matrix(w.float(), son_dimension).detach()
+            tau_list.append(tau)
+            # ||tau_{i,l}||^2_F per block
+            norm_sq = tau.pow(2).sum(dim=(-2, -1)).clamp(min=1e-8)
+            tau_norm_sq_list.append(norm_sq)
 
-        # Initialise omega^0 = sum_t vec_xi_{t,l}  (in oft_params space)
-        omega = sum(w.float() for w in weights_list).clone().detach().requires_grad_(True)
-        optimizer = torch.optim.Adam([omega], lr=self.lr)
+        # Precompute tau_i^T for each task (for skew matrices, tau^T = -tau,
+        # but we keep it explicit to match the paper exactly)
+        tau_T_list = [tau.transpose(-2, -1) for tau in tau_list]
 
-        for _ in range(self.n_steps):
+        # Step 1: Initialize tau^0_{m,l} = sum_i tau_{i,l} (Algorithm 1, line 3)
+        tau_m_init = torch.stack(tau_list).sum(dim=0)
+
+        # Optimise in skew-matrix space directly
+        tau_m = tau_m_init.clone().detach().requires_grad_(True)
+        optimizer = torch.optim.Adam([tau_m], lr=self.lr)
+
+        # Step 2: Optimise (Algorithm 1, lines 5-9)
+        for step in range(self.n_steps):
             optimizer.zero_grad()
 
-            xi_m = self.oft_params_to_skew_matrix(omega, son_dimension)
-
-            loss = torch.zeros(1, device=self.device, dtype=torch.float32)
+            loss = torch.tensor(0.0, device=self.device, dtype=torch.float32)
             for t in range(T):
-                diff = xi_m - xi_list[t]
-                frob_sq = (diff @ xi_list[t]).pow(2).sum(dim=(-2, -1))
-                loss = loss + (frob_sq / norm_sq_list[t]).sum()
+                # delta_i = tau_m - tau_i (Eq. 2)
+                delta = tau_m - tau_list[t]
+
+                # ||delta_i * (tau_i)^T||^2_F (Eq. 21)
+                prod = delta @ tau_T_list[t]                    # (num_blocks, n, n)
+                frob_sq = prod.pow(2).sum(dim=(-2, -1))         # (num_blocks,)
+
+                # Weighted by 1/||tau_i||^2_F (balanced weighting, Eq. 21)
+                loss = loss + (frob_sq / tau_norm_sq_list[t]).sum()
 
             loss.backward()
             optimizer.step()
 
-        return omega.detach().to(weights_list[0].dtype)
+        # Convert back from skew matrix to upper-tri OFT coordinates
+        merged_params = self.skew_matrix_to_oft_params(tau_m.detach())
+        return merged_params.to(weights_list[0].dtype)
 
 
-class AdaMergingPP(RiemannianMerging):
-    """Layer-wise AdaMerging++ with Ties-Merging for OFT adapters.
-
-    Optimizes per-layer per-task coefficients alpha_t^l via entropy
-    minimisation on unlabeled test data, then returns merged OFT weights.
-    """
+class AdaMergingPP:
 
     def __init__(
         self,
         n_iters: int = 500,
         lr: float = 1e-2,
-        batch_size: int = 16,
+        batch_size: int = 64,
         ties_trim_ratio: float = 0.2,
-        init_alpha: float = 0.3,
+        init_lambda: float = 0.3,
+        log_wandb: bool = True,
         device: str = "cpu",
-    ):
-        super().__init__(manifold=SOnManifold())
-        self.n_iters = n_iters
-        self.lr = lr
-        self.batch_size = batch_size
-        self.ties_trim_ratio = ties_trim_ratio
-        self.init_alpha = init_alpha
-        self.device = device
+    ) -> None:
+        self.n_iters, self.lr, self.batch_size = n_iters, lr, batch_size
+        self.ties_trim_ratio, self.init_lambda, self.device = ties_trim_ratio, init_lambda, device
+        self.log_wandb = log_wandb
 
-    def load_fishers(self, paths: List[str]) -> List[Dict[str, Tensor]]:
-        raise NotImplementedError
+    def _load(self, path: str) -> Dict[str, Tensor]:
+        sf = os.path.join(path, "adapter_model.safetensors")
+        bn = os.path.join(path, "adapter_model.bin")
+        if os.path.exists(sf):
+            return load_file(sf, device=self.device)
+        if os.path.exists(bn):
+            return torch.load(bn, map_location=self.device)
+        raise FileNotFoundError(f"No adapter at {path}")
 
-    def merge_formula(
-        self,
-        weights_list: List[Tensor],
-        fisher_list: Optional[List[Dict[str, Tensor]]] = None,
-        mode: MergeMode = "standard",
-    ) -> Tensor:
-        raise NotImplementedError
+    @staticmethod
+    def _ties(vecs: List[Tensor], trim_ratio: float) -> List[Tensor]:
+        """Ties-Merging: trim, elect sign, disjoint mask. vecs: T tensors of same shape."""
+        T, shape = len(vecs), vecs[0].shape
+        flat = torch.stack(vecs).float().view(T, -1)  # (T, D)
+        D = flat.shape[1]
 
-    def _alpha_heatmap(self, alpha_np, task_names: List[str], n_layers: int):
-        fig, ax = plt.subplots(figsize=(max(6, n_layers // 4), max(3, len(task_names))))
-        im = ax.imshow(alpha_np, aspect="auto", cmap="Blues")
-        ax.set_yticks(range(len(task_names)))
-        ax.set_yticklabels(task_names)
-        ax.set_xlabel("Layer index")
-        ax.set_ylabel("Task")
-        plt.colorbar(im, ax=ax)
-        plt.tight_layout()
-        return fig
+        k = max(1, int(trim_ratio * D))
+        thresh = flat.abs().kthvalue(D - k + 1, dim=1, keepdim=True).values  # (T, 1)
+        trimmed = flat * (flat.abs() >= thresh)  # (T, D)
 
-    def load_weights(self, adapter_paths: List[str]) -> List[Dict[str, Tensor]]:
-        all_weights = []
-        for path in adapter_paths:
-            model_path = os.path.join(path, "adapter_model.safetensors")
-            if not os.path.exists(model_path):
-                model_path = os.path.join(path, "adapter_model.bin")
-                if os.path.exists(model_path):
-                    weights = torch.load(model_path, map_location=self.device)
-                else:
-                    print(f"[WARNING]: No adapter weights found at {path}, skipping...")
-                    continue
-            else:
-                weights = load_file(model_path, device=self.device)
-            all_weights.append(weights)
-        return all_weights
+        elected = torch.where(
+            (trimmed * (trimmed > 0)).sum(0) >= (trimmed.abs() * (trimmed < 0)).sum(0),
+            torch.ones(D, device=flat.device), -torch.ones(D, device=flat.device),
+        )  # (D,)
 
-    def _ties_preprocess(
-        self, task_vectors: Dict[str, List[Tensor]]
-    ) -> Dict[str, List[Tensor]]:
-        """Trim, elect sign, disjoint mask per parameter key."""
-        result = {}
-        for key, vecs in task_vectors.items():
-            T = len(vecs)
-            flat = torch.stack(vecs, dim=0).float().view(T, -1)  # (T, D)
-            D = flat.shape[1]
-            k = max(1, int(self.ties_trim_ratio * D))
+        mask = (trimmed.sign() == elected.unsqueeze(0)) | (trimmed == 0)  # (T, D)
+        phi = trimmed * mask  # (T, D)
+        return [phi[t].view(shape) for t in range(T)]
 
-            threshold = flat.abs().kthvalue(D - k + 1, dim=1, keepdim=True).values
-            trimmed = flat * (flat.abs() >= threshold)
+    @staticmethod
+    def _entropy(logits: Tensor, mask: Tensor) -> Tensor:
+        """Mean token entropy. logits: (B,S,V), mask: (B,S) -> scalar."""
+        p = logits.softmax(-1)  # (B, S, V)
+        h = -(p * p.clamp(min=1e-8).log()).sum(-1)  # (B, S)
+        return (h * mask.float()).sum() / mask.float().sum().clamp(min=1.0)
 
-            pos_mass = (trimmed * (trimmed > 0)).sum(0)
-            neg_mass = (trimmed.abs() * (trimmed < 0)).sum(0)
-            elected = torch.where(pos_mass >= neg_mass,
-                                  torch.ones(D, device=flat.device),
-                                  -torch.ones(D, device=flat.device))
+    def merge(self, adapter_paths: List[str], model, task_loaders: List,
+              task_names: List[str]) -> Dict[str, Tensor]:
 
-            mask = (trimmed.sign() == elected.unsqueeze(0)) | (trimmed == 0)
-            phi = trimmed * mask
-            result[key] = [phi[t].view(vecs[0].shape) for t in range(T)]
-        return result
+        T = len(adapter_paths)
+        assert len(task_loaders) == T == len(task_names)
 
-    def merge(  # type: ignore[override]
-        self,
-        adapter_paths: List[str],
-        model,
-        task_loaders: List,
-        task_names: List[str],
-    ) -> Dict[str, Tensor]:
-        """Run AdaMerging++ optimisation and return merged OFT weight dict.
-
-        Args:
-            adapter_paths: One adapter directory per task.
-            model: PeftModel already on the target device.
-            task_loaders: One DataLoader per task yielding batches with
-                          'input_ids' and 'attention_mask'.
-            task_names: Human-readable task tag per loader (for W&B).
-        """
-        # Print device
-        print(f"Running on device: {self.device}")
-
-        # Load and pre-process
-        all_weights = self.load_weights(adapter_paths)
-        T = len(all_weights)
-
-        oft_keys = [
-            k for k in all_weights[0]
-            if "oft_r" in k or ("oft_" in k.lower() and "classifier" not in k.lower())
-        ]
+        all_w = [self._load(p) for p in adapter_paths]
+        oft_keys = sorted(k for k in all_w[0]
+                          if "oft_r" in k or ("oft_" in k.lower() and "classifier" not in k.lower()))
         L = len(oft_keys)
+        assert L > 0, "No OFT keys found"
 
-        task_vecs = {k: [w[k].float().to(self.device) for w in all_weights] for k in oft_keys}
-        phi = self._ties_preprocess(task_vecs)
-        phi_stacked = {k: torch.stack(phi[k], dim=0).to(self.device) for k in oft_keys}
+        # Ties preprocess and stack: phi[key] = (T, *param_shape)
+        phi = {k: torch.stack(self._ties([w[k].float().to(self.device) for w in all_w],
+                                         self.ties_trim_ratio)).to(self.device)
+               for k in oft_keys}
 
-        # Initialize alpha_t: (T, L)
-        alpha_t = torch.full((T, L), self.init_alpha, device=self.device, requires_grad=True)
-        optimizer = torch.optim.Adam([alpha_t], lr=self.lr, betas=(0.9, 0.999))
-
-        # Map adapter key to PEFT named_parameter key
-        peft_params = dict(model.named_parameters())
-        key_to_peft: Dict[str, str] = {}
-        for key in oft_keys:
-            for candidate in (key.replace(".weight", ".default.weight"), key):
-                if candidate in peft_params:
-                    key_to_peft[key] = candidate
+        # Map adapter keys -> model param keys
+        params = dict(model.named_parameters())
+        key_map = {}
+        for k in oft_keys:
+            for c in [k, k.replace(".weight", ".default.weight")]:
+                if c in params:
+                    key_map[k] = c
                     break
+        keys = [k for k in oft_keys if k in key_map]
+        L_m = len(keys)
+        assert L_m > 0, "No keys mapped"
 
-        cyclic_loaders = [cycle(loader) for loader in task_loaders]
+        # Snapshot pretrained base weights (theta_pre^l)
+        base = {k: params[key_map[k]].data.clone().float() for k in keys}
+
+        # Learnable coefficients lambda_k^l: (T, L_m)
+        lam = torch.full((T, L_m), self.init_lambda, device=self.device, requires_grad=True)
+        opt = torch.optim.Adam([lam], lr=self.lr, betas=(0.9, 0.999))
+
+        cyc = [cycle(dl) for dl in task_loaders]
         model.eval()
         for p in model.parameters():
             p.requires_grad_(False)
 
-        # Optimization loop
-        for step in tqdm(range(self.n_iters), desc="AdaMerging++ optimization"):
-            optimizer.zero_grad()
-            task_entropies: List[Tensor] = []
+        for step in tqdm(range(self.n_iters), desc="AdaMerging++"):
+            opt.zero_grad()
+            ents: List[Tensor] = []
 
-            for t_idx, c_loader in enumerate(cyclic_loaders):
-                batch = next(c_loader)
-                input_ids = batch["input_ids"][:self.batch_size].to(self.device)
+            for t in range(T):
+                batch = next(cyc[t])
+                ids = batch["input_ids"][:self.batch_size].to(self.device)
                 attn = batch["attention_mask"][:self.batch_size].to(self.device)
 
+                # theta_MTL^l = theta_pre^l + sum_k lambda_k^l * Phi(T_k^l)
                 override = {
-                    key_to_peft[k]: torch.einsum("t,t...->...", alpha_t[:, l_idx], phi_stacked[k])
-                    for l_idx, k in enumerate(oft_keys) if k in key_to_peft
+                    key_map[k]: base[k] + torch.einsum("t,t...->...", lam[:, i], phi[k])
+                    for i, k in enumerate(keys)
                 }
-                out = functional_call(
-                    model, override, tuple(),
-                    {"input_ids": input_ids, "attention_mask": attn},
-                )
-                logits = out.logits.float()
-                probs = logits.softmax(-1)
-                entropy = -(probs * probs.clamp(min=1e-8).log()).sum(-1)  # (B, S)
-                task_ent = (entropy * attn.float()).sum() / attn.float().sum().clamp(min=1)
-                task_entropies.append(task_ent)
 
-            total_loss = sum(task_entropies)
-            total_loss.backward()
-            optimizer.step()
+                logits = functional_call(
+                    model, override, (), {"input_ids": ids, "attention_mask": attn},
+                ).logits.float()
+                assert logits.dim() == 3  # (B, S, V)
 
-            # Weighted loss: mean alpha per task as task weight
-            with torch.no_grad():
-                task_w = alpha_t.mean(dim=1).softmax(0)
-                weighted_loss = sum(task_w[t] * task_entropies[t] for t in range(T)).item()
+                ents.append(self._entropy(logits, attn))
 
-            log = {
-                "entropy/total": total_loss.item(),
-                "loss/weighted": weighted_loss,
-            }
-            for t, name in enumerate(task_names):
-                log[f"entropy/{name}"] = task_entropies[t].item()
-                log[f"alpha/{name}"] = alpha_t[t].mean().item()
-            wandb.log(log, step=step)
+            loss = sum(ents)
+            loss.backward()
+            opt.step()
 
-        # Final heatmap
-        alpha_np = alpha_t.detach().cpu().numpy()
-        wandb.log({"alpha/heatmap": wandb.Image(self._alpha_heatmap(alpha_np, task_names, L))})
+            if self.log_wandb:
+                log = {"entropy/total": loss.item()}
+                for t, name in enumerate(task_names):
+                    log[f"entropy/{name}"] = ents[t].item()
+                    log[f"lambda_mean/{name}"] = lam[t].mean().item()
+                wandb.log(log, step=step)
 
-        # Build merged weights
+        # Final merged weights
         with torch.no_grad():
-            return {
-                k: torch.einsum("t,t...->...", alpha_t[:, l_idx], phi_stacked[k])
-                      .to(all_weights[0][k].dtype)
-                for l_idx, k in enumerate(oft_keys)
-            }
+            merged = {}
+            for i, k in enumerate(keys):
+                w = base[k] + torch.einsum("t,t...->...", lam[:, i], phi[k])
+                merged[k] = w.to(all_w[0][k].dtype)
 
+        if self.log_wandb:
+            fig, ax = plt.subplots(figsize=(max(6, L_m // 4), max(3, T)))
+            ax.imshow(lam.detach().cpu().numpy(), aspect="auto", cmap="Blues")
+            ax.set_yticks(range(T)); ax.set_yticklabels(task_names)
+            ax.set_xlabel("Layer"); ax.set_ylabel("Task")
+            plt.colorbar(ax.images[0], ax=ax); plt.tight_layout()
+            wandb.log({"lambda/heatmap": wandb.Image(fig)})
+            plt.close(fig)
 
+        return merged
 
 # if __name__ == "__main__":
     # Example usage

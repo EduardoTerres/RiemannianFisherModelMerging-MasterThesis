@@ -14,9 +14,9 @@ from torch import Tensor
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from src.merging import OFTMerging, WudiOFTMerging, AdaMergingPP, WANDB_PROJECT
+from src.merging import OFTMerging, WudiOFTMerging, AdaMergingPP
 from src.utils import parse_device
-from src.paths import MODEL_FAMILIES, ModelFamily
+from src.paths import MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
 from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
 
 
@@ -74,11 +74,15 @@ def parse_args():
         "--model_family", type=str, choices=list(MODEL_FAMILIES), required=True,
     )
     parser.add_argument(
+        "--merge_method", type=str, choices=["gradients", "wudi", "adamerging"],
+        help="Merging method: 'gradients' (gradient-based merging), 'wudi' (Wudi OFT merging), or 'adamerging' (AdaMerging with task loaders).",  # noqa: E501
+    )
+    parser.add_argument(
         "--merge_mode", type=str, choices=["standard", "diagonal_fisher", "fisher"],
         help="Merging strategy: 'standard' (weighted average), 'diagonal_fisher' (element-wise Fisher weighting), or 'linear_system' (full transported-Fisher solve).",  # noqa: E501
     )
     parser.add_argument(
-        "--lam", type=float, default=1.0,
+        "--lam", type=float, default=0.0,
         help="Regularisation coefficient lambda used in fisher merge modes.",
     )
     parser.add_argument(
@@ -108,9 +112,25 @@ def main():
     base_model_path = model_family.base_model_path
     adapter_paths = model_family.adapter_paths
 
-    # merging = OFTMerging(lam=args.lam, alphas=args.alphas, device=args.device)
-    # merging = WudiOFTMerging(device=args.device)
-    merged_weights = _build_adamerging(model_family=model_family, device=args.device)
+    merged_weights = None
+    if args.merge_method == "adamerging":
+        merged_weights = _build_adamerging(model_family=model_family, device=args.device)
+    else:
+        if args.merge_method == "gradients":
+            merging = OFTMerging(lam=args.lam, alphas=args.alphas, device=args.device)
+        elif args.merge_method == "wudi":
+            merging = WudiOFTMerging(device=args.device)
+        else:
+            raise ValueError(f"Unsupported merge method: {args.merge_method}")
+        merged_weights = merging.merge(
+            adapter_paths=adapter_paths,
+            fisher_paths=model_family.fisher_paths if "fisher" in args.merge_mode else None,
+            mode=args.merge_mode,
+        )
+
+    if not merged_weights:
+        print("Merging failed. No weights returned.")
+        sys.exit(1)
 
     merged_adapter_dir = os.path.join(args.output_dir, "merged_adapter")
     os.makedirs(merged_adapter_dir, exist_ok=True)

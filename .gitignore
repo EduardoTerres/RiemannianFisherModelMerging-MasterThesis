@@ -3,6 +3,7 @@
 *.egg-info
 *.pyc
 *.safetensors
+*.out
 
 data/*
 outputs/*

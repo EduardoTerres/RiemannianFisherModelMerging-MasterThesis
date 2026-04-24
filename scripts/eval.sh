@@ -1,8 +1,8 @@
 # SocialIQA, CommonsenseQA, and Minerva Math500
 RELATIVE_PATH="../../.."
 MODELS=(
-    "outputs/models/Llama-3.1-8B-merged/merged_model/"
-    # "outputs/models/Qwen-2.5-3B-merged-std/merged_model/"
+    "outputs/models/Llama-3.1-8B-merged/merged_model"
+    # "outputs/models/Qwen-2.5-3B-merged-std/merged_model"
 )
 
 set -e

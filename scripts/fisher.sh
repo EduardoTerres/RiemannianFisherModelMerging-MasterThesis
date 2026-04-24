@@ -13,15 +13,15 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate OrthoMerge
 
 python src/fisher.py \
-    --num-samples 2048 \
-    --batch-size 64 \
-    --max-length 64 \
+    --num-samples 512 \
+    --batch-size 4 \
+    --max-length 1024 \
     --model-family llama3.1 \
-    --output-dir data/diagonal_fishers/llama3.1
+    --output-dir data/fishers/llama3.1
 
-python src/fisher.py \
-    --num-samples 2048 \
-    --batch-size 64 \
-    --max-length 64 \
-    --model-family qwen2.5 \
-    --output-dir data/diagonal_fishers/qwen2.5
+# python src/fisher.py \
+#     --num-samples 2048 \
+#     --batch-size 64 \
+#     --max-length 64 \
+#     --model-family qwen2.5 \
+#     --output-dir data/fishers/qwen2.5

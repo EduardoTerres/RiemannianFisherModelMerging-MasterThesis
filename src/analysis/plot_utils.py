@@ -219,6 +219,105 @@ def plot_module_layer_distributions(
         plt.show()
 
 
+def plot_fisher_vectors(
+    norm_ratio: np.ndarray,
+    angles: np.ndarray,
+    task_labels: List[str],
+    title: str = "Standard vs Fisher-full task vectors",
+    save_path: Optional[str] = None,
+) -> None:
+    """2×2 grid: norm-ratio lines, angle lines, and their heatmaps (tasks × layers)."""
+    T, L = norm_ratio.shape
+    layer_idx = np.arange(L)
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 9))
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+    ax_r, ax_a, ax_hr, ax_ha = axes.flat
+
+    for t, lbl in enumerate(task_labels):
+        c = colors[t % len(colors)]
+        ax_r.plot(layer_idx, norm_ratio[t], color=c, lw=1.5, label=lbl)
+        ax_a.plot(layer_idx, angles[t],     color=c, lw=1.5, label=lbl)
+
+    ax_r.axhline(1.0, color="k", lw=0.8, ls=":", label="ratio = 1")
+    ax_r.set_title("Norm ratio  ‖f_t‖ / ‖ξ_t‖")
+    ax_r.set_xlabel("layer index")
+    ax_r.grid(True, lw=0.3, alpha=0.5)
+    ax_r.legend(fontsize=8)
+
+    ax_a.set_title("Angle  ∠(ξ_t, f_t)  [°]")
+    ax_a.set_xlabel("layer index")
+    ax_a.grid(True, lw=0.3, alpha=0.5)
+    ax_a.legend(fontsize=8)
+
+    im_r = ax_hr.imshow(norm_ratio, aspect="auto", cmap="RdBu_r", vmin=0.5, vmax=1.5)
+    ax_hr.set_yticks(range(T)); ax_hr.set_yticklabels(task_labels)
+    ax_hr.set_xlabel("layer index"); ax_hr.set_title("Norm ratio  (heatmap)")
+    fig.colorbar(im_r, ax=ax_hr, shrink=0.85)
+
+    im_a = ax_ha.imshow(angles, aspect="auto", cmap="YlOrRd")
+    ax_ha.set_yticks(range(T)); ax_ha.set_yticklabels(task_labels)
+    ax_ha.set_xlabel("layer index"); ax_ha.set_title("Angle [°]  (heatmap)")
+    fig.colorbar(im_a, ax=ax_ha, shrink=0.85)
+
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        plt.show()
+
+
+def plot_fisher_stats(
+    f_mean: np.ndarray,
+    f_std: np.ndarray,
+    all_vals: List[np.ndarray],
+    task_labels: List[str],
+    title: str = "Fisher matrix statistics",
+    save_path: Optional[str] = None,
+) -> None:
+    """2×2 grid: mean/std per layer (log scale), log-mean heatmap, per-task box plot."""
+    T, L = f_mean.shape
+    layer_idx = np.arange(L)
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 9))
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+    ax_mean, ax_std, ax_hm, ax_box = axes.flat
+
+    for t, lbl in enumerate(task_labels):
+        c = colors[t % len(colors)]
+        ax_mean.plot(layer_idx, f_mean[t], color=c, lw=1.5, label=lbl)
+        ax_std.plot(layer_idx,  f_std[t],  color=c, lw=1.5, label=lbl)
+
+    ax_mean.set_title("Mean Fisher value per layer")
+    ax_mean.set_xlabel("layer index"); ax_mean.set_yscale("log")
+    ax_mean.grid(True, lw=0.3, alpha=0.5); ax_mean.legend(fontsize=8)
+
+    ax_std.set_title("Std Fisher value per layer")
+    ax_std.set_xlabel("layer index"); ax_std.set_yscale("log")
+    ax_std.grid(True, lw=0.3, alpha=0.5); ax_std.legend(fontsize=8)
+
+    im = ax_hm.imshow(np.log10(f_mean + 1e-30), aspect="auto", cmap="viridis")
+    ax_hm.set_yticks(range(T)); ax_hm.set_yticklabels(task_labels)
+    ax_hm.set_xlabel("layer index"); ax_hm.set_title("log₁₀(mean Fisher)  (heatmap)")
+    fig.colorbar(im, ax=ax_hm, shrink=0.85)
+
+    ax_box.boxplot(all_vals, labels=task_labels, showfliers=False)
+    ax_box.set_yscale("log"); ax_box.set_title("Fisher value distribution per task")
+    ax_box.set_ylabel("Fisher value"); ax_box.grid(True, lw=0.3, alpha=0.5, axis="y")
+
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        plt.show()
+
+
 def plot_oft_covariance_eigenvalues(
     eigenvalues: np.ndarray,
     labels: List[str],

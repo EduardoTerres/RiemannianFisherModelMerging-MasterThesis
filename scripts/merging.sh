@@ -14,9 +14,11 @@ conda activate OrthoMerge
 
 python src/scripts/perform_merging.py \
     --model_family llama3.1 \
-    --merge_mode "standard" \
+    --merge_method "gradients" \
+    --merge_mode "diagonal_fisher" \
     --output_dir outputs/models/Llama-3.1-8B-merged \
     --save_merged_model \
+    --lam 0.0 \
     --device gpu
 
 bash scripts/eval.sh

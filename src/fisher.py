@@ -75,10 +75,11 @@ def compute_empirical_diagonal_fisher(
             for b in range(input_ids.shape[0]):
                 prompt = tokenizer.decode(input_ids[b], skip_special_tokens=False)
                 fisher_ids = shift_labels[b][label_mask[b].bool()].tolist()
-                answer = tokenizer.decode(fisher_ids, skip_special_tokens=False)
                 print(f"\n--- Sample {b} ---")
                 print(f"Prompt: {prompt!r}")
-                print(f"Answer: {answer!r}")
+                print(f"Loss tokens ({len(fisher_ids)}):")
+                for tid in fisher_ids:
+                    print(f"  {tid:6d}  {tokenizer.decode([tid], skip_special_tokens=False)!r}")
 
         model.zero_grad()
         loss.backward()

@@ -14,10 +14,47 @@ from torch import Tensor
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from src.merging import OFTMerging, WudiOFTMerging, AdaMergingPP
+from src.merging import OFTMerging, WudiOFTMerging, OFTKarcherMerging, AdaMergingPP
 from src.utils import parse_device
 from src.paths import MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
 from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
+
+
+def _build_alpha_optimizer_inputs(
+    model_family: ModelFamily,
+    device: str,
+    num_samples: int = 32,
+    batch_size: int = 16,
+    max_length: int = 64,
+) -> tuple:
+    tokenizer = AutoTokenizer.from_pretrained(model_family.base_model_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    task_names = [tag for tag, *_ in DATASET_1_TEST]
+    task_loaders = [
+        build_loader(
+            dataset_path=ds_path,
+            dataset_name=ds_name,
+            split=split,
+            doc_to_text=doc_to_text,
+            tokenizer=tokenizer,
+            num_samples=num_samples,
+            batch_size=batch_size,
+            max_length=max_length,
+        )
+        for _, ds_path, ds_name, split, doc_to_text in DATASET_1_TEST
+    ]
+    peft_model = PeftModel.from_pretrained(
+        AutoModelForCausalLM.from_pretrained(
+            model_family.base_model_path, torch_dtype=torch.float32, device_map=None
+        ),
+        model_family.adapter_paths[0],
+        is_trainable=False,
+    )
+    peft_model.enable_adapter_layers()
+    peft_model.to(device)
+    return peft_model, task_loaders, task_names
 
 
 def _build_adamerging(
@@ -74,8 +111,8 @@ def parse_args():
         "--model_family", type=str, choices=list(MODEL_FAMILIES), required=True,
     )
     parser.add_argument(
-        "--merge_method", type=str, choices=["gradients", "wudi", "adamerging"],
-        help="Merging method: 'gradients' (gradient-based merging), 'wudi' (Wudi OFT merging), or 'adamerging' (AdaMerging with task loaders).",  # noqa: E501
+        "--merge_method", type=str, choices=["gradients", "wudi", "karcher", "adamerging"],
+        help="Merging method: 'gradients', 'wudi', 'karcher' (Karcher mean on SO(n)), 'adamerging'.",  # noqa: E501
     )
     parser.add_argument(
         "--merge_mode", type=str, choices=["standard", "diagonal_fisher", "fisher"],
@@ -101,6 +138,10 @@ def parse_args():
         "--device", type=str, default="cuda",
         help="Device to use (e.g., 'gpu', 'cpu').",
     )
+    parser.add_argument(
+        "--optimize_alphas", type=str, choices=["adamerging", "adamergingpp"], default=None,
+        help="If set, optimize per-task/layer alphas via entropy minimization ('adamerging' or 'adamergingpp').",  # noqa: E501
+    )
     return parser.parse_args()
 
 
@@ -112,6 +153,12 @@ def main():
     base_model_path = model_family.base_model_path
     adapter_paths = model_family.adapter_paths
 
+    wandb.init(
+        project=WANDB_PROJECT,
+        name=f"{args.merge_method}-{args.merge_mode}-{model_family.name}",
+        config=vars(args),
+    )
+
     merged_weights = None
     if args.merge_method == "adamerging":
         merged_weights = _build_adamerging(model_family=model_family, device=args.device)
@@ -120,13 +167,26 @@ def main():
             merging = OFTMerging(lam=args.lam, alphas=args.alphas, device=args.device)
         elif args.merge_method == "wudi":
             merging = WudiOFTMerging(device=args.device)
+        elif args.merge_method == "karcher":
+            merging = OFTKarcherMerging(lam=args.lam, alphas=args.alphas, device=args.device)
         else:
             raise ValueError(f"Unsupported merge method: {args.merge_method}")
-        merged_weights = merging.merge(
+
+        merge_kwargs: dict = dict(
             adapter_paths=adapter_paths,
             fisher_paths=model_family.fisher_paths if "fisher" in args.merge_mode else None,
             mode=args.merge_mode,
+            optimize_alphas=args.optimize_alphas,
         )
+        if args.optimize_alphas is not None:
+            model, task_loaders, task_names = _build_alpha_optimizer_inputs(
+                model_family=model_family, device=args.device,
+            )
+            merge_kwargs["model"] = model
+            merge_kwargs["task_loaders"] = task_loaders
+            merge_kwargs["task_names"] = task_names
+
+        merged_weights = merging.merge(**merge_kwargs)
 
     if not merged_weights:
         print("Merging failed. No weights returned.")

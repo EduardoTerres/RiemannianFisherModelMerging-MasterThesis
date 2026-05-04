@@ -200,6 +200,7 @@ def merge_oft_adapter_weights_jacobi(adapter_paths, fishers):
             for alpha_t, oft_params_t, fisher_t in zip(alphas, weights_list, fisher_list):
                 Pt = compute_Pt(oft_params=oft_params_t, block_size=32)
                 F_tilde = ((Pt ** 2) @ fisher_t.unsqueeze(-1)).squeeze(-1)
+                # F_tilde = fisher_t
                 fisher_transported_list.append(F_tilde)
 
             fisher_list = fisher_transported_list
@@ -216,6 +217,7 @@ def merge_oft_adapter_weights_jacobi(adapter_paths, fishers):
                 (lam + fisher_t) * oft_params_t / denom
                 for oft_params_t, fisher_t in zip(weights_list, fisher_list)
             ]
+            weights = weights_list
 
             weights_list = [oft_params_to_skew_matrix(w) for w in weights]
 
@@ -227,7 +229,7 @@ def merge_oft_adapter_weights_jacobi(adapter_paths, fishers):
                     return A @ B - B @ A
 
                 A_iter = avg_weight
-                N = 20  # truncation order (Jacobi energy objective)
+                N = 0  # truncation order (Jacobi energy objective)
                 T = len(weights_list)
                 tol = 1e-10
                 for _ in tqdm(range(5), desc="Fixed-point iterations"):
@@ -240,7 +242,7 @@ def merge_oft_adapter_weights_jacobi(adapter_paths, fishers):
                             B = lie_bracket(A_t, B)
                             if (step + 1) % 2 == 0:  # collect even powers B_{2m}
                                 m = (step + 1) // 2   # m = 1, 2, ..., N
-                                coef = 10.0 / math.factorial(2 * m + 1)
+                                coef = 1.0 / math.factorial(2 * m + 1)
                                 C_t = C_t + coef * B
                         C_list.append(C_t)
 

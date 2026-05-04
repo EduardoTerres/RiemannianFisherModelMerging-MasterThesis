@@ -318,6 +318,62 @@ def plot_fisher_stats(
         plt.show()
 
 
+def plot_transport_effect(
+    off_diag_frac: np.ndarray,
+    diag_std_diff: np.ndarray,
+    task_labels: List[str],
+    title: str = "Parallel transport effect on Fisher",
+    save_path: Optional[str] = None,
+) -> None:
+    """2×2 grid showing how transport fills off-diagonal mass and redistributes diagonal std.
+
+    Args:
+        off_diag_frac: (T, L) fraction of Frobenius norm in off-diagonal entries of F̃_t.
+        diag_std_diff: (T, L) std(diag(F̃_t)) - std(f_t); negative = transport homogenises.
+    """
+    T, L = off_diag_frac.shape
+    layer_idx = np.arange(L)
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 9))
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+    ax_frac, ax_std, ax_hf, ax_hs = axes.flat
+
+    for t, lbl in enumerate(task_labels):
+        c = colors[t % len(colors)]
+        ax_frac.plot(layer_idx, off_diag_frac[t], color=c, lw=1.5, label=lbl)
+        ax_std.plot(layer_idx,  diag_std_diff[t],  color=c, lw=1.5, label=lbl)
+
+    ax_frac.set_title("Off-diagonal fraction  ||off_diag(F̃)||_F / ||F̃||_F")
+    ax_frac.set_xlabel("layer index")
+    ax_frac.grid(True, lw=0.3, alpha=0.5)
+    ax_frac.legend(fontsize=8)
+
+    ax_std.axhline(0, color="k", lw=0.8, ls=":")
+    ax_std.set_title("Δ std(diag)  =  std(diag(F̃_t)) − std(f_t)  [<0 → homogenisation]")
+    ax_std.set_xlabel("layer index")
+    ax_std.grid(True, lw=0.3, alpha=0.5)
+    ax_std.legend(fontsize=8)
+
+    im_f = ax_hf.imshow(off_diag_frac, aspect="auto", cmap="YlOrRd")
+    ax_hf.set_yticks(range(T)); ax_hf.set_yticklabels(task_labels)
+    ax_hf.set_xlabel("layer index"); ax_hf.set_title("Off-diagonal fraction  (heatmap)")
+    fig.colorbar(im_f, ax=ax_hf, shrink=0.85)
+
+    im_s = ax_hs.imshow(diag_std_diff, aspect="auto", cmap="RdBu_r")
+    ax_hs.set_yticks(range(T)); ax_hs.set_yticklabels(task_labels)
+    ax_hs.set_xlabel("layer index"); ax_hs.set_title("Δ std(diag)  (heatmap)")
+    fig.colorbar(im_s, ax=ax_hs, shrink=0.85)
+
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        plt.show()
+
+
 def plot_oft_covariance_eigenvalues(
     eigenvalues: np.ndarray,
     labels: List[str],

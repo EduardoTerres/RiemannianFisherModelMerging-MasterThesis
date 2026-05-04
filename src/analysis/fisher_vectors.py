@@ -2,7 +2,7 @@
 Visualize standard vs Fisher-full task vectors across layers.
 Standard: xi_t, Fisher-full: v_t = (λI + Σ α_j F̃_j)^{-1}(λI + F̃_t) xi_t
 
-Usage: python -m src.analysis.fisher_vectors [--model llama3.1|qwen2.5]
+Usage: python -m src.analysis.fisher_vectors [--family_name llama3.1|qwen2.5]
 """
 from pathlib import Path
 import sys, os, argparse
@@ -10,15 +10,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from src.merging import OFTMerging
 from src.paths import MODEL_FAMILIES
+from src.analysis.plot_utils import plot_fisher_vectors, plot_fisher_stats, plot_transport_effect
 
 TASK_NAMES = ["socialiqa", "commonsense", "numinamath", "magicoder", "scienceqa"]
-COLORS     = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple"]
-SAVE_DIR = os.path.join(os.path.dirname(__file__), "fisher_analysis")
+
 
 def task_of(p):
     for n in TASK_NAMES:
@@ -33,67 +32,27 @@ def angle_deg(u, v):
     return float(np.degrees(torch.acos(cos.clamp(-1, 1)).item()))
 
 
-def plot_fisher_stats(fishers_by_key: dict, task_labels: list, model_name: str, out_dir: str):
-    """Plot per-layer Fisher statistics: mean, std, min, max across elements."""
+def compute_fisher_stats(fishers_by_key: dict, task_labels: list):
+    """Compute per-layer Fisher mean/std and per-task value arrays for plotting."""
     oft_keys = sorted(fishers_by_key.keys())
-    L = len(oft_keys)
-    T = len(task_labels)
-
-    # (T, L) arrays of per-layer scalar stats
-    f_mean = np.zeros((T, L))
-    f_std  = np.zeros((T, L))
-    f_max  = np.zeros((T, L))
-
+    L, T = len(oft_keys), len(task_labels)
+    f_mean, f_std = np.zeros((T, L)), np.zeros((T, L))
     for i, k in enumerate(oft_keys):
         for t, f in enumerate(fishers_by_key[k]):
             flat = f.float().flatten()
             f_mean[t, i] = flat.mean().item()
             f_std[t, i]  = flat.std().item()
-            f_max[t, i]  = flat.max().item()
-
-    layer_idx = np.arange(L)
-    fig, axes = plt.subplots(2, 2, figsize=(15, 9))
-    fig.suptitle(f"Fisher matrix statistics — {model_name}", fontsize=13, fontweight="bold")
-    ax_mean, ax_std, ax_hm, ax_box = axes.flat
-
-    for t, (lbl, c) in enumerate(zip(task_labels, COLORS)):
-        ax_mean.plot(layer_idx, f_mean[t], color=c, lw=1.5, label=lbl)
-        ax_std.plot(layer_idx,  f_std[t],  color=c, lw=1.5, label=lbl)
-
-    ax_mean.set_title("Mean Fisher value per layer")
-    ax_mean.set_xlabel("layer index"); ax_mean.set_yscale("log")
-    ax_mean.grid(True, lw=0.3, alpha=0.5); ax_mean.legend(fontsize=8)
-
-    ax_std.set_title("Std Fisher value per layer")
-    ax_std.set_xlabel("layer index"); ax_std.set_yscale("log")
-    ax_std.grid(True, lw=0.3, alpha=0.5); ax_std.legend(fontsize=8)
-
-    # Heatmap of mean Fisher (tasks × layers)
-    im = ax_hm.imshow(np.log10(f_mean + 1e-30), aspect="auto", cmap="viridis")
-    ax_hm.set_yticks(range(T)); ax_hm.set_yticklabels(task_labels)
-    ax_hm.set_xlabel("layer index"); ax_hm.set_title("log₁₀(mean Fisher)  (heatmap)")
-    fig.colorbar(im, ax=ax_hm, shrink=0.85)
-
-    # Box plot of overall Fisher distributions per task (all layers, all elements)
     all_vals = [
         np.concatenate([fishers_by_key[k][t].float().flatten().cpu().numpy() for k in oft_keys])
         for t in range(T)
     ]
-    ax_box.boxplot(all_vals, labels=task_labels, showfliers=False)
-    ax_box.set_yscale("log"); ax_box.set_title("Fisher value distribution per task")
-    ax_box.set_ylabel("Fisher value"); ax_box.grid(True, lw=0.3, alpha=0.5, axis="y")
-
-    fig.tight_layout()
-    out = os.path.join(out_dir, "fisher_stats.png")
-    fig.savefig(out, dpi=150, bbox_inches="tight")
-    print(f"Saved: {out}")
-    plt.show()
+    return f_mean, f_std, all_vals
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--family_name", default="llama3.1", choices=["llama3.1", "qwen2.5"])
-    parser.add_argument("--save_path", default="outputs/fisher_analysis", help="Directory to save the analysis results.")
+    parser.add_argument("--family_name", default="qwen2.5", choices=["llama3.1", "qwen2.5"])
+    parser.add_argument("--save_path", default="outputs/fisher_analysis")
     args = parser.parse_args()
 
     IMG_DIR = Path(args.save_path) / args.family_name
@@ -107,7 +66,7 @@ def main():
 
     T = len(adapter_paths)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    merger = OFTMerging(lam=0.0, alphas=[1 / T] * T, device=device)
+    merger = OFTMerging(lam=0.0, alphas=[1.0] * T, device=device)
 
     print("Loading weights and fishers...")
     all_weights = merger.load_weights(adapter_paths)
@@ -118,54 +77,68 @@ def main():
     weights_by_key = {k: [w[k] for w in all_weights] for k in oft_keys}
     fishers_by_key = {k: [f[k] for f in all_fishers] for k in oft_keys}
 
-    norm_ratio = np.zeros((T, L))
-    angles = np.zeros((T, L))
+    norm_ratio    = np.zeros((T, L))
+    angles        = np.zeros((T, L))
+    # off-diagonal Frobenius fraction: 0 = no transport, 1 = fully mixed
+    off_diag_frac = np.zeros((T, L))
+    # std of diag(F̃_t) minus std of f_t: negative = transport homogenises Fisher values
+    diag_std_diff = np.zeros((T, L))
 
     for i, k in enumerate(tqdm(oft_keys, desc="Processing layers")):
-        full_vecs = merger.fisher_full_task_vectors(weights_by_key[k], fishers_by_key[k], [0.5] * T)
+        # Fisher-full task vectors via merging.py (uses parallel transport internally)
+        full_vecs = merger.fisher_full_task_vectors(weights_by_key[k], fishers_by_key[k], [1] * T)
         for t in range(T):
             xi, vt = weights_by_key[k][t], full_vecs[t]
             norm_ratio[t, i] = frob(vt) / (frob(xi) + 1e-12)
             angles[t, i]     = angle_deg(xi, vt)
+        del full_vecs
 
-    # ── Plot ──────────────────────────────────────────────────────────────────
-    layer_idx = np.arange(L)
-    fig, axes = plt.subplots(2, 2, figsize=(15, 9))
-    fig.suptitle(f"Standard vs Fisher-full task vectors — {args.family_name}",
-                 fontsize=13, fontweight="bold")
+        # Parallel-transported Fishers: F̃_t = P_t diag(f_t) P_t^T  (see merging._fisher_merging)
+        for t in range(T):
+            oft_params_t = weights_by_key[k][t]
+            num_blocks, son_dim = oft_params_t.shape
+            block_size = int((1 + (1 + 8 * son_dim) ** 0.5) / 2)
+            skew   = merger.oft_params_to_skew_matrix(oft_params_t, son_dim)
+            Pt     = merger.manifold.compute_Pt(skew_matrix=skew, block_size=block_size)
+            F_tilde = Pt @ torch.diag_embed(fishers_by_key[k][t]) @ Pt.transpose(-2, -1)
 
-    ax_r, ax_a, ax_hr, ax_ha = axes.flat
+            # Off-diagonal fraction: ||off_diag(F̃)||_F / ||F̃||_F  (invariant to trace)
+            diag_part   = torch.diag_embed(F_tilde.diagonal(dim1=-2, dim2=-1))
+            off_diag    = F_tilde - diag_part
+            frac = (off_diag.norm(dim=(-2, -1)) / (F_tilde.norm(dim=(-2, -1)) + 1e-12))
+            off_diag_frac[t, i] = frac.mean().item()
 
-    for t, (lbl, c) in enumerate(zip(task_labels, COLORS)):
-        ax_r.plot(layer_idx, norm_ratio[t], color=c, lw=1.5, label=lbl)
-        ax_a.plot(layer_idx, angles[t],     color=c, lw=1.5, label=lbl)
+            # How much transport redistributes Fisher across coordinates
+            diag_std  = F_tilde.diagonal(dim1=-2, dim2=-1).float().std(dim=-1).mean().item()
+            raw_std   = fishers_by_key[k][t].float().std(dim=-1).mean().item()
+            diag_std_diff[t, i] = diag_std - raw_std
 
-    ax_r.axhline(1.0, color="k", lw=0.8, ls=":", label="ratio = 1")
-    ax_r.set_title("Norm ratio  ‖f_t‖ / ‖ξ_t‖")
-    ax_r.set_xlabel("layer index"); ax_r.grid(True, lw=0.3, alpha=0.5); ax_r.legend(fontsize=8)
+            del Pt, F_tilde, diag_part, off_diag
 
-    ax_a.set_title("Angle  ∠(ξ_t, f_t)  [°]")
-    ax_a.set_xlabel("layer index"); ax_a.grid(True, lw=0.3, alpha=0.5); ax_a.legend(fontsize=8)
+        torch.cuda.empty_cache()
 
-    # Heatmaps: tasks × layers — reveal which tasks/layers deviate most
-    im_r = ax_hr.imshow(norm_ratio, aspect="auto", cmap="RdBu_r", vmin=0.5, vmax=1.5)
-    ax_hr.set_yticks(range(T)); ax_hr.set_yticklabels(task_labels)
-    ax_hr.set_xlabel("layer index"); ax_hr.set_title("Norm ratio  (heatmap)")
-    fig.colorbar(im_r, ax=ax_hr, shrink=0.85)
+    # ── Standard vs Fisher-full task vectors ──────────────────────────────────
+    plot_fisher_vectors(
+        norm_ratio, angles, task_labels,
+        title=f"Standard vs Fisher-full task vectors — {args.family_name}",
+        save_path=str(IMG_DIR / "fisher_vectors.png"),
+    )
 
-    im_a = ax_ha.imshow(angles, aspect="auto", cmap="YlOrRd")
-    ax_ha.set_yticks(range(T)); ax_ha.set_yticklabels(task_labels)
-    ax_ha.set_xlabel("layer index"); ax_ha.set_title("Angle [°]  (heatmap)")
-    fig.colorbar(im_a, ax=ax_ha, shrink=0.85)
+    # ── Raw Fisher statistics per layer / task ─────────────────────────────────
+    f_mean, f_std, all_vals = compute_fisher_stats(fishers_by_key, task_labels)
+    plot_fisher_stats(
+        f_mean, f_std, all_vals, task_labels,
+        title=f"Fisher matrix statistics — {args.family_name}",
+        save_path=str(IMG_DIR / "fisher_stats.png"),
+    )
 
-    fig.tight_layout()
-    out = os.path.join(IMG_DIR, "fisher_vectors.png")
-    fig.savefig(out, dpi=150, bbox_inches="tight")
-    print(f"Saved: {out}")
-    plt.show()
+    # ── Parallel-transport effect: off-diagonal mass and diagonal redistribution ──
+    plot_transport_effect(
+        off_diag_frac, diag_std_diff, task_labels,
+        title=f"Parallel transport effect on Fisher — {args.family_name}",
+        save_path=str(IMG_DIR / "fisher_transport_effect.png"),
+    )
 
-    # Second plot
-    plot_fisher_stats(fishers_by_key, task_labels, args.family_name, IMG_DIR)
 
 if __name__ == "__main__":
     main()

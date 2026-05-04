@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.merging import OFTMerging
 import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
@@ -25,11 +26,486 @@ from src.paths import (
 from src.dataset.dataset_1 import DATASET_1_TRAIN as DATASET_1, build_loader
 from src.utils import parse_device
 
+_merging = OFTMerging()
+_manifold = _merging.manifold
+
+
+def compute_empirical_diagonal_transported_fisher(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: str,
+) -> dict:
+    """
+    Compute the diagonal empirical Fisher: E[grad log p]^2.
+
+    For OFT parameters stored in upper-triangle coordinates, this computes the
+    transported diagonal Fisher
+
+        diag(P_t F_t P_t^T)
+
+    by transporting each per-sample gradient before squaring:
+
+        g_tilde = P_t g
+        fisher += g_tilde^2
+
+    Assumes the following objects already exist globally or in scope:
+
+        _merging.oft_params_to_skew_matrix(...)
+        _manifold.compute_Pt(...)
+
+    Args:
+        model:  an already-loaded, eval-mode CausalLM
+        loader: DataLoader yielding dicts with 'input_ids' and 'attention_mask'
+        device: torch device string
+
+    Returns:
+        dict mapping parameter name -> diagonal Fisher tensor on CPU
+    """
+
+    model.eval()
+    model.to(device)
+
+    named_params = {
+        name: p
+        for name, p in model.named_parameters()
+        if p.requires_grad
+    }
+
+    fisher = {
+        name: torch.zeros_like(p, device="cpu")
+        for name, p in named_params.items()
+    }
+
+    def infer_block_size_from_son_dimension(son_dimension: int) -> int:
+        """
+        Solve d = n(n-1)/2 for n.
+        """
+        block_size = int((1 + (1 + 8 * son_dimension) ** 0.5) / 2)
+
+        if block_size * (block_size - 1) // 2 != son_dimension:
+            raise ValueError(
+                f"Invalid so(n) dimension: {son_dimension}. "
+                "Expected d = n(n-1)/2."
+            )
+
+        return block_size
+
+    def is_oft_coordinate_parameter(p: torch.Tensor) -> bool:
+        """
+        OFT coordinates are expected to have shape:
+
+            (num_blocks, son_dimension)
+
+        where son_dimension = block_size * (block_size - 1) // 2.
+
+        This check is intentionally conservative.
+        """
+        if p.ndim != 2:
+            return False
+
+        son_dimension = p.shape[-1]
+
+        try:
+            infer_block_size_from_son_dimension(son_dimension)
+            return True
+        except ValueError:
+            return False
+
+    @torch.no_grad()
+    def precompute_transport_matrices() -> dict:
+        """
+        Precompute P_t for each OFT parameter tensor.
+
+        For each OFT parameter tensor A_t with shape
+
+            (num_blocks, son_dimension),
+
+        we construct the skew matrix Omega_t and then compute
+
+            P_t = P_{theta_t -> theta_LLM}.
+        """
+        transport_matrices = {}
+
+        for name, p in named_params.items():
+            if not is_oft_coordinate_parameter(p):
+                continue
+
+            son_dimension = p.shape[-1]
+            block_size = infer_block_size_from_son_dimension(son_dimension)
+
+            skew_matrix = _merging.oft_params_to_skew_matrix(
+                p.detach(),
+                son_dimension,
+            )
+
+            Pt = _manifold.compute_Pt(
+                skew_matrix=skew_matrix,
+                block_size=block_size,
+            )
+
+            transport_matrices[name] = Pt.detach()
+
+        return transport_matrices
+
+    transport_matrices = precompute_transport_matrices()
+
+    def sequence_nll(logits, input_ids, attention_mask):
+        """
+        CausalLM negative log-likelihood for one sample.
+
+        Since Fisher uses grad log p squared, we can use the gradient of
+        negative log-likelihood because the sign disappears after squaring.
+        """
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = input_ids[:, 1:].contiguous()
+        shift_mask = attention_mask[:, 1:].contiguous()
+
+        vocab_size = shift_logits.shape[-1]
+
+        token_losses = F.cross_entropy(
+            shift_logits.view(-1, vocab_size),
+            shift_labels.view(-1),
+            reduction="none",
+        )
+
+        token_losses = token_losses.view_as(shift_labels)
+
+        nll = (token_losses * shift_mask).sum()
+
+        return nll
+
+    num_samples = 0
+
+    for batch in tqdm(loader, desc="Computing transported diagonal FIM"):
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+
+        batch_size = input_ids.shape[0]
+
+        for b in range(batch_size):
+            model.zero_grad(set_to_none=True)
+
+            sample_input_ids = input_ids[b:b + 1]
+            sample_attention_mask = attention_mask[b:b + 1]
+
+            outputs = model(
+                input_ids=sample_input_ids,
+                attention_mask=sample_attention_mask,
+            )
+
+            loss = sequence_nll(
+                logits=outputs.logits,
+                input_ids=sample_input_ids,
+                attention_mask=sample_attention_mask,
+            )
+
+            loss.backward()
+
+            with torch.no_grad():
+                for name, p in named_params.items():
+                    if p.grad is None:
+                        continue
+
+                    grad = p.grad.detach()
+
+                    if name in transport_matrices:
+                        Pt = transport_matrices[name]
+
+                        # grad has shape:
+                        #   (num_blocks, son_dimension)
+                        #
+                        # Pt has shape:
+                        #   (num_blocks, son_dimension, son_dimension)
+                        #
+                        # transported_grad[b] = Pt[b] @ grad[b]
+                        transported_grad = torch.einsum(
+                            "bij,bj->bi",
+                            Pt,
+                            grad,
+                        )
+
+                        fisher[name] += transported_grad.pow(2).cpu()
+
+                    else:
+                        # Fallback: ordinary diagonal empirical Fisher.
+                        fisher[name] += grad.pow(2).cpu()
+
+            num_samples += 1
+
+    if num_samples == 0:
+        raise ValueError("The DataLoader produced zero samples.")
+
+    for name in fisher:
+        fisher[name] /= num_samples
+
+    return fisher
+
+def compute_empirical_diagonal_transported_fisher_delete(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: str,
+) -> dict:
+    """
+    Compute empirical diagonal transported Fisher.
+
+    For normal trainable parameters:
+        fisher[name] += grad^2
+
+    For PEFT OFT parameters:
+        1. Treat grad as OFT skew coordinates.
+        2. Convert grad -> skew matrix G.
+        3. Parallel transport before squaring:
+               G_tilde = R_t^{1/2} G R_t^{1/2}
+           according to your Eq. (5).
+        4. Convert G_tilde back to OFT coordinates.
+        5. Accumulate grad_tilde^2.
+
+    This estimates:
+
+        diag(P_t F_t P_t^T) = E[(P_t g_x)^2]
+
+    Important:
+        For a true empirical Fisher, use batch_size=1 or per-sample gradients.
+        With batch loss gradients, this estimates squared batch-mean gradients.
+    """
+
+    import numpy as np
+    import scipy.linalg
+
+    model.eval()
+
+    fisher = {}
+    oft_transport_cache = {}
+
+    # Try to read PEFT OFT config.
+    # If unavailable, default to exact Cayley.
+    use_cayley_neumann = False
+    num_cayley_neumann_terms = 5
+
+    if hasattr(model, "peft_config"):
+        try:
+            cfg = next(iter(model.peft_config.values()))
+            use_cayley_neumann = bool(getattr(cfg, "use_cayley_neumann", False))
+            num_cayley_neumann_terms = int(getattr(cfg, "num_cayley_neumann_terms", 5))
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------
+    # 1. Initialize Fisher tensors and precompute R_t^{1/2}
+    # ------------------------------------------------------------
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+
+            fisher[name] = torch.zeros_like(p, device=device)
+
+            is_oft_param = (
+                p.ndim == 2
+                and "oft" in name.lower()
+            )
+
+            if not is_oft_param:
+                continue
+
+            num_blocks, son_dimension = p.shape
+            block_size = int((1 + (1 + 8 * son_dimension) ** 0.5) / 2)
+
+            if block_size * (block_size - 1) // 2 != son_dimension:
+                continue
+
+            # PEFT OFT parameter -> skew matrix Q_t
+            Q_t = _merging.oft_params_to_skew_matrix(
+                p.detach().to(device),
+                son_dimension,
+            )
+
+            eye = torch.eye(
+                block_size,
+                dtype=Q_t.dtype,
+                device=Q_t.device,
+            ).expand(num_blocks, block_size, block_size)
+
+            # ----------------------------------------------------
+            # Build R_t from PEFT's Cayley convention:
+            #
+            #     R = (I - Q)(I + Q)^{-1}
+            #
+            # If the adapter used Cayley-Neumann, reproduce the
+            # truncated inverse approximation instead.
+            # ----------------------------------------------------
+            A = eye + Q_t
+            B = eye - Q_t
+
+            if use_cayley_neumann:
+                # Approximate (I + Q)^(-1) by
+                #
+                #     I - Q + Q^2 - Q^3 + ...
+                #
+                # Then R ~= (I - Q)(I + Q)^(-1).
+                inv_approx = eye.clone()
+                term = eye.clone()
+
+                for _ in range(num_cayley_neumann_terms):
+                    term = -term @ Q_t
+                    inv_approx = inv_approx + term
+
+                R_t = B @ inv_approx
+
+            else:
+                # Exact right solve:
+                #
+                #     R = B A^{-1}
+                #
+                # torch.linalg.solve solves A X = B, so use transpose trick:
+                #
+                #     (B A^{-1})^T = A^{-T} B^T
+                R_t = torch.linalg.solve(
+                    A.transpose(-1, -2),
+                    B.transpose(-1, -2),
+                ).transpose(-1, -2)
+
+            # Project to SO(n) for numerical stability.
+            # This is especially useful after Cayley-Neumann.
+            U, _, Vh = torch.linalg.svd(R_t)
+            R_t = U @ Vh
+
+            # Fix possible determinant -1 from SVD projection.
+            det = torch.linalg.det(R_t)
+            bad = det < 0
+            if bad.any():
+                U[bad, :, -1] *= -1
+                R_t = U @ Vh
+
+            # ----------------------------------------------------
+            # Compute R_t^{1/2} using log then exp:
+            #
+            #     R_half = exp(0.5 log(R_t))
+            #
+            # PyTorch usually does not provide matrix_log, so use
+            # scipy.linalg.logm on CPU. This is done once per OFT
+            # parameter, not inside the Fisher loop.
+            # ----------------------------------------------------
+            R_half_blocks = []
+
+            R_cpu = R_t.detach().float().cpu().numpy()
+
+            for b in range(num_blocks):
+                log_R_np = scipy.linalg.logm(R_cpu[b])
+
+                # Numerical cleanup: keep real skew part.
+                log_R = torch.from_numpy(np.real(log_R_np)).to(
+                    device=R_t.device,
+                    dtype=R_t.dtype,
+                )
+                log_R = 0.5 * (log_R - log_R.transpose(-1, -2))
+
+                R_half = torch.matrix_exp(0.5 * log_R)
+                R_half_blocks.append(R_half)
+
+            R_half = torch.stack(R_half_blocks, dim=0)
+
+            oft_transport_cache[name] = R_half.detach()
+
+    count = 0
+
+    # ------------------------------------------------------------
+    # 2. Fisher accumulation
+    # ------------------------------------------------------------
+    for batch in tqdm(loader, desc="Computing transported diagonal FIM"):
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
+
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+
+        shift_logits = outputs.logits[:, :-1, :]
+        shift_labels = labels[:, 1:]
+
+        label_mask = (shift_labels != -100).float()
+
+        shift_labels_safe = shift_labels.clone()
+        shift_labels_safe[shift_labels_safe == -100] = 0
+
+        log_probs = F.log_softmax(shift_logits, dim=-1)
+
+        token_nll = F.nll_loss(
+            log_probs.reshape(-1, log_probs.size(-1)),
+            shift_labels_safe.reshape(-1),
+            reduction="none",
+        ).view_as(shift_labels)
+
+        loss = (token_nll * label_mask).sum() / label_mask.sum().clamp(min=1)
+
+        model.zero_grad(set_to_none=True)
+        loss.backward()
+
+        with torch.no_grad():
+            for name, p in model.named_parameters():
+                if not p.requires_grad or p.grad is None:
+                    continue
+
+                grad = p.grad.detach()
+
+                if name in oft_transport_cache:
+                    _, son_dimension = grad.shape
+
+                    # Gradient coordinates -> skew matrix
+                    G = _merging.oft_params_to_skew_matrix(
+                        grad,
+                        son_dimension,
+                    )
+
+                    R_half = oft_transport_cache[name].to(
+                        device=grad.device,
+                        dtype=grad.dtype,
+                    )
+
+                    # ------------------------------------------------
+                    # Parallel transport BEFORE squaring.
+                    #
+                    # Your Eq. (5):
+                    #
+                    #     G_tilde = R_t^{1/2} G R_t^{1/2}
+                    #
+                    # Not:
+                    #
+                    #     R_t^{1/2} G R_t^{-1/2}
+                    # ------------------------------------------------
+                    G_transport = R_half @ G @ R_half
+
+                    # Numerical skew projection.
+                    G_transport = 0.5 * (
+                        G_transport - G_transport.transpose(-1, -2)
+                    )
+
+                    grad_transport = _merging.skew_matrix_to_oft_params(
+                        G_transport
+                    )
+
+                    fisher[name] += grad_transport.pow(2)
+
+                else:
+                    fisher[name] += grad.pow(2)
+
+        count += 1
+
+    # ------------------------------------------------------------
+    # 3. Normalize
+    # ------------------------------------------------------------
+    for name in fisher:
+        fisher[name] /= max(count, 1)
+        fisher[name] = fisher[name].cpu()
+
+    return fisher
+
 def compute_empirical_diagonal_fisher(
     model: torch.nn.Module,
     loader: DataLoader,
     device: str,
-    tokenizer=None,
     ) -> dict:
     """
     Compute the diagonal empirical Fisher: E[grad log p]^2.
@@ -71,15 +547,14 @@ def compute_empirical_diagonal_fisher(
 
         loss = (token_nll * label_mask).sum() / label_mask.sum().clamp(min=1)
 
-        if count == 0 and tokenizer is not None:
-            for b in range(input_ids.shape[0]):
-                prompt = tokenizer.decode(input_ids[b], skip_special_tokens=False)
-                fisher_ids = shift_labels[b][label_mask[b].bool()].tolist()
-                print(f"\n--- Sample {b} ---")
-                print(f"Prompt: {prompt!r}")
-                print(f"Loss tokens ({len(fisher_ids)}):")
-                for tid in fisher_ids:
-                    print(f"  {tid:6d}  {tokenizer.decode([tid], skip_special_tokens=False)!r}")
+        # if count == 0 and tokenizer is not None:
+        #     for b in range(input_ids.shape[0]):
+        #         prompt = tokenizer.decode(input_ids[b], skip_special_tokens=False)
+        #         fisher_ids = shift_labels[b][label_mask[b].bool()].tolist()
+        #         print(f"\n--- Sample {b} ---")
+        #         print(f"Prompt: {prompt!r}")
+        #         decoded = tokenizer.decode(fisher_ids, skip_special_tokens=False)
+        #         print(f"Loss tokens ({len(fisher_ids)}): ids={fisher_ids}  text={decoded!r}")
 
         model.zero_grad()
         loss.backward()
@@ -330,7 +805,7 @@ def compute_and_save_fim(
     fisher = dict()
 
     # fisher = compute_diagonal_fim(model, loader, device, tokenizer)
-    fisher = compute_empirical_diagonal_fisher(model, loader, device, tokenizer)
+    fisher = compute_empirical_diagonal_transported_fisher(model, loader, device)
     # fisher = compute_kfac(model, loader, device)
 
     save_file(fisher, save_path)
@@ -351,7 +826,7 @@ def compute_all_fishers(
     for i, ((task_tag, dataset_path, dataset_name, split, doc_to_text), adapter_path) in tqdm(
         enumerate(zip(DATASET_1, adapter_paths), 1), total=total, desc="Computing FIMs"
     ):
-        if task_tag != "commonsense_qa":
+        if task_tag != "science_qa":
             continue
         model_tag = os.path.basename(adapter_path.rstrip("/"))
         save_path = os.path.join(output_dir, f"{model_tag}.safetensors")

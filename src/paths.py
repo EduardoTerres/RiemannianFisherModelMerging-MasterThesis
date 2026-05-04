@@ -17,7 +17,7 @@ class ModelFamily:
         return self.name
 
 MODELS_DIR = ROOTDIR / "data" / "models"
-FISHERS_DIR = ROOTDIR / "data" / "diagonal_fishers_labels"
+FISHERS_DIR = ROOTDIR / "data" / "diagonal_transported_fishers"
 
 # Llama 3.1 8B and its OFT adapters fine-tuned on 5 tasks
 # (social_iqa, commonsense_qa, numinamath, magicoder, science_qa).
@@ -33,10 +33,10 @@ LLAMA_ADAPTER_PATHS = [
     # "outputs/models/Llama-3.1-8B-merged-std/merged_adapter",
 ]
 LLAMA_FISHER_PATHS = [
-    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_magicoder.safetensors",
-    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_numinamath.safetensors",
-    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_commonsense.safetensors",
     f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_socialiqa.safetensors",
+    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_commonsense.safetensors",
+    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_numinamath.safetensors",
+    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_magicoder.safetensors",
     f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_scienceqa.safetensors",
 ]
 
@@ -54,11 +54,11 @@ QWEN_ADAPTER_PATHS = [
     # "outputs/models/Qwen-2.5-3B-merged-std/merged_adapter",
 ]
 QWEN_FISHER_PATHS = [
-    f"{FISHERS_DIR}/qwen2.5_3b_finetune_magicoder.safetensors",
-    f"{FISHERS_DIR}/qwen2.5_3b_finetune_numinamath.safetensors",
-    f"{FISHERS_DIR}/qwen2.5_3b_finetune_commonsense.safetensors",
-    f"{FISHERS_DIR}/qwen2.5_3b_finetune_socialiqa.safetensors",
-    f"{FISHERS_DIR}/qwen2.5_3b_finetune_scienceqa.safetensors",
+    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_socialiqa.safetensors",
+    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_commonsense.safetensors",
+    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_numinamath.safetensors",
+    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_magicoder.safetensors",
+    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_scienceqa.safetensors",
 ]
 
 MODEL_FAMILIES = {

@@ -19,6 +19,7 @@ python src/scripts/perform_merging.py \
     --output_dir outputs/models/Llama-3.1-8B-merged \
     --save_merged_model \
     --lam 0.0 \
+    --optimize_alphas adamergingpp \
     --device gpu
 
 bash scripts/eval.sh

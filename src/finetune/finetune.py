@@ -10,13 +10,20 @@ import struct
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 from datasets import Dataset, load_dataset
 from peft import OFTConfig, TaskType, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+)
 
 from src.dataset.dataset_2 import DATASET_2_TRAIN, doc_to_text
 from src.paths import (
@@ -69,22 +76,31 @@ WANDB_GROUP = "oft-new-adapters"
 WANDB_TAGS = ["oft", "finetune"]
 WANDB_LOG_MODEL = "false"
 CACHE_DIR = ROOTDIR / "data" / "hf_cache"
+SCRATCH_CHECKPOINT_ROOT = Path(
+    os.environ.get(
+        "FINETUNE_CHECKPOINT_ROOT",
+        "/scratch-shared/eterrescaballe/MasterThesis/finetune_checkpoints",
+    )
+)
+FINAL_OUTPUT_ROOT = ROOTDIR / "outputs" / "models"
 SEED = 42
 MAX_LENGTH = 1024
 TRAIN_SAMPLES = 8192
 EVAL_SAMPLES = 512
 EVAL_FRACTION = 0.05
-PER_DEVICE_BATCH_SIZE = 1
-GRADIENT_ACCUMULATION_STEPS = 16
+PER_DEVICE_BATCH_SIZE = 8
+GRADIENT_ACCUMULATION_STEPS = 8
 LEARNING_RATE = 2e-4
 WEIGHT_DECAY = 0.0
-WARMUP_RATIO = 0.03
-LR_SCHEDULER_TYPE = "cosine"
-NUM_TRAIN_EPOCHS = 2
+WARMUP_RATIO = 0.0
+LR_SCHEDULER_TYPE = "linear"
+NUM_TRAIN_EPOCHS = 1
 SAVE_TOTAL_LIMIT = 1
-LOGGING_STEPS = 10
+LOGGING_STEPS = 1
 EVAL_STEPS = 100
-SAVE_STEPS = 100
+SAVE_STRATEGY = "epoch"
+OPTIM = "adamw_torch"
+MAX_GRAD_NORM = 1.0
 DEBUG_TRAIN_SAMPLES = 32
 DEBUG_EVAL_SAMPLES = 8
 DEBUG_EPOCHS = 2
@@ -93,7 +109,67 @@ WANDB_CONFIG = {
     "lr_scheduler_type": LR_SCHEDULER_TYPE,
     "warmup_ratio": WARMUP_RATIO,
     "weight_decay": WEIGHT_DECAY,
+    "optim": OPTIM,
+    "effective_batch_size": PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS,
 }
+
+
+def oft_weight_l2_norm(model) -> float:
+    total = None
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if ".oft_" not in name:
+                continue
+            value = param.detach().float().pow(2).sum()
+            total = value if total is None else total + value
+    return 0.0 if total is None else total.sqrt().item()
+
+
+class WandbStepCallback(TrainerCallback):
+    """Log Trainer metrics with the actual Trainer global step as the W&B x-axis."""
+
+    def __init__(self):
+        self.warned_no_run = False
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs:
+            return
+        try:
+            import wandb
+        except ImportError as exc:
+            raise RuntimeError("wandb is not installed in this environment.") from exc
+        if wandb.run is None:
+            if not self.warned_no_run:
+                print("[wandb] no active run; skipping W&B metric logging", flush=True)
+                self.warned_no_run = True
+            return
+
+        payload = {"train/global_step": state.global_step}
+        for key, value in logs.items():
+            if key == "epoch":
+                payload["train/epoch"] = value
+            elif key.startswith("eval_"):
+                payload[f"eval/{key.removeprefix('eval_')}"] = value
+            elif key not in {"total_flos"}:
+                payload[f"train/{key}"] = value
+        if state.epoch is not None:
+            payload.setdefault("train/epoch", state.epoch)
+        model = kwargs.get("model")
+        if model is not None:
+            payload["train/oft_weight_l2_norm"] = oft_weight_l2_norm(model)
+        wandb.log(payload, step=state.global_step)
+
+
+class CheckpointPrintCallback(TrainerCallback):
+    """Print scratch checkpoint locations as soon as Trainer saves them."""
+
+    def on_save(self, args, state, control, **kwargs):
+        checkpoint_path = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+        print(
+            f"[checkpoint] step={state.global_step} epoch={state.epoch} "
+            f"saved to {checkpoint_path}",
+            flush=True,
+        )
 
 
 def task_info(task_name: str) -> tuple[str, str, str | None, str]:
@@ -152,6 +228,8 @@ def build_model(
         bias="none",
     )
     model = get_peft_model(model, oft_config)
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
     verify_oft_shapes(model, specs)
     model.print_trainable_parameters()
     return model
@@ -227,9 +305,10 @@ def maybe_init_wandb(
 ) -> None:
     try:
         import wandb
-    except ImportError:
-        return
+    except ImportError as exc:
+        raise RuntimeError("wandb is not installed in this environment.") from exc
     if wandb.run is not None:
+        print(f"[wandb] using existing run: {wandb.run.name}", flush=True)
         return
     config = {
         **WANDB_CONFIG,
@@ -253,6 +332,9 @@ def maybe_init_wandb(
         name=run_name,
         config=config,
     )
+    wandb.define_metric("train/global_step")
+    wandb.define_metric("*", step_metric="train/global_step")
+    print(f"[wandb] initialized run: {wandb.run.name} ({wandb.run.url})", flush=True)
 
 
 def train(model_family: str, task_name: str, debug: bool) -> None:
@@ -277,11 +359,14 @@ def train(model_family: str, task_name: str, debug: bool) -> None:
         DEBUG_TRAIN_SAMPLES if debug else TRAIN_SAMPLES,
         DEBUG_EVAL_SAMPLES if debug else EVAL_SAMPLES,
     )
-    output_dir = ROOTDIR / "outputs" / "models" / model_info.output_dir_name
-    output_dir = output_dir / f"{model_info.output_prefix}_finetune_{task}"
+    run_dir = f"{model_info.output_prefix}_finetune_{task}"
+    checkpoint_dir = SCRATCH_CHECKPOINT_ROOT / model_info.output_dir_name / run_dir
+    final_output_dir = FINAL_OUTPUT_ROOT / model_info.output_dir_name / run_dir
     run_name = f"{model_info.name}-oft-{task}{'-debug' if debug else ''}"
+    print(f"[checkpoint] intermediate checkpoints will be saved to {checkpoint_dir}", flush=True)
+    print(f"[final] final adapter will be saved to {final_output_dir}", flush=True)
     args = TrainingArguments(
-        output_dir=str(output_dir),
+        output_dir=str(checkpoint_dir),
         num_train_epochs=DEBUG_EPOCHS if debug else NUM_TRAIN_EPOCHS,
         per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
         per_device_eval_batch_size=PER_DEVICE_BATCH_SIZE,
@@ -292,24 +377,46 @@ def train(model_family: str, task_name: str, debug: bool) -> None:
         weight_decay=WEIGHT_DECAY,
         bf16=True,
         gradient_checkpointing=True,
-        optim="adamw_torch",
+        optim=OPTIM,
+        max_grad_norm=MAX_GRAD_NORM,
         eval_strategy="steps",
         eval_steps=EVAL_STEPS,
-        save_steps=SAVE_STEPS,
+        save_strategy=SAVE_STRATEGY,
+        logging_strategy="steps",
         logging_steps=LOGGING_STEPS,
         save_total_limit=SAVE_TOTAL_LIMIT,
-        report_to=["wandb"],
+        report_to=[],
         run_name=run_name,
         remove_unused_columns=False,
         seed=SEED,
-        data_seed=SEED,
     )
     args.run_name = run_name
     maybe_init_wandb(model_info, task, debug, args.run_name, len(train_ds), len(eval_ds), specs)
-    trainer = Trainer(model=model, args=args, train_dataset=train_ds, eval_dataset=eval_ds)
+    trainer = Trainer(
+        model=model,
+        args=args,
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
+        callbacks=[WandbStepCallback(), CheckpointPrintCallback()],
+    )
     trainer.train()
-    trainer.save_model(str(output_dir))
-    tokenizer.save_pretrained(str(output_dir))
+    print(f"[final] saving final adapter to {final_output_dir}", flush=True)
+    trainer.save_model(str(final_output_dir))
+    tokenizer.save_pretrained(str(final_output_dir))
+    print(f"[final] saved final adapter and tokenizer to {final_output_dir}", flush=True)
+    latest_checkpoint = max(
+        checkpoint_dir.glob("checkpoint-*"),
+        key=lambda path: int(path.name.rsplit("-", 1)[-1]),
+        default=None,
+    )
+    if latest_checkpoint is not None:
+        pointer_path = final_output_dir / "latest_scratch_checkpoint.txt"
+        pointer_path.write_text(f"{latest_checkpoint}\n")
+        print(
+            f"[checkpoint] latest scratch checkpoint is {latest_checkpoint}; "
+            f"wrote pointer to {pointer_path}",
+            flush=True,
+        )
 
 
 def parse_args() -> argparse.Namespace:

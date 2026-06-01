@@ -24,12 +24,16 @@ def build_loader(
         docs = [{k: batch[k][i] for k in batch} for i in range(n)]
         prompts, texts = zip(*[doc_to_text(d) for d in docs])
         enc = tokenizer(list(texts), truncation=True, max_length=max_length, padding="max_length")
+        # rstrip so trailing whitespace (e.g. "Answer: ") doesn't become a standalone
+        # token that shifts the boundary: in the full text the space merges with the
+        # first response character into a single token (e.g. " A"), so plen must not
+        # count that trailing space.
         prompt_lens = [
-            len(tokenizer(p, add_special_tokens=False)["input_ids"]) for p in prompts
+            len(tokenizer(p.rstrip(), add_special_tokens=False)["input_ids"]) for p in prompts
         ]
         labels = [
             [-100 if (j < plen or attn == 0) else ids[j]
-            for j, attn in enumerate(enc["attention_mask"][i])]
+             for j, attn in enumerate(enc["attention_mask"][i])]
             for i, (ids, plen) in enumerate(zip(enc["input_ids"], prompt_lens))
         ]
         enc["labels"] = labels
@@ -100,3 +104,33 @@ DATASET_1_TEST = [
     ("humanevalplus",  "evalplus/humanevalplus", None,      "test",  _humaneval_text),
     ("science_qa",     "derek-thomas/ScienceQA", None,      "test", _scienceqa_text),
 ]
+
+if __name__ == "__main__":
+    from transformers import AutoTokenizer
+    import sys
+    import os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+    from src.paths import LLAMA_BASE_MODEL_PATH, QWEN_BASE_MODEL_PATH
+
+    BASE_MODEL_PATH = LLAMA_BASE_MODEL_PATH
+    BASE_MODEL_PATH = QWEN_BASE_MODEL_PATH
+
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    for tag, path, name, split, doc_to_text in DATASET_1_TEST:
+        print(f"\n{'='*60}\nDataset: {tag}\n{'='*60}")
+        loader = build_loader(
+            path, name, split, doc_to_text, tokenizer, num_samples=3, batch_size=1, max_length=512
+        )
+        for i, batch in enumerate(loader):
+            ids = batch["input_ids"][0].tolist()
+            labels = batch["labels"][0].tolist()
+            attn = batch["attention_mask"][0].tolist()
+            full_ids   = [t for t, a in zip(ids, attn) if a == 1]
+            prompt_ids = [t for t, lbl in zip(ids, labels) if lbl == -100 and t != tokenizer.pad_token_id]
+            label_ids  = [lbl for lbl in labels if lbl != -100]
+            print(f"\n--- Sample {i} ---")
+            print(f"FULL   : {tokenizer.decode(full_ids)!r}")
+            print(f"PROMPT : {tokenizer.decode(prompt_ids)!r}")
+            print(f"LABELS : {tokenizer.decode(label_ids)!r}")

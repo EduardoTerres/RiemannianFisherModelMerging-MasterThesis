@@ -20,6 +20,7 @@ dependencies = [
     "huggingface_hub==0.26.2",
     "datasets==3.1.0",
     "matplotlib",
+    "wandb",
 ]
 
 [tool.mypy]

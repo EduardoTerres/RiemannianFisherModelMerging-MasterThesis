@@ -13,9 +13,10 @@ from torch.func import functional_call
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import geoopt
+import re
+from collections import defaultdict
 
 from src.geometry import Manifold, SOnManifold
-from src.paths import ROOTDIR
 
 
 MergeMode = Literal["standard", "diagonal_fisher"]
@@ -45,7 +46,7 @@ class RiemannianMerging(ABC):
     def _resolve_alphas(self, T: int) -> Tensor:
         if self.alphas is not None:
             return torch.tensor(self.alphas, dtype=torch.float32)
-        return 2 * torch.ones(T, dtype=torch.float32)
+        return torch.ones(T, dtype=torch.float32)
 
     @abstractmethod
     def load_weights(self, adapter_paths: List[str]) -> List[Dict[str, Tensor]]:
@@ -287,44 +288,33 @@ class OFTMerging(RiemannianMerging):
         self,
         weights_list: List[Tensor],
         fisher_list: List[Tensor],
-        alphas: List[float],
+        alphas,
     ) -> Tensor:
         """Merge OFT adapters using diagonal Fisher information as per-parameter weights.
 
+        Since F_tilde = diag(fisher_t), the full matrix system A @ omega = b reduces to
+        an element-wise division: omega_i = b_i / (lam + A_i), where
+            A_i = sum_t alpha_t * fisher_t_i
+            b_i = sum_t alpha_t * (lam + fisher_t_i) * omega_t_i
+
         Args:
-            weights_list: T tensors of shape (num_blocks, d), skew-symmetric parameters per task.
-            fisher_list: T tensors of shape (num_blocks, d), diagonal Fisher estimates per task.
-            alphas: T scalars, one mixing coefficient per task.
+            weights_list: T tensors of shape (num_blocks, d).
+            fisher_list: T tensors of shape (num_blocks, d), diagonal Fisher estimates.
+            alphas: T scalars or (T,) tensor.
 
         Returns:
             Merged parameters of shape (num_blocks, d).
         """
-        # alphas = self._fisher_diagonal_alphas(fisher_list)
-        # print(alphas)
-        num_blocks, son_dimension = weights_list[0].shape
-        dtype, device = weights_list[0].dtype, weights_list[0].device
-        block_size = int((1 + (1 + 8 * son_dimension) ** 0.5) / 2)
+        ref = weights_list[0]
+        A = torch.zeros_like(ref, dtype=torch.float32)  # sum_t alpha_t * f_t
+        b = torch.zeros_like(ref, dtype=torch.float32)  # sum_t alpha_t * (lam + f_t) * omega_t
 
-        Id = torch.eye(son_dimension, dtype=dtype, device=device).unsqueeze(0)  # (1, d, d)
+        for alpha_t, omega_t, f_t in zip(alphas, weights_list, fisher_list):
+            ft = f_t.float().to(ref.device)
+            A = A + alpha_t * ft
+            b = b + alpha_t * (self.lam + ft) * omega_t.float().to(ref.device)
 
-        A = self.lam * Id.expand(num_blocks, -1, -1).clone()  # (num_blocks, d, d)
-        b = torch.zeros(num_blocks, son_dimension, dtype=dtype, device=device)
-
-        for alpha_t, oft_params_t, fisher_t in zip(alphas, weights_list, fisher_list):
-            # skew_matrix = self.oft_params_to_skew_matrix(oft_params_t, son_dimension)  # (num_blocks, n, n)
-            # Pt = self.manifold.compute_Pt(skew_matrix=skew_matrix, block_size=block_size)  # (num_blocks, d, d)
-
-            # Full transported Fisher: (num_blocks, d, d)
-            # F_tilde = Pt @ torch.diag_embed(fisher_t) @ Pt.transpose(-2, -1)
-            F_tilde = torch.diag_embed(fisher_t)  # (num_blocks, d, d), no transport for simplicity
-
-            A += alpha_t * F_tilde
-            b += alpha_t * ((self.lam * Id.squeeze(0) + F_tilde) @ oft_params_t.unsqueeze(-1)).squeeze(-1)
-
-        # Solve A @ omega = b per block
-        merged_oft = torch.linalg.solve(A, b.unsqueeze(-1)).squeeze(-1)
-
-        return merged_oft
+        return (b / (self.lam + A).clamp(min=1e-8)).to(ref.dtype)
 
     def _fisher_merging(
         self,
@@ -462,14 +452,20 @@ class OFTMerging(RiemannianMerging):
         task_names: Optional[List[str]] = None,
     ):
         if optimize_alphas is not None:
-            if optimize_alphas not in ("adamerging", "adamergingpp"):
+            valid_alpha_opts = ("adamerging", "adamergingpp", "adamerging_equal", "adamergingpp_equal")
+            if optimize_alphas not in valid_alpha_opts:
                 raise ValueError(
-                    "optimize_alphas must be 'adamerging' or 'adamergingpp',"
+                    f"optimize_alphas must be one of {valid_alpha_opts},"
                     f" got {optimize_alphas!r}"
                 )
             if model is None or task_loaders is None or task_names is None:
                 raise ValueError("optimize_alphas requires model, task_loaders, and task_names")
-            opt = _AlphaOptimizerAdaMerging(merger=self, device=self.device)
+            opt = _AlphaOptimizerAdaMerging(
+                merger=self,
+                equal_alphas=optimize_alphas.endswith("_equal"),
+                device=self.device,
+            )
+            opt.use_pp = optimize_alphas.startswith("adamergingpp")
             return opt.optimize(adapter_paths, model, task_loaders, task_names, fisher_paths, mode)
 
         print(f"\nMerging {len(adapter_paths)} OFT adapters with {mode} mode...")
@@ -520,7 +516,7 @@ class OFTKarcherMerging(OFTMerging):
 
     def __init__(
         self,
-        n_steps: int = 50,
+        n_steps: int = 200,
         lr: float = 0.1,
         lam: float = 0.0,
         alphas: Optional[List[float]] = None,
@@ -553,12 +549,15 @@ class OFTKarcherMerging(OFTMerging):
             ).to(self.device)
 
         if mode == "standard":
-            return self._karcher_merging(weights_list, alphas)
-        if mode == "diagonal_fisher":
+            result = self._karcher_merging(weights_list, alphas)
+        elif mode == "diagonal_fisher":
             if fisher_list is None:
                 raise ValueError(f"Fisher data required for mode {mode!r}")
-            return self._fisher_karcher_merging(weights_list, fisher_list, alphas)
-        raise ValueError(f"Unsupported merge mode: {mode!r}")
+            result = self._fisher_karcher_merging(weights_list, fisher_list, alphas)
+        else:
+            raise ValueError(f"Unsupported merge mode: {mode!r}")
+
+        return result
 
     def _riemannian_karcher(
         self,
@@ -572,8 +571,7 @@ class OFTKarcherMerging(OFTMerging):
         Fisher:    minimises sum_t alpha_t/2 * <eta_t, f_t * eta_t>,
                    eta_t = coord(Omega_t) in the upper-tri so(n) basis.
                    f_t is the diagonal parameter-space Fisher -- an approximation of the full
-                   coordinate Fisher F_t^SO = (E_ij theta_0)^T R_t^T F_t R_t (E_kl theta_0)
-                   from the PDF, which requires theta_0 and is not computed here.
+                   coordinate Fisher F_t^SO = (E_ij theta_0)^T R_t^T F_t R_t (E_kl theta_0).
         R_m lives on the Stiefel manifold; RiemannianAdam handles gradient projection + retraction.
         """
         son_dimension = weights_list[0].shape[1]
@@ -582,41 +580,42 @@ class OFTKarcherMerging(OFTMerging):
             for w in weights_list
         ]
 
+        alphas_d = alphas.detach().cpu()
         mean_w = torch.einsum(
-            "t,tbd->bd", alphas.cpu(),
+            "t,tbd->bd", alphas_d,
             torch.stack([w.float().cpu() for w in weights_list]),
         ).to(self.device)
         R_m = geoopt.ManifoldParameter(
-            torch.matrix_exp(self.oft_params_to_skew_matrix(mean_w, son_dimension)),
+            torch.matrix_exp(self.oft_params_to_skew_matrix(mean_w.detach(), son_dimension)),
             manifold=geoopt.Stiefel(),
         )
-        opt = geoopt.optim.RiemannianAdam([R_m], lr=self.lr)
+        inner_opt = geoopt.optim.RiemannianAdam([R_m], lr=self.lr)
 
+        alphas_d_dev = alphas_d.to(self.device)
         for _ in range(self.n_steps):
-            opt.zero_grad()
+            inner_opt.zero_grad()
             loss: Tensor = torch.zeros(1, device=self.device)
-            for t, (alpha_t, R_t) in enumerate(zip(alphas, R_list)):
+            fisher_iter = iter(fisher_list) if fisher_list is not None else None
+            for alpha_t, R_t in zip(alphas_d_dev, R_list):
                 omega_t = self._matrix_log_skew(R_t.transpose(-1, -2) @ R_m)
-                if fisher_list is not None:
-                    # upper-tri coords weighted by diagonal Fisher
+                if fisher_iter is not None:
                     eta = self.skew_matrix_to_oft_params(omega_t)
-                    loss = loss + alpha_t * 0.5 * (fisher_list[t].float() * eta.pow(2)).sum()
+                    loss = loss + alpha_t * 0.5 * (next(fisher_iter).float() * eta.pow(2)).sum()
                 else:
-                    # full Frobenius: ||Omega_t||_F^2 = sum_{i,j} Omega_{t,ij}^2
                     loss = loss + alpha_t * 0.5 * omega_t.pow(2).sum()
             loss.backward()
-            opt.step()
+            inner_opt.step()
 
         self._last_loss: float = loss.item()
         with torch.no_grad():
             merged = self.skew_matrix_to_oft_params(self._matrix_log_skew(R_m.detach()))
             t_norms = [w.float().norm().item() for w in weights_list]
-            print(
-                f"    ||omega_m||={merged.float().norm().item():.4f}  "
-                f"sum||xi_t||={sum(t_norms):.4f}  "
-                f"mean||xi_t||={sum(t_norms)/len(t_norms):.4f}  "
-                f"loss={self._last_loss:.6f}"
-            )
+            # print(
+            #     f"    ||omega_m||={merged.float().norm().item():.4f}  "
+            #     f"sum||xi_t||={sum(t_norms):.4f}  "
+            #     f"mean||xi_t||={sum(t_norms)/len(t_norms):.4f}  "
+            #     f"loss={self._last_loss:.6f}"
+            # )
         return merged.to(weights_list[0].dtype)
 
     def _karcher_merging(self, weights_list: List[Tensor], alphas: Tensor) -> Tensor:
@@ -643,13 +642,21 @@ class OFTKarcherMerging(OFTMerging):
         task_names: Optional[List[str]] = None,
     ) -> Dict[str, Tensor]:
         if optimize_alphas is not None:
+            valid_alpha_opts = ("adamerging", "adamergingpp", "adamerging_equal", "adamergingpp_equal")
+            if optimize_alphas not in valid_alpha_opts:
+                raise ValueError(
+                    f"optimize_alphas must be one of {valid_alpha_opts},"
+                    f" got {optimize_alphas!r}"
+                )
             if model is None or task_loaders is None or task_names is None:
                 raise ValueError("optimize_alphas requires model, task_loaders, and task_names")
-            opt = _AlphaOptimizerAdaMerging(merger=self, device=self.device)
+            opt = _AlphaOptimizerAdaMerging(
+                merger=self,
+                equal_alphas=optimize_alphas.endswith("_equal"),
+                device=self.device,
+            )
+            opt.use_pp = optimize_alphas.startswith("adamergingpp")
             return opt.optimize(adapter_paths, model, task_loaders, task_names, fisher_paths, mode)
-
-        import re
-        from collections import defaultdict
 
         print(f"\nMerging {len(adapter_paths)} OFT adapters with Karcher mean ({mode})...")
         all_weights = self.load_weights(adapter_paths)
@@ -719,8 +726,7 @@ class WudiOFTMerging(OFTMerging):
         """
         task_vectors = None
         if "fisher" in mode:
-            alphas = torch.tensor(self.alphas, dtype=torch.float32) if self.alphas is not None else torch.tensor([0.5] * len(weights_list), dtype=torch.float32)
-            task_vectors = self.fisher_full_task_vectors(weights_list, fisher_list, alphas)
+            task_vectors = self.fisher_full_task_vectors(weights_list, fisher_list, self.alphas)
         elif mode == "standard":
             task_vectors = weights_list
         else:
@@ -803,7 +809,7 @@ class AdaMergingPP:
         self,
         n_iters: int = 100,
         lr: float = 1e-2,
-        batch_size: int = 64,
+        max_batch_size: int = 64,
         ties_trim_ratio: float = 0.2,
         init_lambda: float = 0.3,
         log_wandb: bool = True,
@@ -815,7 +821,7 @@ class AdaMergingPP:
             merger=OFTMerging(device=device),
             n_iters=n_iters,
             lr=lr,
-            batch_size=batch_size,
+            max_batch_size=max_batch_size,
             init_alpha=init_lambda,
             log_wandb=log_wandb,
             device=device,
@@ -890,26 +896,47 @@ class _AlphaOptimizerAdaMerging:
     def __init__(
         self,
         merger: RiemannianMerging,
-        n_iters: int = 500,
-        lr: float = 1e-2,
-        batch_size: int = 64,
-        init_alpha: float = 0.3,
+        n_iters: int = 100,
+        lr: float = 1e-3,
+        max_batch_size: int = 64,
+        init_alpha: float = 1,  # 1 is equal_alphas
+        equal_alphas: bool = False,
         log_wandb: bool = True,
         device: str = "cpu",
     ) -> None:
         self.merger = merger
         self.n_iters = n_iters
         self.lr = lr
-        self.batch_size = batch_size
+        self.max_batch_size = max_batch_size
         self.init_alpha = init_alpha
+        self.equal_alphas = equal_alphas
         self.log_wandb = log_wandb
         self.device = device
+        self.use_pp = False
+        self.ties_trim_ratio = 0.2
 
     @staticmethod
     def _entropy(logits: Tensor, mask: Tensor) -> Tensor:
         p = logits.softmax(-1)
         h = -(p * p.clamp(min=1e-8).log()).sum(-1)
         return (h * mask.float()).sum() / mask.float().sum().clamp(min=1.0)
+
+    @staticmethod
+    def _ties(vecs: List[Tensor], trim_ratio: float) -> List[Tensor]:
+        """AdaMerging++ TIES: trim, elect sign, disjoint merge mask."""
+        T, shape = len(vecs), vecs[0].shape
+        flat = torch.stack(vecs).float().view(T, -1)
+        D = flat.shape[1]
+        k = max(1, int(trim_ratio * D))
+        thresh = flat.abs().kthvalue(D - k + 1, dim=1, keepdim=True).values
+        trimmed = flat * (flat.abs() >= thresh)
+        elected = torch.where(
+            (trimmed * (trimmed > 0)).sum(0) >= (trimmed.abs() * (trimmed < 0)).sum(0),
+            torch.ones(D, device=flat.device), -torch.ones(D, device=flat.device),
+        )
+        mask = (trimmed.sign() == elected.unsqueeze(0)) | (trimmed == 0)
+        phi = trimmed * mask
+        return [phi[t].view(shape) for t in range(T)]
 
     def optimize_from_vecs(
         self,
@@ -933,7 +960,14 @@ class _AlphaOptimizerAdaMerging:
         T = len(task_names)
         L = len(keys)
 
-        alphas = torch.full((T, L), self.init_alpha, device=self.device, requires_grad=True)
+        alpha_shape = (1, 1) if self.equal_alphas else (T, L)
+        alphas = torch.full(
+            alpha_shape,
+            float(self.init_alpha),
+            device=self.device,
+            dtype=torch.float32,
+            requires_grad=True,
+        )
         opt = torch.optim.Adam([alphas], lr=self.lr, betas=(0.9, 0.999))
 
         cyc = [cycle(dl) for dl in task_loaders]
@@ -945,7 +979,7 @@ class _AlphaOptimizerAdaMerging:
             opt.zero_grad()
             ents: List[Tensor] = []
 
-            clamped_alphas = torch.clamp(alphas, 0.0, 1.0)
+            clamped_alphas = torch.clamp(alphas, 0.0, 1.0).expand(T, L)
 
             merged_params = {
                 key_map[k]: base[k] + self.merger.merge_formula(
@@ -957,30 +991,45 @@ class _AlphaOptimizerAdaMerging:
                 for i, k in enumerate(keys)
             }
 
+            ce_vals: List[float] = []
             for t in range(T):
                 batch = next(cyc[t])
-                ids = batch["input_ids"][:self.batch_size].to(self.device)
-                attn = batch["attention_mask"][:self.batch_size].to(self.device)
+                ids = batch["input_ids"][:self.max_batch_size].to(self.device)
+                attn = batch["attention_mask"][:self.max_batch_size].to(self.device)
+                labels = batch["labels"][:self.max_batch_size].to(self.device)
 
-                logits = functional_call(
-                    model, merged_params, (), {"input_ids": ids, "attention_mask": attn},
-                ).logits.float()
+                out = functional_call(
+                    model, merged_params, (),
+                    {"input_ids": ids, "attention_mask": attn},
+                )
+                logits = out.logits.float()
                 assert logits.dim() == 3
                 ents.append(self._entropy(logits, attn))
+
+                with torch.no_grad():
+                    ce_out = functional_call(
+                        model, merged_params, (),
+                        {"input_ids": ids, "attention_mask": attn, "labels": labels},
+                    )
+                    ce_vals.append(ce_out.loss.item())
 
             loss: Tensor = sum(ents)  # type: ignore[assignment]
             loss.backward()
             opt.step()
 
             if self.log_wandb:
-                log = {"entropy/total": loss.item()}
+                log = {"entropy/total": loss.item(), "ce/total": sum(ce_vals) / len(ce_vals)}
                 for t, name in enumerate(task_names):
                     log[f"entropy/{name}"] = ents[t].item()
+                    log[f"ce/{name}"] = ce_vals[t]
                     log[f"alpha_mean/{name}"] = clamped_alphas[t].mean().item()
                 wandb.log(log, step=step)  # type: ignore[attr-defined]
 
+            del merged_params, ents, loss, ce_vals
+            torch.cuda.empty_cache()
+
         with torch.no_grad():
-            final_alphas = alphas.clamp(0.0, 1.0)
+            final_alphas = alphas.clamp(0.0, 1.0).expand(T, L)
             merged: Dict[str, Tensor] = {}
             for i, k in enumerate(keys):
                 delta = self.merger.merge_formula(
@@ -1029,7 +1078,10 @@ class _AlphaOptimizerAdaMerging:
         keys = [k for k in oft_keys if k in key_map]
         assert keys, "No adapter keys mapped to model parameters"
 
-        task_vecs = {k: [all_w[t][k].float().to(self.device) for t in range(T)] for k in keys}
+        task_vecs = {}
+        for k in keys:
+            vecs = [all_w[t][k].float().to(self.device) for t in range(T)]
+            task_vecs[k] = self._ties(vecs, self.ties_trim_ratio) if self.use_pp else vecs
         base = {k: params[key_map[k]].data.clone().float().to(self.device) for k in keys}
 
         fisher_list: Optional[Dict[str, List[Tensor]]] = None
@@ -1041,22 +1093,3 @@ class _AlphaOptimizerAdaMerging:
             task_vecs, base, key_map, keys, all_w[0], model, task_loaders, task_names,
             mode=mode, fisher_list=fisher_list,
         )
-
-
-# if __name__ == "__main__":
-    # Example usage
-    # merging = OFTMerging(lam=1.0, alphas=[0.5, 0.5], device="cuda")
-    # merged_weights = merging.merge(
-    #     adapter_paths=[
-    #         # f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_magicoder",
-    #         # f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_numinamath",
-    #         # f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_commonsense",
-    #         f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_socialiqa",
-    #         # f"{OFT_LLAMA_MODELS_DIR}/Llama-3.1-8B_OFT_adapters/llama3-1_8b_finetune_scienceqa",
-    #     ],
-    #     fisher_paths=[
-    #         f"{ROOTDIR}/data/fishers/llama3-1_8b_finetune_socialiqa.safetensors"
-    #     ],
-    #     mode="diagonal_fisher",
-    # )
-    # print(merged_weights.keys())

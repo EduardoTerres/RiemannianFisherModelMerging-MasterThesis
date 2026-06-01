@@ -23,9 +23,9 @@ from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
 def _build_alpha_optimizer_inputs(
     model_family: ModelFamily,
     device: str,
-    num_samples: int = 32,
-    batch_size: int = 16,
-    max_length: int = 64,
+    num_samples: int = 128,
+    batch_size: int = 4,
+    max_length: int = 128,
 ) -> tuple:
     tokenizer = AutoTokenizer.from_pretrained(model_family.base_model_path)
     if tokenizer.pad_token is None:
@@ -139,8 +139,11 @@ def parse_args():
         help="Device to use (e.g., 'gpu', 'cpu').",
     )
     parser.add_argument(
-        "--optimize_alphas", type=str, choices=["adamerging", "adamergingpp"], default=None,
-        help="If set, optimize per-task/layer alphas via entropy minimization ('adamerging' or 'adamergingpp').",  # noqa: E501
+        "--optimize_alphas",
+        type=str,
+        choices=["adamerging", "adamergingpp", "adamerging_equal", "adamergingpp_equal"],
+        default=None,
+        help="If set, optimize alphas via entropy minimization; *_equal ties all alphas.",  # noqa: E501
     )
     return parser.parse_args()
 

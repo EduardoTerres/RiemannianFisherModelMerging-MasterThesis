@@ -22,7 +22,7 @@ for MODEL_PATH in "${MODELS[@]}"; do
         --trust_remote_code
 done
 
-# # ScienceQA
-# conda activate OrthoMerge
-# python eval/eval_scienceqa.py --merged_dir "outputs/models/Llama-3.1-8B-merged-fisher/merged_model" \
-#     "data/models/Llama-3.1-8B/"
+# ScienceQA
+conda activate OrthoMerge
+python eval/eval_scienceqa.py --merged_dir "outputs/models/Llama-3.1-8B-merged-fisher/merged_model" \
+    "data/models/Llama-3.1-8B/"

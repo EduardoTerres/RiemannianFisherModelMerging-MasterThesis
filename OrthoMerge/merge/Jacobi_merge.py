@@ -195,17 +195,8 @@ def merge_oft_adapter_weights_jacobi(adapter_paths, fishers):
             alphas = torch.tensor([0.5 for _ in weights_list], dtype=torch.float32)
             fisher_list = [fisher[key] for fisher in fishers if key in fisher]
 
-            # Parallel transport Fisher
-            fisher_transported_list = []
-            for alpha_t, oft_params_t, fisher_t in zip(alphas, weights_list, fisher_list):
-                Pt = compute_Pt(oft_params=oft_params_t, block_size=32)
-                F_tilde = ((Pt ** 2) @ fisher_t.unsqueeze(-1)).squeeze(-1)
-                # F_tilde = fisher_t
-                fisher_transported_list.append(F_tilde)
-
-            fisher_list = fisher_transported_list
             # Transform to fisher task vector
-            lam = 1
+            lam = 0.0
             denom = 0.0
 
             denom = torch.zeros(fisher_list[0].shape).to(device)

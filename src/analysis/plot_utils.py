@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
 import numpy as np
 
 
@@ -374,6 +375,95 @@ def plot_transport_effect(
         plt.show()
 
 
+def plot_gradient_analysis(
+    results: dict,
+    family_name: str,
+    save_path: Optional[str] = None,
+) -> None:
+    """2x3 grid comparing gradient vs task-vector alignment per task.
+
+    Args:
+        results: {task_name: {param_name: {cos_raw, cos_fisher, rel_diff_raw,
+                  rel_diff_fisher, normed_diff_raw, normed_diff_fisher,
+                  norm_tv, norm_grad, norm_precond, abs_diff_raw, abs_diff_fisher}}}
+        family_name: used in the suptitle.
+        save_path: if given, save figure there; otherwise show.
+    """
+    tasks = list(results.keys())
+    x = np.arange(len(tasks))
+    w = 0.35
+
+    def _means(key):
+        return [np.mean([v[key] for v in results[t].values()]) for t in tasks]
+
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8))
+
+    # (a) Cosine similarity
+    ax = axes[0, 0]
+    ax.bar(x - w/2, _means("cos_raw"),    w, label="H0 = I")
+    ax.bar(x + w/2, _means("cos_fisher"), w, label="H0 = avg(F)")
+    ax.axhline(1.0, color="r", linestyle="--", alpha=0.4, label="ideal")
+    ax.set_title("Cosine  cos(-H0_inv * grad_l, xi)")
+    ax.set_ylabel("cosine"); ax.set_ylim(-1, 1)
+    ax.set_xticks(x); ax.set_xticklabels(tasks, rotation=20, ha="right")
+    ax.legend(fontsize=8)
+
+    # (b) Relative difference
+    ax = axes[0, 1]
+    ax.bar(x - w/2, _means("rel_diff_raw"),    w, label="H0 = I")
+    ax.bar(x + w/2, _means("rel_diff_fisher"), w, label="H0 = avg(F)")
+    ax.axhline(0.0, color="r", linestyle="--", alpha=0.4, label="ideal")
+    ax.set_title("Relative diff  ||xi - (-H0_inv*g)|| / ||xi||")
+    ax.set_ylabel("relative mismatch")
+    ax.set_xticks(x); ax.set_xticklabels(tasks, rotation=20, ha="right")
+    ax.legend(fontsize=8)
+
+    # (c) Normed diff (unit-sphere, fair scale)
+    ax = axes[0, 2]
+    ax.bar(x - w/2, _means("normed_diff_raw"),    w, label="H0 = I")
+    ax.bar(x + w/2, _means("normed_diff_fisher"), w, label="H0 = avg(F)")
+    ax.axhline(0.0, color="r", linestyle="--", alpha=0.4, label="ideal")
+    ax.set_title("Normed diff  ||xi_hat - v_hat||  (fair scale)")
+    ax.set_ylabel("direction mismatch (unit sphere)")
+    ax.set_xticks(x); ax.set_xticklabels(tasks, rotation=20, ha="right")
+    ax.legend(fontsize=8)
+
+    # (d) Gradient norms
+    ax = axes[1, 0]
+    ax.bar(tasks, _means("norm_grad"), color="steelblue")
+    ax.set_title("Mean gradient norm  ||grad_l_t||")
+    ax.set_ylabel("||grad_l_t||")
+    ax.set_xticklabels(tasks, rotation=20, ha="right")
+
+    # (e) Task-vector norm vs preconditioned-gradient norm
+    ax = axes[1, 1]
+    ax.bar(x - w/2, _means("norm_tv"),      w, label="||xi_t||  (task vec)")
+    ax.bar(x + w/2, _means("norm_precond"), w, label="||H0_inv*g_t||  (Fisher)")
+    ax.set_title("Norm: task vector vs H0_inv * grad_l_t")
+    ax.set_ylabel("||*||")
+    ax.set_xticks(x); ax.set_xticklabels(tasks, rotation=20, ha="right")
+    ax.legend(fontsize=8)
+
+    # (f) Absolute difference norms
+    ax = axes[1, 2]
+    ax.bar(x - w/2, _means("abs_diff_raw"),    w, label="H0 = I")
+    ax.bar(x + w/2, _means("abs_diff_fisher"), w, label="H0 = avg(F)")
+    ax.axhline(0.0, color="r", linestyle="--", alpha=0.4, label="ideal")
+    ax.set_title("Absolute diff  ||xi - (-H0_inv*g)||")
+    ax.set_ylabel("||*||")
+    ax.set_xticks(x); ax.set_xticklabels(tasks, rotation=20, ha="right")
+    ax.legend(fontsize=8)
+
+    fig.suptitle(f"Gradient vs Task Vector -- {family_name}", fontsize=13)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        plt.show()
+
+
 def plot_oft_covariance_eigenvalues(
     eigenvalues: np.ndarray,
     labels: List[str],
@@ -410,3 +500,149 @@ def plot_oft_covariance_eigenvalues(
             plt.close(fig)
         else:
             plt.show()
+
+
+def plot_pca_task_vectors(
+    vectors: Dict[str, np.ndarray],
+    n_tasks: int,
+    title: str = "PCA of task vectors",
+    save_path: Optional[str] = None,
+    ax: Optional[plt.Axes] = None,
+) -> None:
+    """2-D PCA scatter of task vectors and merged solutions.
+
+    Args:
+        vectors: Ordered dict mapping label -> 1-D numpy vector.
+            The first n_tasks entries are task vectors; the rest are merged solutions.
+        n_tasks:    Number of task vector entries at the start of `vectors`.
+        title:      Axes title.
+        save_path:  If given, save the figure; otherwise show.
+        ax:         If provided, draw into this Axes (no fig created).
+    """
+    labels = list(vectors.keys())
+    X = np.stack(list(vectors.values())).astype(np.float64)  # (N, D)
+
+    X_c = X - X.mean(axis=0, keepdims=True)
+    _, s, Vt = np.linalg.svd(X_c, full_matrices=False)
+    coords = X_c @ Vt[:2].T  # (N, 2)
+    total_var = (s ** 2).sum()
+    explained_var = (s[:2] ** 2) / (total_var + 1e-30)
+
+    fig = None
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 5))
+
+    task_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    n_merged = len(labels) - n_tasks
+    merged_markers = ["*", "D", "^", "P", "X"]
+    merged_sizes   = [250, 120, 140, 140, 140]
+
+    for i, label in enumerate(labels):
+        x, y = coords[i]
+        if i < n_tasks:
+            ax.scatter(x, y, color=task_colors[i % len(task_colors)], s=80, zorder=4)
+            ax.annotate(label, (x, y), textcoords="offset points", xytext=(5, 4), fontsize=8)
+        else:
+            j = i - n_tasks
+            marker = merged_markers[j % len(merged_markers)]
+            size   = merged_sizes[j % len(merged_sizes)]
+            color  = task_colors[(n_tasks + j) % len(task_colors)]
+            ax.scatter(x, y, color=color, marker=marker, s=size, zorder=5, label=label)
+            ax.annotate(label, (x, y), textcoords="offset points", xytext=(5, 4), fontsize=8,
+                        fontweight="bold")
+
+    for i in range(n_tasks):
+        ax.scatter([], [], color=task_colors[i % len(task_colors)], s=80, label=labels[i])
+
+    ax.set_xlabel(f"PC1 ({explained_var[0]:.1%})")
+    ax.set_ylabel(f"PC2 ({explained_var[1]:.1%})")
+    ax.set_title(title)
+    ax.legend(fontsize=7, loc="best")
+    ax.grid(True, linestyle="--", alpha=0.3)
+
+    if fig is not None:
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+        else:
+            plt.show()
+
+
+def _pca_fit(frames: List[Dict[str, np.ndarray]]):
+    """Fit PCA on all frames combined; return (center, pc, explained_var)."""
+    all_X = np.vstack([np.stack(list(f.values())) for f in frames]).astype(np.float64)
+    center = all_X.mean(axis=0, keepdims=True)
+    _, s, Vt = np.linalg.svd(all_X - center, full_matrices=False)
+    ev = (s[:2] ** 2) / ((s ** 2).sum() + 1e-30)
+    return center, Vt[:2], ev
+
+
+def _draw_pca_frame(ax, coords: np.ndarray, labels: List[str], n_tasks: int,
+                    title: str, xlim, ylim, ev: np.ndarray) -> None:
+    task_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    merged_markers = ["*", "D", "^", "P", "X"]
+    merged_sizes   = [250, 120, 140, 140, 140]
+    ax.clear()
+    for i, lbl in enumerate(labels):
+        x, y = coords[i]
+        if i < n_tasks:
+            ax.scatter(x, y, color=task_colors[i % len(task_colors)], s=80, zorder=4)
+            ax.annotate(lbl, (x, y), textcoords="offset points", xytext=(5, 4), fontsize=8)
+        else:
+            j = i - n_tasks
+            ax.scatter(x, y, color=task_colors[(n_tasks + j) % len(task_colors)],
+                       marker=merged_markers[j % len(merged_markers)],
+                       s=merged_sizes[j % len(merged_sizes)], zorder=5, label=lbl)
+            ax.annotate(lbl, (x, y), textcoords="offset points", xytext=(5, 4),
+                        fontsize=8, fontweight="bold")
+    for i in range(n_tasks):
+        ax.scatter([], [], color=task_colors[i % len(task_colors)], s=80, label=labels[i])
+    ax.set_xlim(xlim); ax.set_ylim(ylim)
+    ax.set_xlabel(f"PC1 ({ev[0]:.1%})"); ax.set_ylabel(f"PC2 ({ev[1]:.1%})")
+    ax.set_title(title)
+    ax.legend(fontsize=7, loc="best")
+    ax.grid(True, linestyle="--", alpha=0.3)
+
+
+def save_pca_gif(
+    frames: List[Dict[str, np.ndarray]],
+    frame_titles: List[str],
+    n_tasks: int,
+    title: str = "",
+    save_path: str = "animation.gif",
+    fps: int = 2,
+) -> None:
+    """Animate PCA frames (one per layer) into a GIF with consistent axes.
+
+    Args:
+        frames:       List of ordered dicts {label: 1-D vector}, one per layer.
+        frame_titles: Title suffix for each frame (e.g. "Layer 0").
+        n_tasks:      Number of task-vector entries at the start of each frame dict.
+        title:        Common title prefix.
+        save_path:    Output .gif path.
+        fps:          Frames per second.
+    """
+    center, pc, ev = _pca_fit(frames)
+    labels = list(frames[0].keys())
+
+    projected = [
+        np.stack([(v.astype(np.float64) - center[0]) @ pc.T for v in f.values()])
+        for f in frames
+    ]
+    all_c = np.vstack(projected)
+    pad = 0.15 * (all_c.max(0) - all_c.min(0)).clip(min=0.01)
+    xlim = (all_c[:, 0].min() - pad[0], all_c[:, 0].max() + pad[0])
+    ylim = (all_c[:, 1].min() - pad[1], all_c[:, 1].max() + pad[1])
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    def _update(i):
+        _draw_pca_frame(ax, projected[i], labels, n_tasks,
+                        f"{title} — {frame_titles[i]}", xlim, ylim, ev)
+
+    anim = FuncAnimation(fig, _update, frames=len(frames), interval=500)
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+    anim.save(save_path, writer=PillowWriter(fps=fps))
+    plt.close(fig)

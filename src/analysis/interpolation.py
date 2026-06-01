@@ -180,7 +180,7 @@ def _run(family_name: str, args: argparse.Namespace):
     adapter_paths = model_family.adapter_paths
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    interpolation_grid = np.linspace(0, 2, args.num_points).tolist()
+    interpolation_grid = np.linspace(0, 1, args.num_points).tolist()
 
     tokenizer = AutoTokenizer.from_pretrained(base_model_path)
     if tokenizer.pad_token is None:

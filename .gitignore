@@ -5,6 +5,7 @@
 *.safetensors
 *.out
 
+context/*
 data/*
 outputs/*
 wandb/*

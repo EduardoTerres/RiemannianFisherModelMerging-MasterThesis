@@ -15,7 +15,7 @@ MODEL_FAMILY="llama3.1"
 
 mkdir -p outputs/slurm
 source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate OrthoMerge
+conda activate merge
 
 if [[ "$DEBUG" == "1" && "$SLURM_ARRAY_TASK_ID" != "0" ]]; then
     exit 0
@@ -28,5 +28,4 @@ fi
 
 python src/finetune/finetune.py \
     --model-family "$MODEL_FAMILY" \
-    --task-index "$SLURM_ARRAY_TASK_ID" \
-    $EXTRA_ARGS
+    --task-index "$SLURM_ARRAY_TASK_ID"

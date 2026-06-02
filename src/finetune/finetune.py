@@ -70,7 +70,7 @@ MODELS = {
     ),
 }
 
-WANDB_PROJECT = "edu-thesis"
+WANDB_PROJECT = "thesis-finetunes"
 WANDB_ENTITY = None
 WANDB_GROUP = "oft-new-adapters"
 WANDB_TAGS = ["oft", "finetune"]
@@ -79,7 +79,7 @@ CACHE_DIR = ROOTDIR / "data" / "hf_cache"
 SCRATCH_CHECKPOINT_ROOT = Path(
     os.environ.get(
         "FINETUNE_CHECKPOINT_ROOT",
-        "/scratch-shared/eterrescaballe/MasterThesis/finetune_checkpoints",
+        "/scratch-shared/eterres/MasterThesis/finetune_checkpoints",
     )
 )
 FINAL_OUTPUT_ROOT = ROOTDIR / "outputs" / "models"
@@ -94,10 +94,10 @@ LEARNING_RATE = 2e-4
 WEIGHT_DECAY = 0.0
 WARMUP_RATIO = 0.0
 LR_SCHEDULER_TYPE = "linear"
-NUM_TRAIN_EPOCHS = 1
+NUM_TRAIN_EPOCHS = 2
 SAVE_TOTAL_LIMIT = 1
 LOGGING_STEPS = 1
-EVAL_STEPS = 100
+EVAL_STEPS = 10
 SAVE_STRATEGY = "epoch"
 OPTIM = "adamw_torch"
 MAX_GRAD_NORM = 1.0
@@ -399,6 +399,8 @@ def train(model_family: str, task_name: str, debug: bool) -> None:
         eval_dataset=eval_ds,
         callbacks=[WandbStepCallback(), CheckpointPrintCallback()],
     )
+    print("[eval] running pre-training evaluation", flush=True)
+    trainer.evaluate(metric_key_prefix="eval_pretrain")
     trainer.train()
     print(f"[final] saving final adapter to {final_output_dir}", flush=True)
     trainer.save_model(str(final_output_dir))

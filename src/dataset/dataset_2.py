@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Callable
 
 from datasets import load_dataset
@@ -86,34 +85,10 @@ def _triviaqa_text(doc: dict[str, Any]) -> tuple[str, str]:
     return prompt, prompt + response
 
 
-def _jsonschema_bench_easy_text(doc: dict[str, Any]) -> tuple[str, str]:
-    schema = _first(doc, "json_schema", "schema", "output_schema")
-    prompt = f"JSON schema: {_stringify(schema)}\n\nJSON object: "
-    return prompt, prompt + _stringify(_first(doc, "json_object", "instance", "output", "answer", "json"))
-
-
 def _meddialog_qsumm_text(doc: dict[str, Any]) -> tuple[str, str]:
-    dialogue = _stringify(_first(doc, "dialogue", "conversation", "input"))
+    dialogue = _stringify(_first(doc, "src", "dialogue", "conversation", "input"))
     prompt = f"Medical dialogue:\n{dialogue}\n\nResponse: "
-    return prompt, prompt + _stringify(_first(doc, "response", "summary", "answer", "output"))
-
-
-def _mimic_repsum_text(doc: dict[str, Any]) -> tuple[str, str]:
-    text = _stringify(_first(doc, "extractive_notes_summ", "text", "input", "hospital_course"))
-    impression = re.search("IMPRESSION", text, re.IGNORECASE)
-    finding = re.search("FINDING", text, re.IGNORECASE)
-    impression_start = impression.start() if impression is not None else -1
-    finding_start = finding.start() if finding is not None else -1
-    if impression_start < finding_start:
-        impressions = text[impression_start:finding_start].split("     ")[0]
-        findings = text[finding_start:].split("     ")[0]
-    else:
-        impressions = text[impression_start:].split("     ")[0]
-        findings = text[finding_start:impression_start].split("     ")[0]
-    if len(findings) < 5 < len(impressions):
-        findings = text[:impression_start]
-    prompt = f"Given the findings: {findings}.\nSummarize the findings."
-    return prompt, prompt + impressions
+    return prompt, prompt + _stringify(_first(doc, "tgt", "response", "summary", "answer", "output"))
 
 
 def _wmt16_en_de_text(doc: dict[str, Any]) -> tuple[str, str]:
@@ -189,21 +164,7 @@ DATASET_2_TRAIN: list[TaskSpec] = [
     ("drop", "EleutherAI/drop", None, "train", _drop_text),  # Passage QA requiring discrete/numerical reasoning answers.
     ("nq_open", "google-research-datasets/nq_open", None, "train", _nq_open_text),  # Open-domain Natural Questions answer generation.
     ("triviaqa", "mandarjoshi/trivia_qa", "rc.nocontext", "train", _triviaqa_text),  # Trivia-style open QA with alias answer strings.
-    (
-        "jsonschema_bench_easy",
-        "epfl-dlab/JSONSchemaBench",
-        "Github_easy",
-        "train",
-        _jsonschema_bench_easy_text,
-    ),  # Structured JSON generation from natural-language/schema constraints.
     ("meddialog_qsumm", "lighteval/med_dialog", "icliniq", "train", _meddialog_qsumm_text),  # Medical dialogue response/summarization generation.
-    (
-        "mimic_repsum",
-        "dmacres/mimiciii-hospitalcourse-meta",
-        None,
-        "train",
-        _mimic_repsum_text,
-    ),  # Clinical findings-to-impression report summarization.
     ("wmt16-en-de", "wmt/wmt16", "de-en", "train", _wmt16_en_de_text),  # English-to-German machine translation.
     (
         "wikitext",
@@ -218,8 +179,8 @@ DATASET_2_TRAIN: list[TaskSpec] = [
     ("babi", "Muennighoff/babi", None, "train", _babi_text),  # Synthetic story reasoning QA with short textual answers.
     ("squadv2", "lighteval/squad_v2", None, "train", _squadv2_text),  # Extractive or unanswerable passage QA.
     ("mbpp", "google-research-datasets/mbpp", "full", "train", _mbpp_text),  # Short Python program synthesis from natural-language tasks and tests.
-    # ("numinamath", "AI-MO/NuminaMath-TIR", None, "train", _numinamath_text),  # Competition-style mathematical solution generation.
-    # ("magicoder", "ise-uiuc/Magicoder-OSS-Instruct-75K", None, "train", _magicoder_text),  # Instruction-following code generation.
+    ("numinamath", "AI-MO/NuminaMath-TIR", None, "train", _numinamath_text),  # Competition-style mathematical solution generation.
+    ("magicoder", "ise-uiuc/Magicoder-OSS-Instruct-75K", None, "train", _magicoder_text),  # Instruction-following code generation.
 ]
 
 # (tag, dataset_path, dataset_name, split, doc_to_text)
@@ -228,21 +189,7 @@ DATASET_2_TEST: list[TaskSpec] = [
     ("drop", "EleutherAI/drop", None, "validation", _drop_text),
     ("nq_open", "google-research-datasets/nq_open", None, "validation", _nq_open_text),
     ("triviaqa", "mandarjoshi/trivia_qa", "rc.nocontext", "validation", _triviaqa_text),
-    (
-        "jsonschema_bench_easy",
-        "epfl-dlab/JSONSchemaBench",
-        "Github_easy",
-        "test",
-        _jsonschema_bench_easy_text,
-    ),
     ("meddialog_qsumm", "lighteval/med_dialog", "icliniq", "test", _meddialog_qsumm_text),
-    (
-        "mimic_repsum",
-        "dmacres/mimiciii-hospitalcourse-meta",
-        None,
-        "test",
-        _mimic_repsum_text,
-    ),
     ("wmt16-en-de", "wmt/wmt16", "de-en", "test", _wmt16_en_de_text),
     (
         "wikitext",
@@ -257,8 +204,8 @@ DATASET_2_TEST: list[TaskSpec] = [
     ("babi", "Muennighoff/babi", None, "valid", _babi_text),
     ("squadv2", "lighteval/squad_v2", None, "validation", _squadv2_text),
     ("mbpp", "google-research-datasets/mbpp", "full", "test", _mbpp_text),
-    # ("math500", "HuggingFaceH4/MATH-500", "default", "test", _numinamath_text),
-    # ("humanevalplus", "evalplus/humanevalplus", None, "test", _humaneval_text),
+    ("math500", "HuggingFaceH4/MATH-500", "default", "test", _numinamath_text),
+    ("humanevalplus", "evalplus/humanevalplus", None, "test", _humaneval_text),
  ]
 
 DOC_TO_TEXT = {tag: formatter for tag, _, _, _, formatter in DATASET_2_TRAIN + DATASET_2_TEST}
@@ -282,6 +229,24 @@ def build_loader(
     dataset = load_dataset(dataset_path, dataset_name, split=split, trust_remote_code=True)
     dataset = dataset.select(range(min(num_samples, len(dataset))))
 
+    def join_prompt_and_target(prompt: str, target: str) -> tuple[list[int], list[int], list[int]]:
+        prompt_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+        target_ids = tokenizer(target, add_special_tokens=False)["input_ids"]
+        if len(prompt_ids) + len(target_ids) > max_length and target_ids:
+            target_budget = min(len(target_ids), max_length - 1)
+            prompt_budget = max_length - target_budget
+            prompt_ids = prompt_ids[-prompt_budget:]
+            target_ids = target_ids[:target_budget]
+        input_ids = (prompt_ids + target_ids)[:max_length]
+        labels = ([-100] * len(prompt_ids) + target_ids)[:max_length]
+        attention_mask = [1] * len(input_ids)
+        pad_len = max_length - len(input_ids)
+        if pad_len > 0:
+            input_ids += [tokenizer.pad_token_id] * pad_len
+            labels += [-100] * pad_len
+            attention_mask += [0] * pad_len
+        return input_ids, attention_mask, labels
+
     def tokenize(batch: dict[str, list[Any]]) -> dict[str, Any]:
         source_docs = [dict(zip(batch.keys(), values)) for values in zip(*batch.values())]
         docs = [
@@ -292,16 +257,14 @@ def build_loader(
         if not docs:
             return {"input_ids": [], "attention_mask": [], "labels": []}
         prompts, texts = zip(*[doc_to_text_fn(doc) for doc in docs])
-        enc = tokenizer(list(texts), truncation=True, max_length=max_length, padding="max_length")
-        prompt_lens = [
-            len(tokenizer(prompt.rstrip(), add_special_tokens=False)["input_ids"])
-            for prompt in prompts
-        ]
-        enc["labels"] = [
-            [-100 if j < prompt_len or mask == 0 else ids[j] for j, mask in enumerate(attn)]
-            for ids, attn, prompt_len in zip(enc["input_ids"], enc["attention_mask"], prompt_lens)
-        ]
-        return enc
+        rows = {"input_ids": [], "attention_mask": [], "labels": []}
+        for prompt, text in zip(prompts, texts):
+            target = text[len(prompt):]
+            input_ids, attention_mask, labels = join_prompt_and_target(prompt, target)
+            rows["input_ids"].append(input_ids)
+            rows["attention_mask"].append(attention_mask)
+            rows["labels"].append(labels)
+        return rows
 
     dataset = dataset.map(tokenize, batched=True, remove_columns=dataset.column_names)
     dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])

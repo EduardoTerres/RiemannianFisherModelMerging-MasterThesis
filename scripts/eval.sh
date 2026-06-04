@@ -26,3 +26,17 @@ done
 conda activate OrthoMerge
 python eval/eval_scienceqa.py --merged_dir "outputs/models/Llama-3.1-8B-merged-fisher/merged_model" \
     "data/models/Llama-3.1-8B/"
+
+# HumanEval+ (code generation)
+conda activate bigcode;
+cd eval/bigcode-evaluation-harness
+accelerate launch  main.py \
+  --model ../../models/OrthoMerge_Llama-3.1-8B_OFT_5_task \
+  --max_length_generation 4096 \
+  --precision bf16 \
+  --tasks humanevalplus \
+  --temperature 0.2 \
+  --n_samples 10 \
+  --batch_size 10 \
+  --allow_code_execution \
+  --use_auth_token

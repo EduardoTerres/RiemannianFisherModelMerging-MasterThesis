@@ -115,8 +115,17 @@ def parse_args():
         help="Merging method: 'gradients', 'wudi', 'karcher' (Karcher mean on SO(n)), 'adamerging'.",  # noqa: E501
     )
     parser.add_argument(
-        "--merge_mode", type=str, choices=["standard", "diagonal_fisher", "fisher"],
-        help="Merging strategy: 'standard' (weighted average), 'diagonal_fisher' (element-wise Fisher weighting), or 'linear_system' (full transported-Fisher solve).",  # noqa: E501
+        "--merge_mode",
+        type=str,
+        choices=[
+            "standard",
+            "standard_rescaled",
+            "diagonal_fisher",
+            "diagonal_fisher_rescaled",
+            "diagonal_fisher_kl_rescaled",
+            "fisher",
+        ],
+        help="Merging strategy: standard, rescaled standard, diagonal Fisher, rescaled diagonal Fisher, KL-rescaled diagonal Fisher, or full Fisher.",  # noqa: E501
     )
     parser.add_argument(
         "--lam", type=float, default=0.0,

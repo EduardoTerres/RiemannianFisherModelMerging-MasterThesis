@@ -19,7 +19,14 @@ from collections import defaultdict
 from src.geometry import Manifold, SOnManifold
 
 
-MergeMode = Literal["standard", "diagonal_fisher"]
+MergeMode = Literal[
+    "standard",
+    "standard_rescaled",
+    "diagonal_fisher",
+    "diagonal_fisher_rescaled",
+    "diagonal_fisher_kl_rescaled",
+    "fisher",
+]
 
 class RiemannianMerging(ABC):
     """
@@ -91,7 +98,7 @@ class OFTMerging(RiemannianMerging):
     standard           Weighted average of Lie-algebra task vectors. No Fisher.
     diagonal_fisher Element-wise Fisher weighting in the vectorised so(n) basis.
                     Each component j of the merged vector is
-                        Omega*_j = (sum_t alpha_t f_(t,j) Omega_(t,j)) / (lama + sum_t alpha_t f_(t,j))
+                        Omega*_j = (sum_t alpha_t f_(t,j) Omega_(t,j)) / (lambda + sum_t alpha_t f_(t,j))
     """
 
     def __init__(
@@ -223,10 +230,29 @@ class OFTMerging(RiemannianMerging):
         if mode == "standard":
             return self._standard_merging(weights_list, alphas)
 
+        if mode == "standard_rescaled":
+            merged = self._standard_merging(weights_list, alphas)
+            return self._orthomerge_rescale(weights_list, merged, alphas)
+
         if mode == "diagonal_fisher":
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
             return self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
+
+        if mode == "diagonal_fisher_rescaled":
+            if fisher_list is None:
+                raise ValueError(f"Fisher data is required for mode {mode!r}")
+            merged = self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
+            return self._orthomerge_rescale(weights_list, merged, alphas)
+
+        if mode == "diagonal_fisher_kl_rescaled":
+            if fisher_list is None:
+                raise ValueError(f"Fisher data is required for mode {mode!r}")
+            return self._diagonal_fisher_merging_kl_rescaled(
+                weights_list=weights_list,
+                fisher_list=fisher_list,
+                alphas=alphas,
+            )
 
         if mode == "fisher":
             if fisher_list is None:
@@ -263,6 +289,28 @@ class OFTMerging(RiemannianMerging):
         else:
             a = torch.tensor(alphas, dtype=stacked.dtype, device=stacked.device)
         return torch.einsum("t,t...->...", a, stacked)
+
+    def _orthomerge_rescale(
+        self,
+        weights_list: List[Tensor],
+        merged: Tensor,
+        alphas,
+    ) -> Tensor:
+        """Apply the OrthoMerge Frobenius-norm correction to a merged OFT tensor."""
+        stacked = torch.stack(weights_list, dim=0).float().to(merged.device)
+        if isinstance(alphas, torch.Tensor):
+            a = alphas.to(dtype=stacked.dtype, device=stacked.device)
+        else:
+            a = torch.tensor(alphas, dtype=stacked.dtype, device=stacked.device)
+
+        while a.dim() < stacked.dim():
+            a = a.unsqueeze(-1)
+
+        weighted = a * stacked
+        sum_of_norms = torch.norm(weighted.flatten(1), p="fro", dim=1).sum()
+        norm_of_merged = torch.norm(merged.float(), p="fro")
+        correction = sum_of_norms / norm_of_merged.clamp(min=1e-8)
+        return (correction * merged).to(dtype=weights_list[0].dtype)
 
     def _fisher_diagonal_alphas(self, fisher_list: List[Tensor]) -> Tensor:
         """Compute per-task alphas as alpha_t = sum_s <f_t, f_s> / Z.
@@ -315,6 +363,233 @@ class OFTMerging(RiemannianMerging):
             b = b + alpha_t * (self.lam + ft) * omega_t.float().to(ref.device)
 
         return (b / (self.lam + A).clamp(min=1e-8)).to(ref.dtype)
+
+    def _diagonal_fisher_merging_kl_rescaled(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: List[Tensor],
+        alphas,
+        base_fisher_list: Optional[List[Tensor]] = None,
+        eps: float = 1e-8,
+        tol: float = 1e-6,
+        max_outer: int = 20,
+        max_newton: int = 50,
+        damping: float = 1e-4,
+    ) -> Tensor:
+        """
+        Diagonal Fisher OFT merge with task-wise KL/Fisher lower-bound constraints.
+
+        Solves, on the positive-definite KKT branch,
+
+            min_w  1/2 w^T diag(D) w - b^T w
+
+        subject to, for each dataset/task k,
+
+            1/2 w^T diag(H_k) w >= 1/2 xi_k^T diag(H_k) xi_k.
+
+        where
+
+            D = lambda + sum_t alpha_t f_t
+            b = sum_t alpha_t (lambda + f_t) * xi_t
+
+        and H_k is the pretrained/base Fisher on dataset k. If base_fisher_list is
+        not provided, fisher_list is used as a surrogate.
+
+        Args:
+            weights_list: T tensors of shape (num_blocks, d), OFT coordinates xi_t.
+            fisher_list: T tensors of shape (num_blocks, d), diagonal transported Fishers f_t.
+            alphas: T coefficients.
+            base_fisher_list: optional T tensors of shape (num_blocks, d), base Fishers H_k.
+            eps: numerical floor.
+            tol: feasibility/KKT tolerance.
+            max_outer: active-set iterations.
+            max_newton: Newton iterations per active set.
+            damping: diagonal damping added to the small Newton system.
+
+        Returns:
+            Merged OFT parameters of shape (num_blocks, d).
+        """
+        ref = weights_list[0]
+        device = ref.device
+
+        if isinstance(alphas, torch.Tensor):
+            alphas_t = alphas.to(device=device, dtype=torch.float32)
+        else:
+            alphas_t = torch.tensor(alphas, device=device, dtype=torch.float32)
+
+        weights = [
+            w.to(device=device, dtype=torch.float32)
+            for w in weights_list
+        ]
+
+        fishers = [
+            f.to(device=device, dtype=torch.float32).clamp(min=0.0)
+            for f in fisher_list
+        ]
+
+        if base_fisher_list is None:
+            # Surrogate: use the task Fisher as the dataset-wise KL metric.
+            H_list = fishers
+        else:
+            # Preferred: H_k = Fisher of pretrained/base model on dataset k.
+            H_list = [
+                h.to(device=device, dtype=torch.float32).clamp(min=0.0)
+                for h in base_fisher_list
+            ]
+
+        T = len(weights)
+
+        # Build the diagonal linear system:
+        #   D * omega = b
+        # where D = lambda + sum_t alpha_t f_t.
+        A_diag = torch.zeros_like(ref, dtype=torch.float32, device=device)
+        b = torch.zeros_like(ref, dtype=torch.float32, device=device)
+
+        for alpha_t, omega_t, f_t in zip(alphas_t, weights, fishers):
+            A_diag = A_diag + alpha_t * f_t
+            b = b + alpha_t * (self.lam + f_t) * omega_t
+
+        D = (self.lam + A_diag).clamp(min=eps)
+
+        # Unconstrained diagonal Fisher merge.
+        omega_hat = b / D
+
+        H_stack = torch.stack(H_list, dim=0)  # (T, num_blocks, d)
+
+        # Dataset-wise thresholds:
+        #   delta_k = 1/2 xi_k^T H_k xi_k.
+        deltas = torch.stack([
+            0.5 * (H_k * omega_k.pow(2)).sum()
+            for H_k, omega_k in zip(H_list, weights)
+        ])
+
+        # Check whether the unconstrained merge already satisfies every constraint.
+        infos_hat = 0.5 * (
+            H_stack * omega_hat.pow(2).unsqueeze(0)
+        ).flatten(1).sum(dim=1)
+
+        if torch.all(infos_hat >= deltas - tol):
+            return omega_hat.to(dtype=ref.dtype)
+
+        # Active-set initialization: constraints violated by the unconstrained merge.
+        active = infos_hat < deltas - tol
+        mu_full = torch.zeros(T, device=device, dtype=torch.float32)
+
+        omega = omega_hat
+
+        for _ in range(max_outer):
+            active_idx = torch.nonzero(active, as_tuple=False).flatten()
+
+            if active_idx.numel() == 0:
+                omega = b / D
+                break
+
+            mu = mu_full[active_idx].clone()
+            H_A = H_stack[active_idx]  # (m, num_blocks, d)
+
+            # Newton solve for active multipliers.
+            for _ in range(max_newton):
+                denom = D - torch.einsum("m,m...->...", mu, H_A)
+
+                # Stay on the positive-definite branch.
+                if denom.min() <= eps:
+                    mu = 0.5 * mu
+                    continue
+
+                omega = b / denom
+
+                infos_A = 0.5 * (
+                    H_A * omega.pow(2).unsqueeze(0)
+                ).flatten(1).sum(dim=1)
+
+                r = infos_A - deltas[active_idx]
+
+                if r.abs().max() < tol:
+                    break
+
+                m = active_idx.numel()
+                J = torch.empty((m, m), device=device, dtype=torch.float32)
+
+                # Jacobian:
+                #   J[k,j] = sum_i h_k_i h_j_i b_i^2 / denom_i^3.
+                denom3 = denom.pow(3).clamp(min=eps)
+                b2 = b.pow(2)
+
+                for a in range(m):
+                    for c in range(m):
+                        J[a, c] = (H_A[a] * H_A[c] * b2 / denom3).sum()
+
+                J = J + damping * torch.eye(m, device=device, dtype=torch.float32)
+
+                try:
+                    step = torch.linalg.solve(J, -r)
+                except RuntimeError:
+                    step = torch.linalg.lstsq(J, -r.unsqueeze(-1)).solution.squeeze(-1)
+
+                # Backtracking to preserve mu >= 0 and denom > 0.
+                step_scale = 1.0
+                accepted = False
+
+                for _bt in range(30):
+                    mu_new = (mu + step_scale * step).clamp(min=0.0)
+                    denom_new = D - torch.einsum("m,m...->...", mu_new, H_A)
+
+                    if denom_new.min() > eps:
+                        omega_new = b / denom_new
+
+                        infos_new = 0.5 * (
+                            H_A * omega_new.pow(2).unsqueeze(0)
+                        ).flatten(1).sum(dim=1)
+
+                        r_new = infos_new - deltas[active_idx]
+
+                        if r_new.abs().sum() <= r.abs().sum() or step_scale < 1e-4:
+                            mu = mu_new
+                            accepted = True
+                            break
+
+                    step_scale *= 0.5
+
+                if not accepted:
+                    break
+
+            # Write active multipliers back into the full vector.
+            mu_full[active_idx] = mu
+
+            denom = D - torch.einsum("t,t...->...", mu_full, H_stack)
+
+            if denom.min() <= eps:
+                denom = denom.clamp(min=eps)
+
+            omega = b / denom
+
+            all_infos = 0.5 * (
+                H_stack * omega.pow(2).unsqueeze(0)
+            ).flatten(1).sum(dim=1)
+
+            slack = all_infos - deltas
+
+            feasible = torch.all(slack >= -tol)
+            comp_ok = torch.all((mu_full <= tol) | (slack.abs() <= tol))
+
+            if feasible and comp_ok:
+                return omega.to(dtype=ref.dtype)
+
+            # Add newly violated constraints.
+            active = active | (slack < -tol)
+
+            # Remove constraints with nearly zero multiplier and positive slack.
+            active = active & ~((mu_full <= tol) & (slack > tol))
+
+        # Final feasibility check.
+        final_infos = 0.5 * (
+            H_stack * omega.pow(2).unsqueeze(0)
+        ).flatten(1).sum(dim=1)
+
+        if torch.any(final_infos < deltas - tol):
+            print("[WARNING] Multi-KL Lagrange solver returned an infeasible point.")
+
+        return omega.to(dtype=ref.dtype)
 
     def _fisher_merging(
         self,

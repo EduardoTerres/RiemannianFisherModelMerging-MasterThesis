@@ -17,7 +17,8 @@ from peft import PeftModel
 from src.merging import OFTMerging, WudiOFTMerging, OFTKarcherMerging, AdaMergingPP
 from src.utils import parse_device
 from src.paths import MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
-from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
+# from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
+from src.dataset.dataset_2 import DATASET_2_TEST, build_loader
 
 
 def _build_alpha_optimizer_inputs(
@@ -31,7 +32,7 @@ def _build_alpha_optimizer_inputs(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    task_names = [tag for tag, *_ in DATASET_1_TEST]
+    task_names = [tag for tag, *_ in DATASET_TEST]
     task_loaders = [
         build_loader(
             dataset_path=ds_path,
@@ -43,7 +44,7 @@ def _build_alpha_optimizer_inputs(
             batch_size=batch_size,
             max_length=max_length,
         )
-        for _, ds_path, ds_name, split, doc_to_text in DATASET_1_TEST
+        for _, ds_path, ds_name, split, doc_to_text in DATASET_TEST
     ]
     peft_model = PeftModel.from_pretrained(
         AutoModelForCausalLM.from_pretrained(
@@ -68,7 +69,7 @@ def _build_adamerging(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    task_names = [tag for tag, *_ in DATASET_1_TEST]
+    task_names = [tag for tag, *_ in DATASET_TEST]
     task_loaders = [
         build_loader(
             dataset_path=ds_path,
@@ -80,7 +81,7 @@ def _build_adamerging(
             batch_size=batch_size,
             max_length=max_length,
         )
-        for _, ds_path, ds_name, split, doc_to_text in DATASET_1_TEST
+        for _, ds_path, ds_name, split, doc_to_text in DATASET_TEST
     ]
 
     base_model = AutoModelForCausalLM.from_pretrained(

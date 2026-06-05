@@ -185,28 +185,28 @@ DATASET_2_TRAIN: list[TaskSpec] = [
 
 # (tag, dataset_path, dataset_name, split, doc_to_text)
 DATASET_2_TEST: list[TaskSpec] = [
-    ("coqa", "EleutherAI/coqa", None, "validation", _coqa_text),
-    ("drop", "EleutherAI/drop", None, "validation", _drop_text),
-    ("nq_open", "google-research-datasets/nq_open", None, "validation", _nq_open_text),
-    ("triviaqa", "mandarjoshi/trivia_qa", "rc.nocontext", "validation", _triviaqa_text),
-    ("meddialog_qsumm", "lighteval/med_dialog", "icliniq", "test", _meddialog_qsumm_text),
-    ("wmt16-en-de", "wmt/wmt16", "de-en", "test", _wmt16_en_de_text),
+    ("coqa", "EleutherAI/coqa", None, "validation", _coqa_text),  # 0
+    ("drop", "EleutherAI/drop", None, "validation", _drop_text),  # 1
+    ("nq_open", "google-research-datasets/nq_open", None, "validation", _nq_open_text),  # 2
+    ("triviaqa", "mandarjoshi/trivia_qa", "rc.nocontext", "validation", _triviaqa_text),  # 3
+    ("meddialog_qsumm", "lighteval/med_dialog", "icliniq", "test", _meddialog_qsumm_text),  # 4
+    # ("wmt16-en-de", "wmt/wmt16", "de-en", "test", _wmt16_en_de_text),  # 5
     (
         "wikitext",
         "EleutherAI/wikitext_document_level",
         "wikitext-2-raw-v1",
         "test",
         _wikitext_text,
-    ),
-    ("cnn_dailymail", "abisee/cnn_dailymail", "3.0.0", "validation", _cnn_dailymail_text),
-    ("xsum", "EdinburghNLP/xsum", None, "validation", _xsum_text),
-    ("gsm8k", "openai/gsm8k", "main", "test", _gsm8k_text),
-    ("babi", "Muennighoff/babi", None, "valid", _babi_text),
-    ("squadv2", "lighteval/squad_v2", None, "validation", _squadv2_text),
-    ("mbpp", "google-research-datasets/mbpp", "full", "test", _mbpp_text),
-    ("math500", "HuggingFaceH4/MATH-500", "default", "test", _numinamath_text),
-    ("humanevalplus", "evalplus/humanevalplus", None, "test", _humaneval_text),
- ]
+    ),  # 6
+    ("cnn_dailymail", "abisee/cnn_dailymail", "3.0.0", "validation", _cnn_dailymail_text),  # 7
+    ("xsum", "EdinburghNLP/xsum", None, "validation", _xsum_text),  # 8
+    ("gsm8k", "openai/gsm8k", "main", "test", _gsm8k_text),  # 9
+    # ("babi", "Muennighoff/babi", None, "valid", _babi_text),  # 10
+    # ("squadv2", "lighteval/squad_v2", None, "validation", _squadv2_text),  # 11
+    # ("mbpp", "google-research-datasets/mbpp", "full", "test", _mbpp_text),  # 12
+    ("math500", "HuggingFaceH4/MATH-500", "default", "test", _numinamath_text),  # 13
+    ("humanevalplus", "evalplus/humanevalplus", None, "test", _humaneval_text),  # 14
+]
 
 DOC_TO_TEXT = {tag: formatter for tag, _, _, _, formatter in DATASET_2_TRAIN + DATASET_2_TEST}
 

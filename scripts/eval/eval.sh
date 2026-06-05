@@ -1,18 +1,19 @@
 #!/bin/bash
-#SBATCH --partition=gpu_h100
+#SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
-#SBATCH --job-name=eval_dataset_2
+#SBATCH --job-name=eval_model
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=04:00:00
-#SBATCH --array=0-13
-#SBATCH --output=eval_dataset_2_%A_%a.out
+#SBATCH --array=0-14
+#SBATCH --output=eval_model_%A_%a.out
 
-MODEL_NAME="llama3.1"
-RUN_NAME="${1:-run_0}"
-MODEL_PATH="${2:-outputs/models/${MODEL_NAME}-standard_rescaled/${RUN_NAME}/merged_model/merged_model}"
-RELATIVE_PATH="../../.."
-OUTPUT_ROOT="${3:-outputs/evaluation/orthomerge_rescaled/${RUN_NAME}}"
+set -e
+
+SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
+REPO_ROOT="/home/eterres/MasterThesis"
+MODEL_PATH="$1"
+OUTPUT_ROOT="$2"
 
 DATASETS=(
     "coqa"
@@ -28,6 +29,7 @@ DATASETS=(
     "babi"
     "squadv2"
     "mbpp"
+    "math500"
     "humanevalplus"
 )
 
@@ -45,6 +47,7 @@ LM_EVAL_TASKS=(
     "babi"
     "squadv2"
     "mbpp"
+    "minerva_math500"
     "humanevalplus"
 )
 
@@ -62,18 +65,15 @@ EVAL_BACKENDS=(
     "lm_eval"
     "lm_eval"
     "lm_eval"
+    "lm_eval"
     "bigcode"
 )
 
-set -e
+TASK_ID="${SLURM_ARRAY_TASK_ID}"
 
-if [ -z "${SLURM_ARRAY_TASK_ID:-}" ]; then
-    SLURM_ARRAY_TASK_ID=0
-fi
-
-TASK_NAME="${DATASETS[$SLURM_ARRAY_TASK_ID]}"
-LM_EVAL_TASK="${LM_EVAL_TASKS[$SLURM_ARRAY_TASK_ID]}"
-EVAL_BACKEND="${EVAL_BACKENDS[$SLURM_ARRAY_TASK_ID]}"
+TASK_NAME="${DATASETS[$TASK_ID]}"
+LM_EVAL_TASK="${LM_EVAL_TASKS[$TASK_ID]}"
+EVAL_BACKEND="${EVAL_BACKENDS[$TASK_ID]}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
@@ -81,33 +81,33 @@ mkdir -p "${OUTPUT_ROOT}/${TASK_NAME}"
 
 if [ "${EVAL_BACKEND}" = "bigcode" ]; then
     conda activate bigcode
-    cd OrthoMerge/eval/bigcode-evaluation-harness
+    cd "${REPO_ROOT}/OrthoMerge/eval/bigcode-evaluation-harness"
 
-    echo "Evaluating ${TASK_NAME} with BigCode task ${LM_EVAL_TASK}"
+    echo "Evaluating ${MODEL_PATH} on ${TASK_NAME} with BigCode task ${LM_EVAL_TASK}"
 
     accelerate launch main.py \
-        --model "${RELATIVE_PATH}/${MODEL_PATH}" \
+        --model "${MODEL_PATH}" \
         --max_length_generation 4096 \
         --precision bf16 \
         --tasks "${LM_EVAL_TASK}" \
         --temperature 0.2 \
         --n_samples 10 \
         --batch_size 10 \
-        --metric_output_path "${RELATIVE_PATH}/${OUTPUT_ROOT}/${TASK_NAME}/metrics.json" \
+        --metric_output_path "${OUTPUT_ROOT}/${TASK_NAME}/metrics.json" \
         --allow_code_execution \
         --use_auth_token
 else
     conda activate lm-eval
-    cd OrthoMerge/eval/lm-evaluation-harness
+    cd "${REPO_ROOT}/OrthoMerge/eval/lm-evaluation-harness"
 
-    echo "Evaluating ${TASK_NAME} with lm_eval task ${LM_EVAL_TASK}"
+    echo "Evaluating ${MODEL_PATH} on ${TASK_NAME} with lm_eval task ${LM_EVAL_TASK}"
 
     lm_eval --model hf \
         --tasks "${LM_EVAL_TASK}" \
-        --model_args pretrained=${RELATIVE_PATH}/${MODEL_PATH} \
+        --model_args pretrained="${MODEL_PATH}" \
         --device cuda:0 \
         --batch_size 64 \
-        --output_path "${RELATIVE_PATH}/${OUTPUT_ROOT}/${TASK_NAME}" \
+        --output_path "${OUTPUT_ROOT}/${TASK_NAME}" \
         --confirm_run_unsafe_code \
         --trust_remote_code
 fi

@@ -4,7 +4,7 @@
 #SBATCH --job-name=eval_model
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=01:30:00
+#SBATCH --time=05:00:00
 #SBATCH --array=0-14
 #SBATCH --output=eval_model_%A_%a.out
 
@@ -92,9 +92,16 @@ elif [ "${TASK_NAME}" = "meddialog_qsumm" ] || [ "${TASK_NAME}" = "cnn_dailymail
     LM_EVAL_BATCH_SIZE=4
 fi
 
+# If using finetune, we have less CUDA memory available
+if [ -n "${PEFT_MODEL}" ]; then
+    if [ "${TASK_ID}" = "0" ] || [ "${TASK_ID}" = "1" ]; then
+        LM_EVAL_BATCH_SIZE=16
+    fi
+fi
+
 # Dev-only shortcut. remember to remove/empty this block for final benchmark numbers.
-if [ "${TASK_ID}" = "4" ] || [ "${TASK_ID}" = "7" ] || [ "${TASK_ID}" = "8" ]; then
-    LM_EVAL_LIMIT_ARGS=(--limit 5000)
+if [ "${TASK_ID}" = "7" ] || [ "${TASK_ID}" = "8" ] || [ "${TASK_ID}" = "11" ]; then
+    LM_EVAL_LIMIT_ARGS=(--limit 500)
 fi
 
 source "$(conda info --base)/etc/profile.d/conda.sh"

@@ -30,7 +30,7 @@ DATASET_2_PLOT_METRICS: dict[str, tuple[str, MetricPreprocessor]] = {
     "xsum": ("rougeL,none", None),
     "gsm8k": ("exact_match,strict-match", None),
     "babi": ("exact_match,none", None),
-    "squadv2": ("f1,none", None),
+    "squadv2": ("f1,none", _percent_to_fraction),
     "mbpp": ("pass_at_1,none", None),
     "math500": ("exact_match,none", None),
     "humanevalplus": ("pass@1", None),
@@ -243,7 +243,7 @@ DATASET_2_TEST: list[TaskSpec] = [
     ("cnn_dailymail", "abisee/cnn_dailymail", "3.0.0", "validation", _cnn_dailymail_text),  # 7
     ("xsum", "EdinburghNLP/xsum", None, "validation", _xsum_text),  # 8
     ("gsm8k", "openai/gsm8k", "main", "test", _gsm8k_text),  # 9
-    ("babi", "Muennighoff/babi", None, "valid", _babi_text),  # 10
+    ("babi", "Muennighoff/babi", None, "validation", _babi_text),  # 10
     ("squadv2", "lighteval/squad_v2", None, "validation", _squadv2_text),  # 11
     ("mbpp", "google-research-datasets/mbpp", "full", "test", _mbpp_text),  # 12
     ("math500", "HuggingFaceH4/MATH-500", "default", "test", _numinamath_text),  # 13

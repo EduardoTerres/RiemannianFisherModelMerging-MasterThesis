@@ -16,7 +16,7 @@ from peft import PeftModel
 
 from src.merging import OFTMerging, WudiOFTMerging, OFTKarcherMerging, AdaMergingPP
 from src.utils import parse_device
-from src.paths import MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
+from src.paths import MODEL_FAMILIES_D2 as MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
 # from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
 from src.dataset.dataset_2 import DATASET_2_TEST, build_loader
 
@@ -166,11 +166,16 @@ def main():
     base_model_path = model_family.base_model_path
     adapter_paths = model_family.adapter_paths
 
-    wandb.init(
-        project=WANDB_PROJECT,
-        name=f"{args.merge_method}-{args.merge_mode}-{model_family.name}",
-        config=vars(args),
+    use_wandb = not (
+        args.merge_method == "gradients"
+        and args.merge_mode in {"standard", "standard_rescaled", "diagonal_fisher"}
     )
+    if use_wandb:
+        wandb.init(
+            project=WANDB_PROJECT,
+            name=f"{args.merge_method}-{args.merge_mode}-{model_family.name}",
+            config=vars(args),
+        )
 
     merged_weights = None
     if args.merge_method == "adamerging":

@@ -1,10 +1,13 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.dataset.dataset_1 import DATASET_1_TRAIN
+from src.dataset.dataset_2 import DATASET_2_TRAIN
+
 RELATIVE_ROOTDIR = Path("../..")
 ROOTDIR = (Path(__file__) / RELATIVE_ROOTDIR).resolve()
 
-WANDB_PROJECT = "edu-thesis"
+WANDB_PROJECT = "fisher-orthomerge"
 
 @dataclass(frozen=True)
 class ModelFamily:
@@ -19,59 +22,95 @@ class ModelFamily:
 MODELS_DIR = ROOTDIR / "data" / "models"
 FISHERS_DIR = ROOTDIR / "data" / "diagonal_transported_fishers"
 
-# Llama 3.1 8B and its OFT adapters fine-tuned on 5 tasks
-# (social_iqa, commonsense_qa, numinamath, magicoder, science_qa).
+ADAPTER_TASK_NAMES = {
+    "social_iqa": "socialiqa",
+    "commonsense_qa": "commonsense",
+    "science_qa": "scienceqa",
+}
+
+
+def adapter_task_name(task: str) -> str:
+    return ADAPTER_TASK_NAMES.get(task, task)
+
+# LLAMA WITH DATASET 1
 LLAMA_MODEL_NAME = "Llama-3.1-8B"
 LLAMA_BASE_MODEL_PATH = f"{MODELS_DIR}/Llama-3.1-8B"
-LLAMA_ADAPTERS_FOLDER = f"{MODELS_DIR}/Llama-3.1-8B_OFT_adapters"
-LLAMA_ADAPTER_PATHS = [
-    f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_socialiqa",
-    f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_commonsense",
-    f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_numinamath",
-    f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_magicoder",
-    f"{LLAMA_ADAPTERS_FOLDER}/llama3-1_8b_finetune_scienceqa",
-    # "outputs/models/Llama-3.1-8B-merged-std/merged_adapter",
+LLAMA_D1_TASKS = [tag for tag, *_ in DATASET_1_TRAIN]
+LLAMA_D1_ADAPTERS_FOLDER = f"{MODELS_DIR}/Llama-3.1-8B_OFT_dataset1_adapters"
+LLAMA_D1_ADAPTER_PATHS = [
+    f"{LLAMA_D1_ADAPTERS_FOLDER}/llama3-1_8b_finetune_{adapter_task_name(task)}"
+    for task in LLAMA_D1_TASKS
 ]
-LLAMA_FISHER_PATHS = [
-    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_socialiqa.safetensors",
-    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_commonsense.safetensors",
-    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_numinamath.safetensors",
-    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_magicoder.safetensors",
-    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_scienceqa.safetensors",
+LLAMA_D1_FISHER_PATHS = [
+    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_{adapter_task_name(task)}.safetensors"
+    for task in LLAMA_D1_TASKS
 ]
 
-# Qwen 2.5 3B and its OFT adapters fine-tuned on 5 tasks
-# (social_iqa, commonsense_qa, numinamath, magicoder, science
+# LLAMA WITH DATASET 2
+LLAMA_D2_ADAPTERS_FOLDER = f"{MODELS_DIR}/Llama-3.1-8B_OFT_dataset2_adapters"
+LLAMA_D2_TASKS = [tag for tag, *_ in DATASET_2_TRAIN]
+LLAMA_D2_ADAPTER_PATHS = [
+    f"{LLAMA_D2_ADAPTERS_FOLDER}/llama3-1_8b_finetune_{adapter_task_name(task)}"
+    for task in LLAMA_D2_TASKS
+]
+LLAMA_D2_FISHER_PATHS = [
+    f"{FISHERS_DIR}/llama3.1/llama3-1_8b_finetune_{adapter_task_name(task)}.safetensors"
+    for task in LLAMA_D2_TASKS
+]
+
+# QWEN WITH DATASET 1
 QWEN_MODEL_NAME = "Qwen-2.5-3B"
 QWEN_BASE_MODEL_PATH = f"{MODELS_DIR}/Qwen-2.5-3B"
-QWEN_ADAPTERS_FOLDER = f"{MODELS_DIR}/Qwen-2.5-3B_OFT_adapters"
-QWEN_ADAPTER_PATHS = [
-    f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_socialiqa",
-    f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_commonsense",
-    f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_numinamath",
-    f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_magicoder",
-    f"{QWEN_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_scienceqa",
-    # "outputs/models/Qwen-2.5-3B-merged-std/merged_adapter",
+QWEN_D1_TASKS = [tag for tag, *_ in DATASET_1_TRAIN]
+QWEN_D1_ADAPTERS_FOLDER = f"{MODELS_DIR}/Qwen-2.5-3B_OFT_adapters"
+QWEN_D1_ADAPTER_PATHS = [
+    f"{QWEN_D1_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_{adapter_task_name(task)}"
+    for task in QWEN_D1_TASKS
 ]
-QWEN_FISHER_PATHS = [
-    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_socialiqa.safetensors",
-    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_commonsense.safetensors",
-    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_numinamath.safetensors",
-    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_magicoder.safetensors",
-    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_scienceqa.safetensors",
+QWEN_D1_FISHER_PATHS = [
+    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_{adapter_task_name(task)}.safetensors"
+    for task in QWEN_D1_TASKS
 ]
 
-MODEL_FAMILIES = {
+# QWEN WITH DATASET 2
+QWEN_D2_ADAPTERS_FOLDER = f"{MODELS_DIR}/Qwen-2.5-3B_OFT_dataset2_adapters"
+QWEN_D2_TASKS = [tag for tag, *_ in DATASET_2_TRAIN]
+QWEN_D2_ADAPTER_PATHS = [
+    f"{QWEN_D2_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_{adapter_task_name(task)}"
+    for task in QWEN_D2_TASKS
+]
+QWEN_D2_FISHER_PATHS = [
+    f"{FISHERS_DIR}/qwen2.5/qwen2.5_3b_finetune_{adapter_task_name(task)}.safetensors"
+    for task in QWEN_D2_TASKS
+]
+
+# MODEL FAMILIES for importing
+MODEL_FAMILIES_D1 = {
     "llama3.1": ModelFamily(
         name="llama3.1",
         base_model_path=LLAMA_BASE_MODEL_PATH,
-        adapter_paths=LLAMA_ADAPTER_PATHS,
-        fisher_paths=LLAMA_FISHER_PATHS,
+        adapter_paths=LLAMA_D1_ADAPTER_PATHS,
+        fisher_paths=LLAMA_D1_FISHER_PATHS,
     ),
     "qwen2.5": ModelFamily(
         name="qwen2.5",
         base_model_path=QWEN_BASE_MODEL_PATH,
-        adapter_paths=QWEN_ADAPTER_PATHS,
-        fisher_paths=QWEN_FISHER_PATHS,
+        adapter_paths=QWEN_D1_ADAPTER_PATHS,
+        fisher_paths=QWEN_D1_FISHER_PATHS,
+    ),
+}
+
+MODEL_FAMILIES_D2 = {
+    "llama3.1": ModelFamily(
+        name="llama3.1",
+        base_model_path=LLAMA_BASE_MODEL_PATH,
+        adapter_paths=LLAMA_D2_ADAPTER_PATHS,
+        fisher_paths=LLAMA_D2_FISHER_PATHS,
+    ),
+    "qwen2.5": ModelFamily(
+        name="qwen2.5",
+        base_model_path=QWEN_BASE_MODEL_PATH,
+        adapter_paths=QWEN_D2_ADAPTER_PATHS,
+        fisher_paths=QWEN_D2_FISHER_PATHS,
     ),
 }

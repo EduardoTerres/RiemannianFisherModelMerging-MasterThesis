@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=00:10:00
-#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/pretrained/slurm/pipe_pretrained_%A.out
+#SBATCH --output=/dev/null
 
 set -e
 

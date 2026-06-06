@@ -1,10 +1,8 @@
 """Dataset set 1: 5 tasks for evaluating the 5 adapters fine-tuned on Llama-3.1-8B."""
 
 from collections.abc import Callable
-
 from datasets import load_dataset
 from torch.utils.data import DataLoader
-
 
 def build_loader(
     dataset_path: str,
@@ -15,7 +13,7 @@ def build_loader(
     num_samples: int,
     batch_size: int,
     max_length: int,
-) -> DataLoader:
+) -> "DataLoader":
     dataset = load_dataset(dataset_path, dataset_name, split=split, trust_remote_code=True)
     dataset = dataset.select(range(min(num_samples, len(dataset))))
 

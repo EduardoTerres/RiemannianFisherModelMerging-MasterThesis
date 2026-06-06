@@ -160,27 +160,11 @@ def process_results(doc: Dict[str, Any], results: List[str]) -> Dict[str, float]
             "rougeL": scores["rougeL"].fmeasure,
         }
 
-    # Calculate BERTScore
-    bertscore_results = {}
-    if BERTSCORE_AVAILABLE:
-        P, R, F1 = bert_score(
-            [generated_summary],
-            [reference_summary],
-            lang="en",
-            model_type="distilbert-base-uncased",
-            verbose=False,
-        )
-        bertscore_results = {
-            "bertscore_precision": P[0].item(),
-            "bertscore_recall": R[0].item(),
-            "bertscore_f1": F1[0].item(),
-        }
-
     # Calculate summary length
     summary_length = calculate_summary_length(generated_summary)
 
     # Combine all results
-    return {**rouge_results, **bertscore_results, "summary_length": summary_length}
+    return {**rouge_results, "summary_length": summary_length}
 
 
 def postprocess_generation(generation: str) -> str:

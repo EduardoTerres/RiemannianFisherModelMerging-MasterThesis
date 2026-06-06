@@ -103,7 +103,7 @@ MODELS = {
         base_model_path=LLAMA_BASE_MODEL_PATH,
         adapters_folder=LLAMA_ADAPTERS_FOLDER,
         reference_adapter_name="llama3-1_8b_finetune_numinamath",  # copies OFT adapters format
-        output_dir_name="Llama-3.1-8B_OFT_new_adapters",
+        output_dir_name="Llama-3.1-8B_OFT_dataset2_adapters",
         output_prefix="llama3-1_8b",
     ),
     "qwen2.5": FinetuneModel(
@@ -111,7 +111,7 @@ MODELS = {
         base_model_path=QWEN_BASE_MODEL_PATH,
         adapters_folder=QWEN_ADAPTERS_FOLDER,
         reference_adapter_name="qwen2.5_3b_finetune_numinamath",  # copies OFT adapters format
-        output_dir_name="Qwen-2.5-3B_OFT_new_adapters",
+        output_dir_name="Qwen-2.5-3B_OFT_dataset2_adapters",
         output_prefix="qwen2.5_3b",
     ),
 }

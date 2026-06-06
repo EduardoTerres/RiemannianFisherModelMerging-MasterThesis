@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=24:00:00
-#SBATCH --array=6
+#SBATCH --array=12
 #SBATCH --output=outputs/slurm/finetune_%A_%a.out
 
 set -e

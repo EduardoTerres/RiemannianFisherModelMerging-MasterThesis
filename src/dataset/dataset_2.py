@@ -5,12 +5,54 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from datasets import load_dataset
-from torch.utils.data import DataLoader
-
 
 TaskSpec = tuple[str, str, str | None, str, Callable[[dict[str, Any]], tuple[str, str]]]
+MetricPreprocessor = Callable[[float], float] | None
 
+
+def _inverse(value: float) -> float:
+    return 1 / value if value else value
+
+
+def _percent_to_fraction(value: float) -> float:
+    return value / 100
+
+# "datasetname": ("metric", preprocessing_function)
+DATASET_2_PLOT_METRICS: dict[str, tuple[str, MetricPreprocessor]] = {
+    "coqa": ("f1,none", None),
+    "drop": ("f1,none", None),
+    "nq_open": ("exact_match,remove_whitespace", None),
+    "triviaqa": ("exact_match,remove_whitespace", None),
+    "meddialog_qsumm": ("bert_score,none", None),
+    "wmt16-en-de": ("bleu,none", _percent_to_fraction),
+    "wikitext": ("word_perplexity,none", _inverse),
+    "cnn_dailymail": ("rougeL,none", None),
+    "xsum": ("rougeL,none", None),
+    "gsm8k": ("exact_match,strict-match", None),
+    "babi": ("exact_match,none", None),
+    "squadv2": ("f1,none", None),
+    "mbpp": ("pass_at_1,none", None),
+    "math500": ("exact_match,none", None),
+    "humanevalplus": ("pass@1", None),
+}
+
+DATASET_2_PLOT_LABELS = {
+    "coqa": r"CoQA",
+    "drop": r"DROP",
+    "nq_open": r"NQ Open",
+    "triviaqa": r"TriviaQA",
+    "meddialog_qsumm": r"MedDialog",
+    "wmt16-en-de": r"WMT16",
+    "wikitext": r"WikiText",
+    "cnn_dailymail": r"CNN/DM",
+    "xsum": r"XSum",
+    "gsm8k": r"GSM8K",
+    "babi": r"bAbI",
+    "squadv2": r"SQuADv2",
+    "mbpp": r"MBPP",
+    "math500": r"MATH500",
+    "humanevalplus": r"HumanEval+",
+}
 
 def _first(doc: dict[str, Any], *keys: str, default: str = "") -> Any:
     for key in keys:
@@ -190,7 +232,7 @@ DATASET_2_TEST: list[TaskSpec] = [
     ("nq_open", "google-research-datasets/nq_open", None, "validation", _nq_open_text),  # 2
     ("triviaqa", "mandarjoshi/trivia_qa", "rc.nocontext", "validation", _triviaqa_text),  # 3
     ("meddialog_qsumm", "lighteval/med_dialog", "icliniq", "test", _meddialog_qsumm_text),  # 4
-    # ("wmt16-en-de", "wmt/wmt16", "de-en", "test", _wmt16_en_de_text),  # 5
+    ("wmt16-en-de", "wmt/wmt16", "de-en", "test", _wmt16_en_de_text),  # 5
     (
         "wikitext",
         "EleutherAI/wikitext_document_level",
@@ -201,9 +243,9 @@ DATASET_2_TEST: list[TaskSpec] = [
     ("cnn_dailymail", "abisee/cnn_dailymail", "3.0.0", "validation", _cnn_dailymail_text),  # 7
     ("xsum", "EdinburghNLP/xsum", None, "validation", _xsum_text),  # 8
     ("gsm8k", "openai/gsm8k", "main", "test", _gsm8k_text),  # 9
-    # ("babi", "Muennighoff/babi", None, "valid", _babi_text),  # 10
-    # ("squadv2", "lighteval/squad_v2", None, "validation", _squadv2_text),  # 11
-    # ("mbpp", "google-research-datasets/mbpp", "full", "test", _mbpp_text),  # 12
+    ("babi", "Muennighoff/babi", None, "valid", _babi_text),  # 10
+    ("squadv2", "lighteval/squad_v2", None, "validation", _squadv2_text),  # 11
+    ("mbpp", "google-research-datasets/mbpp", "full", "test", _mbpp_text),  # 12
     ("math500", "HuggingFaceH4/MATH-500", "default", "test", _numinamath_text),  # 13
     ("humanevalplus", "evalplus/humanevalplus", None, "test", _humaneval_text),  # 14
 ]
@@ -226,6 +268,9 @@ def build_loader(
     max_length: int,
     task: str | None = None,
 ) -> DataLoader:
+    from datasets import load_dataset
+    from torch.utils.data import DataLoader
+
     dataset = load_dataset(dataset_path, dataset_name, split=split, trust_remote_code=True)
     dataset = dataset.select(range(min(num_samples, len(dataset))))
 

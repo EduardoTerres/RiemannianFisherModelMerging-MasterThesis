@@ -4,7 +4,7 @@
 #SBATCH --job-name=eval_model
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=04:00:00
+#SBATCH --time=01:30:00
 #SBATCH --array=0-14
 #SBATCH --output=eval_model_%A_%a.out
 
@@ -14,6 +14,12 @@ SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
 REPO_ROOT="/home/eterres/MasterThesis"
 MODEL_PATH="$1"
 OUTPUT_ROOT="$2"
+PEFT_MODEL="$3"
+PEFT_ARGS=()
+
+if [ -n "${PEFT_MODEL}" ]; then
+    PEFT_ARGS=(--peft_model "${PEFT_MODEL}")
+fi
 
 DATASETS=(
     "coqa"
@@ -74,6 +80,22 @@ TASK_ID="${SLURM_ARRAY_TASK_ID}"
 TASK_NAME="${DATASETS[$TASK_ID]}"
 LM_EVAL_TASK="${LM_EVAL_TASKS[$TASK_ID]}"
 EVAL_BACKEND="${EVAL_BACKENDS[$TASK_ID]}"
+LM_EVAL_BATCH_SIZE=64
+LM_EVAL_LIMIT_ARGS=()
+
+# For A100 these batch sizes dont give CUDA memory error
+if [ "${TASK_NAME}" = "squadv2" ]; then
+    LM_EVAL_BATCH_SIZE=1
+elif [ "${TASK_NAME}" = "wikitext" ] || [ "${TASK_NAME}" = "xsum" ]; then
+    LM_EVAL_BATCH_SIZE=2
+elif [ "${TASK_NAME}" = "meddialog_qsumm" ] || [ "${TASK_NAME}" = "cnn_dailymail" ] || [ "${TASK_NAME}" = "gsm8k" ] || [ "${TASK_NAME}" = "babi" ] || [ "${TASK_NAME}" = "mbpp" ] || [ "${TASK_NAME}" = "math500" ]; then
+    LM_EVAL_BATCH_SIZE=4
+fi
+
+# Dev-only shortcut. remember to remove/empty this block for final benchmark numbers.
+if [ "${TASK_ID}" = "4" ] || [ "${TASK_ID}" = "7" ] || [ "${TASK_ID}" = "8" ]; then
+    LM_EVAL_LIMIT_ARGS=(--limit 5000)
+fi
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
@@ -87,12 +109,13 @@ if [ "${EVAL_BACKEND}" = "bigcode" ]; then
 
     accelerate launch main.py \
         --model "${MODEL_PATH}" \
+        "${PEFT_ARGS[@]}" \
         --max_length_generation 4096 \
         --precision bf16 \
         --tasks "${LM_EVAL_TASK}" \
         --temperature 0.2 \
         --n_samples 10 \
-        --batch_size 10 \
+        --batch_size 6 \
         --metric_output_path "${OUTPUT_ROOT}/${TASK_NAME}/metrics.json" \
         --allow_code_execution \
         --use_auth_token
@@ -102,12 +125,18 @@ else
 
     echo "Evaluating ${MODEL_PATH} on ${TASK_NAME} with lm_eval task ${LM_EVAL_TASK}"
 
+    # otherwise complains
+    if [ "${TASK_NAME}" = "mbpp" ]; then
+        export HF_ALLOW_CODE_EVAL=1
+    fi
+
     lm_eval --model hf \
         --tasks "${LM_EVAL_TASK}" \
-        --model_args pretrained="${MODEL_PATH}" \
+        --model_args "pretrained=${MODEL_PATH}${PEFT_MODEL:+,peft=${PEFT_MODEL}}" \
         --device cuda:0 \
-        --batch_size 64 \
+        --batch_size "${LM_EVAL_BATCH_SIZE}" \
         --output_path "${OUTPUT_ROOT}/${TASK_NAME}" \
+        "${LM_EVAL_LIMIT_ARGS[@]}" \
         --confirm_run_unsafe_code \
         --trust_remote_code
 fi

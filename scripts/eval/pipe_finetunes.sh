@@ -17,7 +17,7 @@ EVAL_ROOT="${REPO_ROOT}/outputs/evaluation/finetunes/${MODEL_NAME}"
 SLURM_DIR="${REPO_ROOT}/outputs/evaluation/finetunes/slurm"
 
 # TASK_IDS=(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14)
-TASK_IDS=(1 4 10)
+TASK_IDS=(10)
 ADAPTER_TASKS=(coqa drop nq_open triviaqa meddialog_qsumm wmt16-en-de wikitext cnn_dailymail xsum gsm8k babi squadv2 mbpp numinamath magicoder)
 
 

@@ -4,6 +4,8 @@
 *.pyc
 *.safetensors
 *.out
+.cache/*
+.matplotlib
 
 context/*
 data/*

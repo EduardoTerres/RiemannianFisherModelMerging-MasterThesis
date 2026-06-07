@@ -126,15 +126,26 @@ def select_runs(results_root: Path, family: str, models: Iterable[str] | None) -
     return runs
 
 
-def plot_models(runs: list[tuple[str, Path]], output_dir: Path, family: str, plot_mode: str) -> None:
+def plot_models(
+    runs: list[tuple[str, Path]],
+    output_dir: Path,
+    family: str,
+    plot_mode: str,
+    log_scale: bool = False,
+    ordering: str = "first",
+) -> None:
     model_metrics = {label: collect_metrics(model_dir, plot_mode) for label, model_dir in runs}
     first_metrics = model_metrics[runs[0][0]]
-    labels = sorted(first_metrics, key=first_metrics.get, reverse=plot_mode == "eval_performance")
-    labels += [
+    all_labels = [
         task
         for task in DATASET_2_PLOT_METRICS
-        if task not in first_metrics and any(task in metrics for metrics in model_metrics.values())
+        if any(task in metrics for metrics in model_metrics.values())
     ]
+    if ordering == "alphabet":
+        labels = sorted(all_labels)
+    else:
+        labels = sorted(first_metrics, key=first_metrics.get, reverse=True)
+        labels += sorted(task for task in all_labels if task not in first_metrics)
     if not labels:
         print("Skipping plot: found 0 metrics")
         return
@@ -157,20 +168,40 @@ def plot_models(runs: list[tuple[str, Path]], output_dir: Path, family: str, plo
         values += values[:1]
         color = colors[idx % len(colors)]
         ax.plot(angles, values, color=color, linewidth=2.4, label=format_model_title(model_name))
-        ax.fill(angles, values, color=color, alpha=0.12)
-        ax.scatter(angles[:-1], values[:-1], color=color, s=18, zorder=3)
+        if all(math.isfinite(value) for value in values):
+            ax.fill(angles, values, color=color, alpha=0.12)
+        present = [
+            (angle, value)
+            for angle, value in zip(angles[:-1], values[:-1], strict=True)
+            if math.isfinite(value)
+        ]
+        if present:
+            present_angles, present_values = zip(*present, strict=True)
+            ax.scatter(present_angles, present_values, color=color, s=18, zorder=3)
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels([])
-    if plot_mode == "eval_loss":
+    if log_scale:
+        positive_values = [value for value in finite_values if value > 0]
+        if not positive_values:
+            print("Skipping plot: log scale requires positive metrics")
+            return
+        ymin = min(positive_values) * 0.92
+        ymax = max(positive_values) * 1.08
+        ax.set_yscale("log")
+        ticks = [math.exp(math.log(ymin) + frac * (math.log(ymax) - math.log(ymin))) for frac in (0, 0.25, 0.5, 0.75, 1)]
+        tick_labels = [f"{tick:.2g}" for tick in ticks]
+    elif plot_mode == "eval_loss":
+        ymin = 0
         ymax = max(finite_values) if finite_values else 1
         ymax = ymax * 1.08 if ymax else 1
         ticks = [ymax * frac for frac in (0.2, 0.4, 0.6, 0.8, 1.0)]
         tick_labels = [f"{tick:.2g}" for tick in ticks]
     else:
+        ymin = 0
         ymax = 1
         ticks = [0.2, 0.4, 0.6, 0.8, 1.0]
         tick_labels = [r"0.2", r"0.4", r"0.6", r"0.8", r"1.0"]
-    ax.set_ylim(0, ymax)
+    ax.set_ylim(ymin, ymax)
     ax.set_yticks(ticks)
     ax.set_rlabel_position(-28)
     ax.set_yticklabels(tick_labels, color="#555555", fontsize=16)
@@ -190,7 +221,7 @@ def plot_models(runs: list[tuple[str, Path]], output_dir: Path, family: str, plo
             ha = "left"
         ax.text(
             angle,
-            1.14,
+            ymax * 1.14,
             DATASET_2_PLOT_LABELS.get(label, latex_escape(label)),
             ha=ha,
             va="center",
@@ -223,14 +254,16 @@ def main() -> None:
     parser.add_argument("--model-family", choices=["llama", "qwen"], required=True, help="Model family to plot")
     parser.add_argument("--models", nargs="+", help="Evaluation outputs to include, e.g. pretrained finetunes")
     parser.add_argument("--plot-mode", choices=PLOT_MODES, default="eval_performance")
+    parser.add_argument("--log_scale", action="store_true", help="Use a log-scaled radial axis")
+    parser.add_argument("--ordering", choices=["first", "alphabet"], default="first")
     args = parser.parse_args()
 
     results_root = args.repo_root / "outputs" / (
         "evaluation" if args.plot_mode == "eval_performance" else "eval_loss"
     )
-    output_dir = args.repo_root / "outputs" / "plots"
+    output_dir = args.repo_root / "outputs" / "coweb_plots"
     runs = select_runs(results_root, args.model_family, args.models)
-    plot_models(runs, output_dir, args.model_family, args.plot_mode)
+    plot_models(runs, output_dir, args.model_family, args.plot_mode, args.log_scale, args.ordering)
 
 
 if __name__ == "__main__":

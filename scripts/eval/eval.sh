@@ -4,7 +4,7 @@
 #SBATCH --job-name=eval_model
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 #SBATCH --array=0-14
 #SBATCH --output=eval_model_%A_%a.out
 
@@ -100,7 +100,7 @@ if [ -n "${PEFT_MODEL}" ]; then
 fi
 
 # Dev-only shortcut. remember to remove/empty this block for final benchmark numbers.
-if [ "${TASK_ID}" = "1" ] || [ "${TASK_ID}" = "4" ] || [ "${TASK_ID}" = "7" ] || [ "${TASK_ID}" = "8" ] || [ "${TASK_ID}" = "11" ] || [ "${TASK_ID}" = "14" ]; then
+if [ "${TASK_ID}" = "1" ] || [ "${TASK_ID}" = "4" ] || [ "${TASK_ID}" = "7" ] || [ "${TASK_ID}" = "8" ] || [ "${TASK_ID}" = "11" ]; then
     LM_EVAL_LIMIT_ARGS=(--limit 500)
 fi
 

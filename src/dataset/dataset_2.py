@@ -263,16 +263,24 @@ def build_loader(
     split: str,
     doc_to_text_fn: Callable[[dict[str, Any]], tuple[str, str]],
     tokenizer,
-    num_samples: int,
+    num_samples: int | None,
     batch_size: int,
     max_length: int,
     task: str | None = None,
+    cache_dir: str | None = None,
 ) -> DataLoader:
     from datasets import load_dataset
     from torch.utils.data import DataLoader
 
-    dataset = load_dataset(dataset_path, dataset_name, split=split, trust_remote_code=True)
-    dataset = dataset.select(range(min(num_samples, len(dataset))))
+    dataset = load_dataset(
+        dataset_path,
+        dataset_name,
+        split=split,
+        trust_remote_code=True,
+        cache_dir=cache_dir,
+    )
+    if num_samples is not None:
+        dataset = dataset.select(range(min(num_samples, len(dataset))))
 
     def join_prompt_and_target(prompt: str, target: str) -> tuple[list[int], list[int], list[int]]:
         prompt_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]

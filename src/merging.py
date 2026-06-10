@@ -243,7 +243,7 @@ class OFTMerging(RiemannianMerging):
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
             merged = self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
-            return self._orthomerge_rescale(weights_list, merged, alphas)
+            return self._fisher_norm_rescale(weights_list, fisher_list, merged, alphas)
 
         if mode == "diagonal_fisher_kl_rescaled":
             if fisher_list is None:
@@ -283,12 +283,13 @@ class OFTMerging(RiemannianMerging):
         Returns:
             Merged parameters of shape (num_blocks, d).
         """
+        num_models = len(weights_list)
         stacked = torch.stack(weights_list, dim=0)  # (T, num_blocks, n, n)
         if isinstance(alphas, torch.Tensor):
             a = alphas.to(dtype=stacked.dtype, device=stacked.device)
         else:
             a = torch.tensor(alphas, dtype=stacked.dtype, device=stacked.device)
-        return torch.einsum("t,t...->...", a, stacked)
+        return torch.einsum("t,t...->...", a, stacked) / num_models
 
     def _orthomerge_rescale(
         self,
@@ -297,6 +298,7 @@ class OFTMerging(RiemannianMerging):
         alphas,
     ) -> Tensor:
         """Apply the OrthoMerge Frobenius-norm correction to a merged OFT tensor."""
+        num_models = len(weights_list)
         stacked = torch.stack(weights_list, dim=0).float().to(merged.device)
         if isinstance(alphas, torch.Tensor):
             a = alphas.to(dtype=stacked.dtype, device=stacked.device)
@@ -308,8 +310,50 @@ class OFTMerging(RiemannianMerging):
 
         weighted = a * stacked
         sum_of_norms = torch.norm(weighted.flatten(1), p="fro", dim=1).sum()
-        norm_of_merged = torch.norm(merged.float(), p="fro")
+        norm_of_merged = torch.norm(num_models * merged.float(), p="fro")
         correction = sum_of_norms / norm_of_merged.clamp(min=1e-8)
+        return (correction * merged).to(dtype=weights_list[0].dtype)
+
+    def _fisher_norm_rescale(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: List[Tensor],
+        merged: Tensor,
+        alphas,
+    ) -> Tensor:
+        """Apply the OrthoMerge norm correction using diagonal Fisher metrics."""
+        num_models = len(weights_list)
+        stacked = torch.stack(weights_list, dim=0).float().to(merged.device)
+        fishers = torch.stack(
+            [f.float().to(merged.device).clamp(min=0.0) for f in fisher_list],
+            dim=0,
+        )
+
+        if isinstance(alphas, torch.Tensor):
+            a = alphas.to(dtype=stacked.dtype, device=stacked.device)
+        else:
+            a = torch.tensor(alphas, dtype=stacked.dtype, device=stacked.device)
+
+        while a.dim() < stacked.dim():
+            a = a.unsqueeze(-1)
+
+        weighted = a * stacked
+        sum_of_norms = torch.sqrt(
+            (fishers * weighted.pow(2)).flatten(1).sum(dim=1).clamp(min=0.0)
+        ).sum()
+
+        fisher_sum = (a * fishers).sum(dim=0)
+        summed = num_models * merged.float()
+        norm_of_merged = torch.sqrt(
+            (fisher_sum * summed.pow(2)).sum().clamp(min=0.0)
+        )
+        correction = sum_of_norms / norm_of_merged.clamp(min=1e-8)
+        print(
+            "[fisher_norm_rescale] "
+            f"sum_of_norms={sum_of_norms.item():.6g}, "
+            f"norm_of_sum={norm_of_merged.item():.6g}, "
+            f"correction={correction.item():.6g}"
+        )
         return (correction * merged).to(dtype=weights_list[0].dtype)
 
     def _fisher_diagonal_alphas(self, fisher_list: List[Tensor]) -> Tensor:

@@ -17,8 +17,15 @@ from src.dataset.dataset_2 import DATASET_2_TEST as DATASET_TEST, build_loader
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compute target-token eval loss on dataset_2 tests.")
-    parser.add_argument("--eval-type", choices=["pretrained", "finetunes"], default="pretrained")
-    parser.add_argument("--model", choices=["llama", "qwen"], default="llama")
+    parser.add_argument(
+        "--model-source",
+        "--eval-type",
+        dest="model_source",
+        choices=["pretrained", "finetunes", "adapter"],
+        default="pretrained",
+        help="Evaluate the base model, per-task finetuned adapters, or one adapter from --peft-model.",
+    )
+    parser.add_argument("--model", choices=["llama3.1", "qwen2.5"])
     parser.add_argument("--model-path", type=Path)
     parser.add_argument("--output-root", type=Path, default=REPO_ROOT / "outputs" / "eval_loss")
     parser.add_argument("--dataset-cache-dir", type=Path, default=REPO_ROOT / "data" / "hf_cache")
@@ -34,21 +41,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def model_family_key(model: str) -> str:
-    return {
-        "llama": "llama3.1",
-        "qwen": "qwen2.5",
-    }[model]
-
-
 def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     from src.paths import MODEL_FAMILIES_D2
 
-    family_key = args.model_name or model_family_key(args.model)
+    family_key = args.model_name or args.model
     family = MODEL_FAMILIES_D2[family_key]
     args.model_name = family.name
     args.model_path = args.model_path or Path(family.base_model_path)
-    args.run_name = args.run_name or args.eval_type
+    args.run_name = args.run_name or args.model_source
     return args
 
 
@@ -171,12 +171,21 @@ def compute_eval_finetunes(args: argparse.Namespace) -> None:
         compute_eval_task(task_args)
 
 
+def compute_eval_adapter(args: argparse.Namespace) -> None:
+    if args.peft_model is None:
+        raise ValueError("--model-source adapter requires --peft-model")
+    args.run_name = args.run_name or args.peft_model.name
+    compute_eval_task(args)
+
+
 def main() -> None:
     args = resolve_args(parse_args())
-    if args.eval_type == "pretrained":
+    if args.model_source == "pretrained":
         compute_eval_pretrained(args)
-    else:
+    elif args.model_source == "finetunes":
         compute_eval_finetunes(args)
+    else:
+        compute_eval_adapter(args)
 
 
 if __name__ == "__main__":

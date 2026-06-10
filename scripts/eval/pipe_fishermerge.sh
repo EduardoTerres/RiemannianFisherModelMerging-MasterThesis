@@ -1,17 +1,17 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=pipe_orthomerge
+#SBATCH --job-name=pipe_fmerge
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=00:10:00
-#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/standard_rescaled/slurm/pipe_orthomerge_%A.out
+#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/fisher_rescaled/slurm/pipe_fishermerge_%A.out
 
 set -e
 
 MODEL_NAME="llama3.1"
 MERGE_METHOD="gradients"
-MERGE_MODE="standard_rescaled"
+MERGE_MODE="diagonal_fisher_rescaled"
 SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
 REPO_ROOT="/home/eterres/MasterThesis"
 BASE_MODEL_PATH="${REPO_ROOT}/data/models/Llama-3.1-8B"
@@ -26,14 +26,14 @@ mkdir -p "${SLURM_DIR}"
 
 conda activate merge
 
-# python "${REPO_ROOT}/src/scripts/perform_merging.py" \
-#     --model_family "${MODEL_NAME}" \
-#     --merge_method "${MERGE_METHOD}" \
-#     --merge_mode "${MERGE_MODE}" \
-#     --output_dir "${MODEL_DIR}" \
-#     --save_merged_model \
-#     --lam 0.0 \
-#     --device gpu
+python "${REPO_ROOT}/src/scripts/perform_merging.py" \
+    --model_family "${MODEL_NAME}" \
+    --merge_method "${MERGE_METHOD}" \
+    --merge_mode "${MERGE_MODE}" \
+    --output_dir "${MODEL_DIR}" \
+    --save_merged_model \
+    --lam 0.0 \
+    --device gpu
 
 sbatch \
     --output="${SLURM_DIR}/eval_model_%A_%a.out" \

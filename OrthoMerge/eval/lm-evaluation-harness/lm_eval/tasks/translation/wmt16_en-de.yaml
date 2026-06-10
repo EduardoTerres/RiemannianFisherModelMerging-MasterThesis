@@ -10,4 +10,6 @@ tag:
 - wmt16
 - gpt3_translation_benchmarks
 include: wmt_common_yaml
+metric_list:
+- metric: bleu
 task: wmt16-en-de

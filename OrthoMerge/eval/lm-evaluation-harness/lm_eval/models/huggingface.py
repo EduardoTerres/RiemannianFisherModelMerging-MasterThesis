@@ -1115,14 +1115,16 @@ class HFLM(TemplateLM):
             dtype=self.mixed_precision_dtype,
             enabled=self.mixed_precision_dtype is not None,
         ):
-            return self.model.generate(
-                input_ids=context,
-                max_length=max_length,
-                stopping_criteria=stopping_criteria,
-                pad_token_id=self.tokenizer.pad_token_id,
-                use_cache=True,
+            generate_kwargs = {
+                "input_ids": context,
+                "stopping_criteria": stopping_criteria,
+                "pad_token_id": self.tokenizer.pad_token_id,
+                "use_cache": True,
                 **generation_kwargs,
-            )
+            }
+            if "max_new_tokens" not in generation_kwargs:
+                generate_kwargs["max_length"] = max_length
+            return self.model.generate(**generate_kwargs)
 
     def _select_cont_toks(
         self,
@@ -1580,6 +1582,7 @@ class HFLM(TemplateLM):
                     "`max_length` in generation kwargs. Please use `max_gen_toks` instead."
                 )
             max_length = kwargs.pop("max_length", context_enc.shape[1] + max_gen_toks)  # type: ignore
+            kwargs["max_new_tokens"] = max_gen_toks
 
             # perform batched generation
             cont = self._model_generate(

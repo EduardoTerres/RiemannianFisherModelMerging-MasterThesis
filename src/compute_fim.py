@@ -3,12 +3,10 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import List
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.merging import OFTMerging
 import torch
-from torch import Tensor
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from safetensors.torch import save_file
@@ -16,24 +14,96 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from nngeometry.metrics import FIM
-from nngeometry.object import PMatDense, PMatDiag, PMatKFAC
-
-from src.paths import (
-    ROOTDIR,
-    MODEL_FAMILIES,
-)
-from src.dataset.dataset_1 import DATASET_1_TRAIN as DATASET_1, build_loader
+from src.paths import FISHERS_DIR as FIM_OUTPUT_ROOT, MODEL_FAMILIES_D2 as MODEL_FAMILIES
+from src.dataset.dataset_2 import DATASET_2_TRAIN as TASKS, build_loader
 from src.utils import parse_device
+
+WANDB_PROJECT = "fim"
+WANDB_ENTITY = None
+WANDB_MODE = os.environ.get("WANDB_MODE", "online")
+WANDB_LOG_EVERY_BATCH = 1
+WANDB_METRIC_MAX_ENTRIES = 200_000
 
 _merging = OFTMerging()
 _manifold = _merging.manifold
+
+
+def log_fisher_convergence_metrics(
+    fisher: dict[str, torch.Tensor],
+    normalizer: int,
+    metric_prefix: str | None,
+    previous_fishers: dict[str, torch.Tensor] | None,
+    wandb_step: int,
+) -> dict[str, torch.Tensor] | None:
+    if metric_prefix is None:
+        return previous_fishers
+    try:
+        import wandb
+    except ImportError:
+        return previous_fishers
+    if wandb.run is None:
+        return previous_fishers
+
+    running_fishers = {
+        name: (value.detach().float() / max(normalizer, 1)).cpu()
+        for name, value in fisher.items()
+    }
+    flat = torch.cat([value.flatten() for value in running_fishers.values()])
+    metric_flat = flat
+    if metric_flat.numel() > WANDB_METRIC_MAX_ENTRIES:
+        step = metric_flat.numel() / WANDB_METRIC_MAX_ENTRIES
+        sample_idx = (torch.arange(WANDB_METRIC_MAX_ENTRIES) * step).long()
+        metric_flat = metric_flat[sample_idx]
+    payload = {
+        f"{metric_prefix}/num_samples": normalizer,
+        f"{metric_prefix}/mean": flat.mean().item(),
+        f"{metric_prefix}/p50": torch.quantile(metric_flat, 0.50).item(),
+        f"{metric_prefix}/p90": torch.quantile(metric_flat, 0.90).item(),
+        f"{metric_prefix}/p99": torch.quantile(metric_flat, 0.99).item(),
+        f"{metric_prefix}/max": flat.max().item(),
+        f"{metric_prefix}/top_1pct_mass": (
+            metric_flat.topk(max(1, metric_flat.numel() // 100)).values.sum()
+            / metric_flat.sum().clamp_min(1e-12)
+        ).item(),
+    }
+
+    if previous_fishers is not None:
+        prev_flat = torch.cat([previous_fishers[name].flatten() for name in running_fishers])
+        diff = flat - prev_flat
+        payload[f"{metric_prefix}/rel_fro_change"] = (
+            diff.norm() / prev_flat.norm().clamp_min(1e-12)
+        ).item()
+        payload[f"{metric_prefix}/cosine_to_prev"] = F.cosine_similarity(
+            flat,
+            prev_flat,
+            dim=0,
+            eps=1e-12,
+        ).item()
+
+        layer_changes = torch.tensor([
+            ((running - previous_fishers[name]).norm()
+             / previous_fishers[name].norm().clamp_min(1e-12)).item()
+            for name, running in running_fishers.items()
+        ])
+        payload.update({
+            f"{metric_prefix}/layer_rel_fro_change_mean": layer_changes.mean().item(),
+            f"{metric_prefix}/layer_rel_fro_change_p90": torch.quantile(layer_changes, 0.90).item(),
+            f"{metric_prefix}/layer_rel_fro_change_max": layer_changes.max().item(),
+        })
+
+    wandb.log(payload, step=wandb_step)
+    return {
+        name: value.clone()
+        for name, value in running_fishers.items()
+    }
 
 
 def compute_empirical_diagonal_transported_fisher(
     model: torch.nn.Module,
     loader: DataLoader,
     device: str,
+    metric_prefix: str | None = None,
+    wandb_step_offset: int = 0,
 ) -> dict:
     """
     Compute the diagonal empirical Fisher: E[grad log p]^2.
@@ -174,9 +244,23 @@ def compute_empirical_diagonal_transported_fisher(
 
         return nll
 
+    previous_fishers = None
+
+    def log_convergence_metrics(batch_idx: int, num_samples: int) -> None:
+        nonlocal previous_fishers
+        if metric_prefix is None or batch_idx % WANDB_LOG_EVERY_BATCH:
+            return
+        previous_fishers = log_fisher_convergence_metrics(
+            fisher=fisher,
+            normalizer=num_samples,
+            metric_prefix=metric_prefix,
+            previous_fishers=previous_fishers,
+            wandb_step=wandb_step_offset + num_samples,
+        )
+
     num_samples = 0
 
-    for batch in tqdm(loader, desc="Computing transported diagonal FIM"):
+    for batch_idx, batch in enumerate(tqdm(loader, desc="Computing transported diagonal FIM"), 1):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
 
@@ -231,6 +315,7 @@ def compute_empirical_diagonal_transported_fisher(
                         fisher[name] += grad.pow(2).cpu()
 
             num_samples += 1
+        log_convergence_metrics(batch_idx, num_samples)
 
     if num_samples == 0:
         raise ValueError("The DataLoader produced zero samples.")
@@ -244,7 +329,9 @@ def compute_empirical_diagonal_fisher(
     model: torch.nn.Module,
     loader: DataLoader,
     device: str,
-    ) -> dict:
+    metric_prefix: str | None = None,
+    wandb_step_offset: int = 0,
+) -> dict:
     """
     Compute the diagonal empirical Fisher: E[grad log p]^2.
     Args:
@@ -261,6 +348,19 @@ def compute_empirical_diagonal_fisher(
 
     model.eval()
     count = 0
+    previous_fishers = None
+
+    def log_convergence_metrics(num_batches: int) -> None:
+        nonlocal previous_fishers
+        if metric_prefix is None or num_batches % WANDB_LOG_EVERY_BATCH:
+            return
+        previous_fishers = log_fisher_convergence_metrics(
+            fisher=fisher,
+            normalizer=num_batches,
+            metric_prefix=metric_prefix,
+            previous_fishers=previous_fishers,
+            wandb_step=wandb_step_offset + num_batches,
+        )
 
     for batch in tqdm(loader, desc="Computing Diagonal FIM"):
         input_ids = batch["input_ids"].to(device)
@@ -302,13 +402,16 @@ def compute_empirical_diagonal_fisher(
                 fisher[n] += p.grad.data ** 2
 
         count += 1
+        log_convergence_metrics(count)
+
+    if count == 0:
+        raise ValueError("The DataLoader produced zero batches.")
 
     for n in fisher:
         fisher[n] /= count
         fisher[n] = fisher[n].cpu()
 
     return fisher
-
 
 def compute_diagonal_fisher(model, loader, device, tokenizer=None):
     """
@@ -431,7 +534,6 @@ def compute_true_fisher(model, loader, device):
         raise ValueError("No sequences processed.")
     return {n: f / n_sequences for n, f in zip(param_names, accum)}
 
-
 def compute_empirical_fisher(model, loader, device):
     """
     Compute the diagonal empirical Fisher Information Matrix, layerwise.
@@ -492,22 +594,61 @@ def compute_empirical_fisher(model, loader, device):
     return fisher
 
 
-def compute_kfac(model, loader, device):
-    """
-    K-FAC: approximate the Fisher block for each nn.Linear as A ⊗ G,
-    where A = E[a aᵀ] (input covariance) and G = E[δ δᵀ] (output-gradient covariance).
-
-    Returns
-    -------
-    dict[str, tuple[Tensor, Tensor]]
-        {module_name: (A, G)} both on CPU.
-    """
-    F_kfac = FIM(
-        model=model,
-        loader=loader,
-        representation=PMatKFAC,
-        variant="classif_logits",
+def maybe_init_wandb(
+    model_family: str,
+    task_tag: str,
+    adapter_tag: str,
+    debug: bool,
+    enabled: bool,
+) -> None:
+    if not enabled:
+        return
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError("wandb is not installed in this environment.") from exc
+    if wandb.run is not None:
+        return
+    wandb.init(
+        project=WANDB_PROJECT,
+        entity=WANDB_ENTITY,
+        mode=WANDB_MODE,
+        name=f"fim-{model_family}-{task_tag}",
+        group="compute-fim",
+        config={
+            "model_family": model_family,
+            "task": task_tag,
+            "adapter": adapter_tag,
+            "debug": debug,
+        },
     )
+
+
+def zero_trainable_adapter_parameters(model: torch.nn.Module) -> None:
+    with torch.no_grad():
+        for _, param in model.named_parameters():
+            if param.requires_grad:
+                param.zero_()
+
+
+def load_adapter_model(
+    base_model_path: str,
+    adapter_path: str,
+    device: str,
+    zero_adapter: bool,
+) -> torch.nn.Module:
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model_path, torch_dtype=torch.float32, device_map=None
+    )
+    model = PeftModel.from_pretrained(base, adapter_path, is_trainable=True)
+    # If the model is pretrained we still want the OFT for backpropagating for FIM computation,
+    # but we want to zero out the adapter parameters so they don't contribute to the FIM.
+    if zero_adapter:
+        zero_trainable_adapter_parameters(model)
+    model.enable_adapter_layers()
+    model.to(device)
+    model.eval()
+    return model
 
 
 def compute_and_save_fim(
@@ -523,56 +664,89 @@ def compute_and_save_fim(
     num_samples: int = 512,
     batch_size: int = 4,
     max_length: int = 512,
+    model_state: str = "finetuned",
+    log_to_wandb: bool = False,
+    dataset_cache_dir: str | None = None,
+    wandb_step_offset: int = 0,
 ) -> None:
     tokenizer = AutoTokenizer.from_pretrained(base_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    base = AutoModelForCausalLM.from_pretrained(
-        base_model_path, torch_dtype=torch.float32, device_map=None
+    model = load_adapter_model(
+        base_model_path=base_model_path,
+        adapter_path=adapter_path,
+        device=device,
+        zero_adapter=(model_state == "pretrained"),
     )
-    model = PeftModel.from_pretrained(base, adapter_path, is_trainable=True)
-    model.enable_adapter_layers()
-    model.to(device)
-    model.eval()
 
     loader = build_loader(
         dataset_path, dataset_name, split, doc_to_text,
-        tokenizer, num_samples, batch_size, max_length,
+        tokenizer, num_samples, batch_size, max_length, task=task_tag,
+        cache_dir=dataset_cache_dir,
     )
-    fisher = dict()
 
-    # fisher = compute_diagonal_fim(model, loader, device, tokenizer)
-    fisher = compute_empirical_diagonal_transported_fisher(model, loader, device)
-    # fisher = compute_kfac(model, loader, device)
+    metric_prefix = f"fim/{model_state}" if log_to_wandb else None
+    if model_state == "pretrained":
+        fisher = compute_empirical_diagonal_fisher(
+            model,
+            loader,
+            device,
+            metric_prefix=metric_prefix,
+            wandb_step_offset=wandb_step_offset,
+        )
+    elif model_state == "finetuned":
+        fisher = compute_empirical_diagonal_transported_fisher(
+            model,
+            loader,
+            device,
+            metric_prefix=metric_prefix,
+            wandb_step_offset=wandb_step_offset,
+        )
+    else:
+        raise ValueError(f"Unsupported model_state: {model_state}")
 
-    save_file(fisher, save_path)
-    print(f"[{task_tag}] Fisher saved to {save_path}")
+    save_file(fisher, str(save_path))
+    print(f"[{task_tag}] {model_state} Fisher saved to {save_path}", flush=True)
 
 
-def compute_all_fishers(
+def compute_task_fishers(
     base_model_path: str,
-    adapter_paths: list,
-    output_dir: str,
+    adapter_path: str,
+    fisher_paths_by_state: dict[str, str],
+    model_family: str,
+    task_index: int,
     device: str,
     num_samples: int,
     batch_size: int,
     max_length: int,
+    dataset_cache_dir: str | None,
+    debug: bool,
+    log_to_wandb: bool,
+    force_compute: bool,
 ) -> None:
-    os.makedirs(output_dir, exist_ok=True)
-    total = len(DATASET_1)
-    for i, ((task_tag, dataset_path, dataset_name, split, doc_to_text), adapter_path) in tqdm(
-        enumerate(zip(DATASET_1, adapter_paths), 1), total=total, desc="Computing FIMs"
-    ):
-        model_tag = os.path.basename(adapter_path.rstrip("/"))
-        save_path = os.path.join(output_dir, f"{model_tag}.safetensors")
-        print(f"\n[{i}/{total}] Task: {task_tag}  adapter={model_tag}  split={split}")
-        print(f"         Save : {save_path}")
+    task_tag, dataset_path, dataset_name, split, doc_to_text = TASKS[task_index]
+    adapter_tag = os.path.basename(adapter_path.rstrip("/"))
+    output_dir = FIM_OUTPUT_ROOT / model_family / task_tag
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-        if os.path.exists(save_path):
-            print("[WARNING] Already exists, skipping.")
+    print(f"Dataset: {task_tag}", flush=True)
+    print(f"Adapter model: {adapter_tag}", flush=True)
+    print(f"Task index: {task_index}", flush=True)
+    print(f"Debug: {debug}", flush=True)
+
+    maybe_init_wandb(model_family, task_tag, adapter_tag, debug, log_to_wandb)
+
+    for model_state in ("pretrained", "finetuned"):
+        save_path = Path(fisher_paths_by_state[model_state])
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"\nComputing {model_state} FIM", flush=True)
+        print(f"Save: {save_path}", flush=True)
+        if save_path.exists() and not force_compute:
+            print("[WARNING] Already exists, skipping.", flush=True)
             continue
-
+        if save_path.exists() and force_compute:
+            print("[WARNING] Already exists, recomputing due to --force-compute.", flush=True)
         compute_and_save_fim(
             base_model_path=base_model_path,
             adapter_path=adapter_path,
@@ -586,9 +760,13 @@ def compute_all_fishers(
             num_samples=num_samples,
             batch_size=batch_size,
             max_length=max_length,
+            model_state=model_state,
+            log_to_wandb=log_to_wandb,
+            dataset_cache_dir=dataset_cache_dir,
+            wandb_step_offset=0,
         )
 
-    print(f"All fishers saved to {output_dir}/")
+    print(f"FIMs saved to {output_dir}/", flush=True)
 
 
 if __name__ == "__main__":
@@ -597,27 +775,49 @@ if __name__ == "__main__":
         "--model-family", type=str, default="llama3.1", choices=list(MODEL_FAMILIES),
         dest="model_family", help="Model family to use.",
     )
-    parser.add_argument("--output-dir", type=str, default=f"{ROOTDIR}/data/fishers")
-    parser.add_argument("--num-samples", type=int, default=512)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--max-length", type=int, default=256)
+    parser.add_argument("--task-index", type=int, required=True, choices=range(len(TASKS)))
+    parser.add_argument("--num-samples", type=int, default=2048)  # 1024
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--max-length", type=int, default=1024)  # 1024
+    parser.add_argument("--dataset-cache-dir", type=str, default=str(Path(__file__).resolve().parents[1] / "data" / "hf_cache"))
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument(
+        "--force-compute",
+        action="store_true",
+        help="Recompute and overwrite existing FIM files instead of skipping them.",
+    )
     parser.add_argument(
         "--device", type=str, default="cuda",
         help="Device to use for FIM computation (e.g., 'gpu', 'cpu').",
     )
     args = parser.parse_args()
     args.device = parse_device(args.device)
+    if args.debug:
+        args.num_samples = 2
+        args.batch_size = 1
+        args.max_length = min(args.max_length, 128)
 
     model_family = MODEL_FAMILIES[args.model_family]
     base_model_path = model_family.base_model_path
-    adapter_paths = model_family.adapter_paths
+    adapter_path = model_family.adapter_paths[args.task_index]
+    fisher_paths_by_state = {
+        "pretrained": model_family.fisher_pretrained_paths[args.task_index],
+        "finetuned": model_family.fisher_finetuned_paths[args.task_index],
+    }
 
-    compute_all_fishers(
+    compute_task_fishers(
         base_model_path=base_model_path,
-        adapter_paths=adapter_paths,
-        output_dir=args.output_dir,
+        adapter_path=adapter_path,
+        fisher_paths_by_state=fisher_paths_by_state,
+        model_family=args.model_family,
+        task_index=args.task_index,
         device=args.device,
         num_samples=args.num_samples,
         batch_size=args.batch_size,
         max_length=args.max_length,
+        dataset_cache_dir=args.dataset_cache_dir,
+        debug=args.debug,
+        log_to_wandb=not args.no_wandb,
+        force_compute=args.force_compute,
     )

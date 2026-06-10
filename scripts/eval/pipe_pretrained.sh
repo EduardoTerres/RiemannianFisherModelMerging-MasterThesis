@@ -10,11 +10,18 @@
 set -e
 
 MODEL_NAME="llama3.1"
+MODEL_NAME="qwen2.5"
+
 SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
 REPO_ROOT="/home/eterres/MasterThesis"
+
 MODEL_PATH="${REPO_ROOT}/data/models/Llama-3.1-8B"
+MODEL_PATH="${REPO_ROOT}/data/models/Qwen-2.5-3B"
+
 EVAL_DIR="${REPO_ROOT}/outputs/evaluation/pretrained/${MODEL_NAME}"
-SLURM_DIR="${REPO_ROOT}/outputs/evaluation/pretrained/slurm"
+SLURM_DIR="${REPO_ROOT}/outputs/evaluation/pretrained/slurm_${MODEL_NAME}"
+
+
 
 mkdir -p "${SLURM_DIR}"
 

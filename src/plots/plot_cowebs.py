@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib import rcParams
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -100,6 +101,9 @@ def collect_metrics(model_dir: Path, plot_mode: str) -> dict[str, float]:
 
 
 def select_runs(results_root: Path, family: str, models: Iterable[str] | None) -> list[tuple[str, Path]]:
+    if not results_root.exists():
+        raise SystemExit(f"Missing results root: {results_root}")
+
     available = {
         path.name: path
         for path in results_root.iterdir()
@@ -112,17 +116,10 @@ def select_runs(results_root: Path, family: str, models: Iterable[str] | None) -
 
     runs = []
     for name in selected_names:
-        model_dirs = [
-            path
-            for path in available[name].iterdir()
-            if path.is_dir() and family.lower() in path.name.lower()
-        ]
-        if not model_dirs:
-            raise SystemExit(f"Missing {family} model directory in {available[name]}")
-        if len(model_dirs) > 1:
-            choices = ", ".join(path.name for path in model_dirs)
-            raise SystemExit(f"Multiple {family} model directories in {available[name]}: {choices}")
-        runs.append((name, model_dirs[0]))
+        model_dir = available[name] / family
+        if not model_dir.is_dir():
+            raise SystemExit(f"Missing model family directory: {model_dir}")
+        runs.append((name, model_dir))
     return runs
 
 
@@ -133,8 +130,31 @@ def plot_models(
     plot_mode: str,
     log_scale: bool = False,
     ordering: str = "first",
+    only_well_finetuned: bool = False,
+    well_finetuned_tolerance: float = 0.1,
 ) -> None:
     model_metrics = {label: collect_metrics(model_dir, plot_mode) for label, model_dir in runs}
+    if only_well_finetuned:
+        pretrained = model_metrics.get("pretrained")
+        finetunes = model_metrics.get("finetunes")
+        if pretrained is None or finetunes is None:
+            raise SystemExit("--only-well-finetuned requires runs named pretrained and finetunes")
+        keep = {
+            task
+            for task in DATASET_2_PLOT_METRICS
+            if task in pretrained
+            and task in finetunes
+            and (
+                finetunes[task] <= pretrained[task] + well_finetuned_tolerance
+                if plot_mode == "eval_loss"
+                else finetunes[task] >= pretrained[task] - well_finetuned_tolerance
+            )
+        }
+        model_metrics = {
+            label: {task: value for task, value in metrics.items() if task in keep}
+            for label, metrics in model_metrics.items()
+        }
+        print(f"Keeping {len(keep)} tasks where finetunes beat pretrained")
     first_metrics = model_metrics[runs[0][0]]
     all_labels = [
         task
@@ -185,11 +205,13 @@ def plot_models(
         if not positive_values:
             print("Skipping plot: log scale requires positive metrics")
             return
-        ymin = min(positive_values) * 0.92
-        ymax = max(positive_values) * 1.08
+        min_exponent = math.floor(math.log10(min(positive_values) * 0.92))
+        max_exponent = 0
+        ymin = 10**min_exponent
+        ymax = 10**max_exponent
         ax.set_yscale("log")
-        ticks = [math.exp(math.log(ymin) + frac * (math.log(ymax) - math.log(ymin))) for frac in (0, 0.25, 0.5, 0.75, 1)]
-        tick_labels = [f"{tick:.2g}" for tick in ticks]
+        ticks = [10**exponent for exponent in range(min_exponent, max_exponent + 1)]
+        tick_labels = [rf"$10^{{{exponent}}}$" for exponent in range(min_exponent, max_exponent + 1)]
     elif plot_mode == "eval_loss":
         ymin = 0
         ymax = max(finite_values) if finite_values else 1
@@ -203,12 +225,28 @@ def plot_models(
         tick_labels = [r"0.2", r"0.4", r"0.6", r"0.8", r"1.0"]
     ax.set_ylim(ymin, ymax)
     ax.set_yticks(ticks)
-    ax.set_rlabel_position(-28)
+    if log_scale:
+        minor_ticks = [
+            mantissa * 10**exponent
+            for exponent in range(min_exponent, max_exponent)
+            for mantissa in range(2, 10)
+            if ymin < mantissa * 10**exponent < ymax
+        ]
+    else:
+        minor_ticks = [tick for tick in np.linspace(ymin, ymax, 12)[1:-1] if tick not in ticks]
+    ax.set_yticks(minor_ticks, minor=True)
+    ax.set_rlabel_position(-15)
     ax.set_yticklabels(tick_labels, color="#555555", fontsize=16)
-    ax.set_title(rf"\textbf{{{latex_escape(format_family_title(runs[0][1].name))}}}", pad=60)
+    # for label in ax.get_yticklabels():
+    #     label.set_zorder(20)
+    #     label.set_bbox(dict(facecolor="white", alpha=0.65, edgecolor="none", pad=0.35))
+    ax.set_yticklabels([], minor=True)
+    ax.set_title(rf"\textbf{{{latex_escape(format_family_title(family))}}}", pad=60)
     ax.spines["polar"].set_color("#777777")
     ax.spines["polar"].set_alpha(0.55)
-    ax.grid(True, color="#999999", alpha=0.35, linewidth=0.8)
+    ax.xaxis.grid(True, color="#999999", alpha=0.28, linewidth=0.75)
+    ax.yaxis.grid(True, which="major", color="#666666", alpha=0.55, linewidth=1.0)
+    ax.yaxis.grid(True, which="minor", color="#999999", alpha=0.42, linewidth=0.6)
     ax.legend(loc="upper left", bbox_to_anchor=(1.06, 1.02), frameon=False)
 
     for angle, label in zip(angles[:-1], labels, strict=True):
@@ -251,11 +289,17 @@ def plot_models(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
-    parser.add_argument("--model-family", choices=["llama", "qwen"], required=True, help="Model family to plot")
-    parser.add_argument("--models", nargs="+", help="Evaluation outputs to include, e.g. pretrained finetunes")
+    parser.add_argument("--model-family", choices=["llama3.1", "qwen2.5"], required=True, help="Model family to plot")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        help="Evaluation output directories under outputs/evaluation or outputs/eval_loss.",
+    )
     parser.add_argument("--plot-mode", choices=PLOT_MODES, default="eval_performance")
-    parser.add_argument("--log_scale", action="store_true", help="Use a log-scaled radial axis")
+    parser.add_argument("--log-scale", "--log_scale", action="store_true", help="Use a log-scaled radial axis")
     parser.add_argument("--ordering", choices=["first", "alphabet"], default="first")
+    parser.add_argument("--only-well-finetuned", action="store_true")
+    parser.add_argument("--well-finetuned-tolerance", type=float, default=0.1)
     args = parser.parse_args()
 
     results_root = args.repo_root / "outputs" / (
@@ -263,7 +307,16 @@ def main() -> None:
     )
     output_dir = args.repo_root / "outputs" / "coweb_plots"
     runs = select_runs(results_root, args.model_family, args.models)
-    plot_models(runs, output_dir, args.model_family, args.plot_mode, args.log_scale, args.ordering)
+    plot_models(
+        runs,
+        output_dir,
+        args.model_family,
+        args.plot_mode,
+        args.log_scale,
+        args.ordering,
+        args.only_well_finetuned,
+        args.well_finetuned_tolerance,
+    )
 
 
 if __name__ == "__main__":

@@ -9,13 +9,17 @@
 
 set -e
 
+MODEL_FAMIILY="qwen2.5"
 REPO_ROOT="/home/eterres/MasterThesis"
-
-if [ "$#" -eq 0 ]; then
-    set -- --model-family llama --models pretrained finetunes
-fi
+MODELS=(pretrained finetunes standard_rescaled)
+MODELS=(pretrained finetunes)
 
 python "${REPO_ROOT}/src/plots/plot_cowebs.py" \
+    --model-family ${MODEL_FAMIILY} \
+    --models "${MODELS[@]}" \
     --repo-root "${REPO_ROOT}" \
-    --ordering first \
-    "$@"
+    --ordering alphabet \
+    --log-scale \
+    --well-finetuned-tolerance 0.1
+
+# --only-well-finetuned \

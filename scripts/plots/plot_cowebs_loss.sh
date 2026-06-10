@@ -11,13 +11,10 @@ set -e
 
 REPO_ROOT="/home/eterres/MasterThesis"
 
-if [ "$#" -eq 0 ]; then
-    set -- --model-family llama --models pretrained finetunes
-fi
-
 python "${REPO_ROOT}/src/plots/plot_cowebs.py" \
+    --model-family llama \
+    --models pretrained finetunes standard_rescaled \
     --repo-root "${REPO_ROOT}" \
     --plot-mode eval_loss \
-    --log_scale \
-    --ordering alphabet \
-    "$@"
+    --log-scale \
+    --ordering alphabet

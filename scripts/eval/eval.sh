@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=eval_model
+#SBATCH --job-name=eval
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=02:00:00
-#SBATCH --array=0-14
+#SBATCH --array=0-14%5
 #SBATCH --output=eval_model_%A_%a.out
 
 set -e
@@ -100,8 +100,14 @@ if [ -n "${PEFT_MODEL}" ]; then
 fi
 
 # Dev-only shortcut. remember to remove/empty this block for final benchmark numbers.
-if [ "${TASK_ID}" = "1" ] || [ "${TASK_ID}" = "4" ] || [ "${TASK_ID}" = "7" ] || [ "${TASK_ID}" = "8" ] || [ "${TASK_ID}" = "11" ]; then
+# 1 4 7 8
+if [ "${TASK_ID}" = "1" ] || [ "${TASK_ID}" = "4" ] || [ "${TASK_ID}" = "7" ] || [ "${TASK_ID}" = "8" ] ; then
     LM_EVAL_LIMIT_ARGS=(--limit 500)
+fi
+
+# 10 11
+if [ "${TASK_ID}" = "10" ] || [ "${TASK_ID}" = "11" ]; then
+    LM_EVAL_LIMIT_ARGS=(--limit 5000)
 fi
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -112,7 +118,7 @@ if [ "${EVAL_BACKEND}" = "bigcode" ]; then
     conda activate bigcode
     cd "${REPO_ROOT}/OrthoMerge/eval/bigcode-evaluation-harness"
 
-    echo "Evaluating ${MODEL_PATH} on ${TASK_NAME} with BigCode task ${LM_EVAL_TASK}"
+    echo "Evaluating ${MODEL_PATH} on ${TASK_NAME} with BigCode task ${LM_EVAL_TASK}${PEFT_MODEL:+ and PEFT adapter ${PEFT_MODEL}}"
 
     accelerate launch main.py \
         --model "${MODEL_PATH}" \
@@ -130,12 +136,14 @@ else
     conda activate lm-eval
     cd "${REPO_ROOT}/OrthoMerge/eval/lm-evaluation-harness"
 
-    echo "Evaluating ${MODEL_PATH} on ${TASK_NAME} with lm_eval task ${LM_EVAL_TASK}"
+    echo "Evaluating ${MODEL_PATH} on ${TASK_NAME} with lm_eval task ${LM_EVAL_TASK}${PEFT_MODEL:+ and PEFT adapter ${PEFT_MODEL}}"
 
     # otherwise complains
     if [ "${TASK_NAME}" = "mbpp" ]; then
         export HF_ALLOW_CODE_EVAL=1
     fi
+
+    # --gen_kwargs max_gen_toks=128 \
 
     lm_eval --model hf \
         --tasks "${LM_EVAL_TASK}" \

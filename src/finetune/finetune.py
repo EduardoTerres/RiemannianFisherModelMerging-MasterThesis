@@ -28,9 +28,9 @@ from transformers import (
 
 from src.dataset.dataset_2 import DATASET_2_TRAIN, doc_to_text, expand_doc
 from src.paths import (
-    LLAMA_ADAPTERS_FOLDER,
+    LLAMA_D2_ADAPTERS_FOLDER as LLAMA_ADAPTERS_FOLDER,
     LLAMA_BASE_MODEL_PATH,
-    QWEN_ADAPTERS_FOLDER,
+    QWEN_D2_ADAPTERS_FOLDER as QWEN_ADAPTERS_FOLDER,
     QWEN_BASE_MODEL_PATH,
     ROOTDIR,
 )

@@ -33,7 +33,7 @@ def log_fisher_convergence_metrics(
     normalizer: int,
     metric_prefix: str | None,
     previous_fishers: dict[str, torch.Tensor] | None,
-    wandb_step: int,
+    metric_step: int,
 ) -> dict[str, torch.Tensor] | None:
     if metric_prefix is None:
         return previous_fishers
@@ -55,6 +55,7 @@ def log_fisher_convergence_metrics(
         sample_idx = (torch.arange(WANDB_METRIC_MAX_ENTRIES) * step).long()
         metric_flat = metric_flat[sample_idx]
     payload = {
+        f"{metric_prefix}/step": metric_step,
         f"{metric_prefix}/num_samples": normalizer,
         f"{metric_prefix}/mean": flat.mean().item(),
         f"{metric_prefix}/p50": torch.quantile(metric_flat, 0.50).item(),
@@ -91,7 +92,7 @@ def log_fisher_convergence_metrics(
             f"{metric_prefix}/layer_rel_fro_change_max": layer_changes.max().item(),
         })
 
-    wandb.log(payload, step=wandb_step)
+    wandb.log(payload)
     return {
         name: value.clone()
         for name, value in running_fishers.items()
@@ -255,7 +256,7 @@ def compute_empirical_diagonal_transported_fisher(
             normalizer=num_samples,
             metric_prefix=metric_prefix,
             previous_fishers=previous_fishers,
-            wandb_step=wandb_step_offset + num_samples,
+            metric_step=wandb_step_offset + num_samples,
         )
 
     num_samples = 0
@@ -359,7 +360,7 @@ def compute_empirical_diagonal_fisher(
             normalizer=num_batches,
             metric_prefix=metric_prefix,
             previous_fishers=previous_fishers,
-            wandb_step=wandb_step_offset + num_batches,
+            metric_step=wandb_step_offset + num_batches,
         )
 
     for batch in tqdm(loader, desc="Computing Diagonal FIM"):
@@ -622,6 +623,10 @@ def maybe_init_wandb(
             "debug": debug,
         },
     )
+    for model_state in ("pretrained", "finetuned"):
+        step_metric = f"fim/{model_state}/step"
+        wandb.define_metric(step_metric)
+        wandb.define_metric(f"fim/{model_state}/*", step_metric=step_metric)
 
 
 def zero_trainable_adapter_parameters(model: torch.nn.Module) -> None:
@@ -706,6 +711,7 @@ def compute_and_save_fim(
     else:
         raise ValueError(f"Unsupported model_state: {model_state}")
 
+    fisher = {name: value.clamp_min(1e-6) for name, value in fisher.items()}
     save_file(fisher, str(save_path))
     print(f"[{task_tag}] {model_state} Fisher saved to {save_path}", flush=True)
 

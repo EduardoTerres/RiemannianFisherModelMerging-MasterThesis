@@ -100,14 +100,9 @@ if [ -n "${PEFT_MODEL}" ]; then
 fi
 
 # Dev-only shortcut. remember to remove/empty this block for final benchmark numbers.
-# 1 4 7 8
-if [ "${TASK_ID}" = "1" ] || [ "${TASK_ID}" = "4" ] || [ "${TASK_ID}" = "7" ] || [ "${TASK_ID}" = "8" ] ; then
+# 1 4 7 8 10 11
+if [ "${TASK_ID}" = "1" ] || [ "${TASK_ID}" = "4" ] || [ "${TASK_ID}" = "7" ] || [ "${TASK_ID}" = "8" ] || [ "${TASK_ID}" = "10" ] || [ "${TASK_ID}" = "11" ]; then
     LM_EVAL_LIMIT_ARGS=(--limit 500)
-fi
-
-# 10 11
-if [ "${TASK_ID}" = "10" ] || [ "${TASK_ID}" = "11" ]; then
-    LM_EVAL_LIMIT_ARGS=(--limit 5000)
 fi
 
 source "$(conda info --base)/etc/profile.d/conda.sh"

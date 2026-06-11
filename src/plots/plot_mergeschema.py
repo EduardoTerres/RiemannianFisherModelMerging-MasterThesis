@@ -26,6 +26,27 @@ WATER_CMAP = LinearSegmentedColormap.from_list(
     ["#123a66", "#1f6f9e", "#28a9c7", "#9de3eb", "#ffffff"],
 )
 
+plt.rcParams.update({
+    "text.usetex": True,
+    "font.family": "serif",
+})
+
+
+def latex_escape(text: str) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(char, char) for char in text)
+
 
 def task_specs(names: list[str]):
     specs = {task: spec for task, *spec in DATASET_2_TEST}
@@ -182,8 +203,8 @@ def evaluate_grid(args: argparse.Namespace, cache: Path) -> tuple[np.ndarray, np
 def marker_handles(tasks: list[str]) -> list[Line2D]:
     return [
         Line2D([0], [0], color="black", marker="o", linestyle="None", markersize=7, label="Pretrained"),
-        Line2D([0], [0], color="black", marker="^", linestyle="None", markersize=8, label=tasks[0].capitalize()),
-        Line2D([0], [0], color="black", marker="s", linestyle="None", markersize=7, label=tasks[1].capitalize()),
+        Line2D([0], [0], color="black", marker="^", linestyle="None", markersize=8, label=latex_escape(tasks[0].capitalize())),
+        Line2D([0], [0], color="black", marker="s", linestyle="None", markersize=7, label=latex_escape(tasks[1].capitalize())),
         Line2D([0], [0], color="black", marker="*", linestyle="None", markersize=12, label="OrthoMerge"),
     ]
 
@@ -191,7 +212,7 @@ def marker_handles(tasks: list[str]) -> list[Line2D]:
 def save_legend(tasks: list[str], output: Path) -> None:
     fig, ax = plt.subplots(figsize=(2.8, 1.2))
     ax.axis("off")
-    ax.legend(handles=marker_handles(tasks), loc="center", frameon=False, title="Points")
+    ax.legend(handles=marker_handles(tasks), loc="center", frameon=False)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=220, bbox_inches="tight", transparent=True)
     plt.close(fig)
@@ -218,11 +239,16 @@ def plot(
     fig, ax = plt.subplots(figsize=(8.5, 6.6))
     add_tangent_background(ax, plane_extent)
     heatmap = ax.contourf(xs, ys, z, levels=40, cmap=WATER_CMAP, zorder=1)
-    fig.colorbar(heatmap, ax=ax, pad=0.02, label=f"{tasks[0]} loss + {tasks[1]} loss")
+    fig.colorbar(
+        heatmap,
+        ax=ax,
+        pad=0.02,
+        label=rf"\texttt{{{latex_escape(tasks[0])}}} loss + \texttt{{{latex_escape(tasks[1])}}} loss",
+    )
     points = {
         "Pretrained": ((0, 0), "o", 80),
-        f"{tasks[0].capitalize()}": ((1, 0), "^", 90),
-        f"{tasks[1].capitalize()}": ((0, 1), "s", 80),
+        latex_escape(tasks[0].capitalize()): ((1, 0), "^", 90),
+        latex_escape(tasks[1].capitalize()): ((0, 1), "s", 80),
         "OrthoMerge": (merge_xy, "*", 180),
     }
     for label, (xy, marker, size) in points.items():
@@ -232,9 +258,8 @@ def plot(
     for end in [(1, 0), (0, 1), merge_xy]:
         ax.annotate("", xy=end, xytext=(0, 0), arrowprops=dict(arrowstyle="->", color="black", lw=2.3))
     ax.set(
-        xlabel=f"{tasks[0]} tangent coefficient",
-        ylabel=f"{tasks[1]} tangent coefficient",
-        title="Loss landscape",
+        xlabel=rf"\texttt{{{latex_escape(tasks[0])}}} tangent coefficient",
+        ylabel=rf"\texttt{{{latex_escape(tasks[1])}}} tangent coefficient",
     )
     ax.set_aspect("equal")
     ax.set_xlim(*plane_extent)
@@ -264,11 +289,16 @@ def plot_geometry(
 
     fig, ax = plt.subplots(figsize=(8.5, 6.6))
     heatmap = ax.tricontourf(geom_x.ravel(), geom_y.ravel(), z.ravel(), levels=40, cmap=WATER_CMAP)
-    fig.colorbar(heatmap, ax=ax, pad=0.02, label=f"{tasks[0]} loss + {tasks[1]} loss")
+    fig.colorbar(
+        heatmap,
+        ax=ax,
+        pad=0.02,
+        label=rf"\texttt{{{latex_escape(tasks[0])}}} loss + \texttt{{{latex_escape(tasks[1])}}} loss",
+    )
     points = {
         "pretrained": (np.array([0.0, 0.0]), "o", 80),
-        f"{tasks[0]} finetune": (v1, "^", 90),
-        f"{tasks[1]} finetune": (v2, "s", 80),
+        rf"\texttt{{{latex_escape(tasks[0])}}} finetune": (v1, "^", 90),
+        rf"\texttt{{{latex_escape(tasks[1])}}} finetune": (v2, "s", 80),
         "OrthoMerge + correction": (merge, "*", 180),
     }
     for label, (xy, marker, size) in points.items():
@@ -279,10 +309,9 @@ def plot_geometry(
     ax.set(
         xlabel="OFT geometry axis 1",
         ylabel="OFT geometry axis 2",
-        title="Loss landscape in average OFT task-vector geometry",
     )
     ax.set_aspect("equal")
-    ax.legend(loc="center left", bbox_to_anchor=(1.18, 0.5), frameon=False, title="Points")
+    ax.legend(loc="center left", bbox_to_anchor=(1.18, 0.5), frameon=False)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -319,13 +348,7 @@ def plot_manifold_3d(
     ax.set_axis_off()
     ax.view_init(elev=24, azim=-56)
     ax.set_box_aspect((1, 1, 0.32))
-    ax.legend(
-        handles=marker_handles(tasks),
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        frameon=False,
-        title="Points",
-    )
+    ax.legend(handles=marker_handles(tasks), loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=220, bbox_inches="tight")
     plt.close(fig)

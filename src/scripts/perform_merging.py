@@ -16,7 +16,7 @@ from peft import PeftModel
 
 from src.merging import OFTMerging, WudiOFTMerging, OFTKarcherMerging, AdaMergingPP
 from src.utils import parse_device
-from src.paths import MODEL_FAMILIES_D2_FISHER_FINETUNES as MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
+from src.paths import MODEL_FAMILIES_D2_FISHER_PRETRAINED as MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
 # from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
 from src.dataset.dataset_2 import DATASET_2_TEST, build_loader
 
@@ -123,10 +123,12 @@ def parse_args():
             "standard_rescaled",
             "diagonal_fisher",
             "diagonal_fisher_rescaled",
+            "diagonal_fisher_max_rescaled",
+            "diagonal_fisher_std_rescaled",
             "diagonal_fisher_kl_rescaled",
             "fisher",
         ],
-        help="Merging strategy: standard, rescaled standard, diagonal Fisher, rescaled diagonal Fisher, KL-rescaled diagonal Fisher, or full Fisher.",  # noqa: E501
+        help="Merging strategy: standard, rescaled standard, diagonal Fisher, rescaled/max-rescaled/std-rescaled/KL-rescaled diagonal Fisher, or full Fisher.",  # noqa: E501
     )
     parser.add_argument(
         "--lam", type=float, default=0.0,
@@ -168,7 +170,12 @@ def main():
 
     use_wandb = not (
         args.merge_method == "gradients"
-        and args.merge_mode in {"standard", "standard_rescaled", "diagonal_fisher"}
+        and args.merge_mode in {
+            "standard",
+            "standard_rescaled",
+            "diagonal_fisher",
+            "diagonal_fisher_std_rescaled",
+        }
     )
     if use_wandb:
         wandb.init(

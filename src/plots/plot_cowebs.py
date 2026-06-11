@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Iterable
 
 import matplotlib.pyplot as plt
-import numpy as np
 from matplotlib import rcParams
+from matplotlib import patheffects
+from matplotlib.colors import to_rgb
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -87,6 +88,16 @@ def format_family_title(name: str) -> str:
     return name.replace("llama", "Llama").replace("qwen", "Qwen")
 
 
+def format_plot_mode_title(plot_mode: str) -> str:
+    return "Loss" if plot_mode == "eval_loss" else "Performance"
+
+
+def format_decimal_power_of_ten(exponent: int) -> str:
+    if exponent >= 0:
+        return str(10**exponent)
+    return "0." + "0" * (-exponent - 1) + "1"
+
+
 def collect_metrics(model_dir: Path, plot_mode: str) -> dict[str, float]:
     metrics = {}
     for task, (performance_metric, preprocess) in DATASET_2_PLOT_METRICS.items():
@@ -98,6 +109,44 @@ def collect_metrics(model_dir: Path, plot_mode: str) -> dict[str, float]:
             else:
                 metrics[task] = preprocess(value) if preprocess else value
     return metrics
+
+
+def method_colors(model_metrics: dict[str, dict[str, float]]) -> dict[str, str]:
+    preferred_colors = ["#3f455f", "#7db69f", "#ef7f5f", "#f7d488", "#fff8e8"]
+    extra_colors = plt.get_cmap("tab20").colors
+    return {
+        model_name: (
+            preferred_colors[idx]
+            if idx < len(preferred_colors)
+            else extra_colors[(idx - len(preferred_colors)) % len(extra_colors)]
+        )
+        for idx, model_name in enumerate(model_metrics)
+    }
+
+
+def is_light_color(color: str | tuple[float, ...]) -> bool:
+    red, green, blue = to_rgb(color)
+    luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    return luminance > 0.82
+
+
+def line_path_effects(color: str | tuple[float, ...]) -> list[patheffects.AbstractPathEffect]:
+    if not is_light_color(color):
+        return []
+    return [
+        patheffects.Stroke(linewidth=4.0, foreground="#111111"),
+        patheffects.Normal(),
+    ]
+
+
+def add_legend_line_outlines(legend) -> None:
+    handles = getattr(legend, "legend_handles", None)
+    if handles is None:
+        handles = legend.legendHandles
+    for handle in handles:
+        color = handle.get_color()
+        if is_light_color(color):
+            handle.set_path_effects(line_path_effects(color))
 
 
 def select_runs(results_root: Path, family: str, models: Iterable[str] | None) -> list[tuple[str, Path]]:
@@ -132,6 +181,7 @@ def plot_models(
     ordering: str = "first",
     only_well_finetuned: bool = False,
     well_finetuned_tolerance: float = 0.1,
+    radial_max: float | None = None,
 ) -> None:
     model_metrics = {label: collect_metrics(model_dir, plot_mode) for label, model_dir in runs}
     if only_well_finetuned:
@@ -182,12 +232,18 @@ def plot_models(
     fig, ax = plt.subplots(figsize=(11.5, 9.5), subplot_kw={"projection": "polar"})
     ax.set_theta_offset(math.pi / 2)
     ax.set_theta_direction(1)
-    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    for idx, (model_name, metrics) in enumerate(model_metrics.items()):
+    colors = method_colors(model_metrics)
+    for model_name, metrics in model_metrics.items():
         values = [metrics.get(label, math.nan) for label in labels]
         values += values[:1]
-        color = colors[idx % len(colors)]
-        ax.plot(angles, values, color=color, linewidth=2.4, label=format_model_title(model_name))
+        color = colors[model_name]
+        ax.plot(
+            angles,
+            values,
+            color=color,
+            linewidth=3.0,
+            label=format_model_title(model_name),
+        )
         if all(math.isfinite(value) for value in values):
             ax.fill(angles, values, color=color, alpha=0.12)
         present = [
@@ -197,7 +253,7 @@ def plot_models(
         ]
         if present:
             present_angles, present_values = zip(*present, strict=True)
-            ax.scatter(present_angles, present_values, color=color, s=18, zorder=3)
+            ax.scatter(present_angles, present_values, color=color, s=28, zorder=3)
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels([])
     if log_scale:
@@ -205,24 +261,35 @@ def plot_models(
         if not positive_values:
             print("Skipping plot: log scale requires positive metrics")
             return
+        if radial_max is not None and radial_max <= 0:
+            raise SystemExit("--radial-max must be positive when using --log-scale")
         min_exponent = math.floor(math.log10(min(positive_values) * 0.92))
-        max_exponent = 0
+        ymax = radial_max if radial_max is not None else max(positive_values) * 1.08
+        max_exponent = math.ceil(math.log10(ymax))
         ymin = 10**min_exponent
-        ymax = 10**max_exponent
+        ymax = radial_max if radial_max is not None else 10**max_exponent
         ax.set_yscale("log")
         ticks = [10**exponent for exponent in range(min_exponent, max_exponent + 1)]
-        tick_labels = [rf"$10^{{{exponent}}}$" for exponent in range(min_exponent, max_exponent + 1)]
+        if plot_mode == "eval_performance":
+            tick_labels = [
+                format_decimal_power_of_ten(exponent)
+                for exponent in range(min_exponent, max_exponent + 1)
+            ]
+        else:
+            tick_labels = [rf"$10^{{{exponent}}}$" for exponent in range(min_exponent, max_exponent + 1)]
     elif plot_mode == "eval_loss":
         ymin = 0
         ymax = max(finite_values) if finite_values else 1
         ymax = ymax * 1.08 if ymax else 1
+        if radial_max is not None:
+            ymax = radial_max
         ticks = [ymax * frac for frac in (0.2, 0.4, 0.6, 0.8, 1.0)]
         tick_labels = [f"{tick:.2g}" for tick in ticks]
     else:
         ymin = 0
-        ymax = 1
-        ticks = [0.2, 0.4, 0.6, 0.8, 1.0]
-        tick_labels = [r"0.2", r"0.4", r"0.6", r"0.8", r"1.0"]
+        ymax = radial_max if radial_max is not None else max(finite_values) * 1.08 if finite_values else 1
+        ticks = [ymax * frac for frac in (0.2, 0.4, 0.6, 0.8, 1.0)]
+        tick_labels = [f"{tick:.2g}" for tick in ticks]
     ax.set_ylim(ymin, ymax)
     ax.set_yticks(ticks)
     if log_scale:
@@ -233,7 +300,10 @@ def plot_models(
             if ymin < mantissa * 10**exponent < ymax
         ]
     else:
-        minor_ticks = [tick for tick in np.linspace(ymin, ymax, 12)[1:-1] if tick not in ticks]
+        minor_ticks = [
+            0.5 * (left + right)
+            for left, right in zip(ticks, ticks[1:])
+        ]
     ax.set_yticks(minor_ticks, minor=True)
     ax.set_rlabel_position(-15)
     ax.set_yticklabels(tick_labels, color="#555555", fontsize=16)
@@ -241,13 +311,15 @@ def plot_models(
     #     label.set_zorder(20)
     #     label.set_bbox(dict(facecolor="white", alpha=0.65, edgecolor="none", pad=0.35))
     ax.set_yticklabels([], minor=True)
-    ax.set_title(rf"\textbf{{{latex_escape(format_family_title(family))}}}", pad=60)
+    title = f"{format_family_title(family)} {format_plot_mode_title(plot_mode)}"
+    ax.set_title(rf"\textbf{{{latex_escape(title)}}}", pad=60)
     ax.spines["polar"].set_color("#777777")
     ax.spines["polar"].set_alpha(0.55)
     ax.xaxis.grid(True, color="#999999", alpha=0.28, linewidth=0.75)
     ax.yaxis.grid(True, which="major", color="#666666", alpha=0.55, linewidth=1.0)
     ax.yaxis.grid(True, which="minor", color="#999999", alpha=0.42, linewidth=0.6)
-    ax.legend(loc="upper left", bbox_to_anchor=(1.06, 1.02), frameon=False)
+    legend = ax.legend(loc="upper left", bbox_to_anchor=(1.06, 1.02), frameon=False)
+    add_legend_line_outlines(legend)
 
     for angle, label in zip(angles[:-1], labels, strict=True):
         display_angle = (angle + math.pi / 2) % (2 * math.pi)
@@ -300,6 +372,7 @@ def main() -> None:
     parser.add_argument("--ordering", choices=["first", "alphabet"], default="first")
     parser.add_argument("--only-well-finetuned", action="store_true")
     parser.add_argument("--well-finetuned-tolerance", type=float, default=0.1)
+    parser.add_argument("--radial-max", type=float, help="Optional maximum value for the radial axis")
     args = parser.parse_args()
 
     results_root = args.repo_root / "outputs" / (
@@ -316,6 +389,7 @@ def main() -> None:
         args.ordering,
         args.only_well_finetuned,
         args.well_finetuned_tolerance,
+        args.radial_max,
     )
 
 

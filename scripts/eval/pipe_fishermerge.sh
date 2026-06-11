@@ -5,16 +5,26 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=00:10:00
-#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/fisher_rescaled/slurm/pipe_fishermerge_%A.out
+#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/diagonal_fisher_std_rescaled/slurm/pipe_fishermerge_%A.out
 
 set -e
 
-MODEL_NAME="llama3.1"
+MODEL_NAME="llama3.1"  # "llama3.1" or "qwen2.5"
+
 MERGE_METHOD="gradients"
-MERGE_MODE="diagonal_fisher_rescaled"
+MERGE_MODE="diagonal_fisher_std_rescaled"
 SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
 REPO_ROOT="/home/eterres/MasterThesis"
-BASE_MODEL_PATH="${REPO_ROOT}/data/models/Llama-3.1-8B"
+
+if [[ "${MODEL_NAME}" == "llama3.1" ]]; then
+    BASE_MODEL_PATH="${REPO_ROOT}/data/models/Llama-3.1-8B"
+elif [[ "${MODEL_NAME}" == "qwen2.5" ]]; then
+    BASE_MODEL_PATH="${REPO_ROOT}/data/models/Qwen-2.5-3B"
+else
+    echo "Unknown model name: ${MODEL_NAME}"
+    exit 1
+fi
+
 MODEL_DIR="${REPO_ROOT}/outputs/models/${MERGE_MODE}/${MODEL_NAME}/merged_model"
 MERGED_ADAPTER_PATH="${MODEL_DIR}/merged_adapter"
 EVAL_DIR="${REPO_ROOT}/outputs/evaluation/${MERGE_MODE}/${MODEL_NAME}"

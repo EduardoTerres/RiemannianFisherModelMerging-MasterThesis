@@ -10,10 +10,11 @@
 set -e
 
 REPO_ROOT="/home/eterres/MasterThesis"
+MODEL_NAME="llama3.1"  # "llama3.1" or "qwen2.5"
 
 python "${REPO_ROOT}/src/plots/plot_cowebs.py" \
-    --model-family llama \
-    --models pretrained finetunes standard_rescaled \
+    --model-family "${MODEL_NAME}" \
+    --models pretrained finetunes standard standard_rescaled diagonal_fisher\
     --repo-root "${REPO_ROOT}" \
     --plot-mode eval_loss \
     --log-scale \

@@ -10,6 +10,7 @@
 context/*
 data/*
 outputs/*
+_outputs_d2/*
 wandb/*
 miniconda.sh
 OrthoMerge/models/*
@@ -17,3 +18,5 @@ OrthoMerge/outputs/*
 utils/convert_llama_weights/meta_llama_model/*
 utils/convert_llama_weights/transformers/*
 __pycache__/**
+
+outputs.zip

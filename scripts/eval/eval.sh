@@ -4,8 +4,8 @@
 #SBATCH --job-name=eval
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=02:00:00
-#SBATCH --array=0-14%5
+#SBATCH --time=04:00:00
+#SBATCH --array=0-11%4
 #SBATCH --output=eval_model_%A_%a.out
 
 set -e
@@ -23,7 +23,6 @@ fi
 
 DATASETS=(
     "coqa"
-    "drop"
     "nq_open"
     "triviaqa"
     "meddialog_qsumm"
@@ -31,17 +30,14 @@ DATASETS=(
     "wikitext"
     "cnn_dailymail"
     "xsum"
-    "gsm8k"
     "babi"
     "squadv2"
     "mbpp"
     "math500"
-    "humanevalplus"
 )
 
 LM_EVAL_TASKS=(
     "coqa"
-    "drop"
     "nq_open"
     "triviaqa"
     "meddialog_qsumm"
@@ -49,30 +45,10 @@ LM_EVAL_TASKS=(
     "wikitext"
     "cnn_dailymail_abisee"
     "xsum"
-    "gsm8k"
     "babi"
     "squadv2"
     "mbpp"
     "minerva_math500"
-    "humanevalplus"
-)
-
-EVAL_BACKENDS=(
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "lm_eval"
-    "bigcode"
 )
 
 TASK_ID="${SLURM_ARRAY_TASK_ID}"
@@ -99,54 +75,32 @@ if [ -n "${PEFT_MODEL}" ]; then
     fi
 fi
 
-# Dev-only shortcut. remember to remove/empty this block for final benchmark numbers.
-# 1 4 7 8 10 11
-if [ "${TASK_ID}" = "1" ] || [ "${TASK_ID}" = "4" ] || [ "${TASK_ID}" = "7" ] || [ "${TASK_ID}" = "8" ] || [ "${TASK_ID}" = "10" ] || [ "${TASK_ID}" = "11" ]; then
-    LM_EVAL_LIMIT_ARGS=(--limit 500)
+if [ "${TASK_NAME}" = "meddialog_qsumm" ] || [ "${TASK_NAME}" = "cnn_dailymail" ] || [ "${TASK_NAME}" = "xsum" ] || [ "${TASK_NAME}" = "babi" ] || [ "${TASK_NAME}" = "squadv2" ]; then
+    LM_EVAL_LIMIT_ARGS=(--limit 1000)
 fi
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
 mkdir -p "${OUTPUT_ROOT}/${TASK_NAME}"
 
-if [ "${EVAL_BACKEND}" = "bigcode" ]; then
-    conda activate bigcode
-    cd "${REPO_ROOT}/OrthoMerge/eval/bigcode-evaluation-harness"
 
-    echo "Evaluating ${MODEL_PATH} on ${TASK_NAME} with BigCode task ${LM_EVAL_TASK}${PEFT_MODEL:+ and PEFT adapter ${PEFT_MODEL}}"
+conda activate lm-eval
+cd "${REPO_ROOT}/OrthoMerge/eval/lm-evaluation-harness"
 
-    accelerate launch main.py \
-        --model "${MODEL_PATH}" \
-        "${PEFT_ARGS[@]}" \
-        --max_length_generation 4096 \
-        --precision bf16 \
-        --tasks "${LM_EVAL_TASK}" \
-        --temperature 0.2 \
-        --n_samples 10 \
-        --batch_size 6 \
-        --metric_output_path "${OUTPUT_ROOT}/${TASK_NAME}/metrics.json" \
-        --allow_code_execution \
-        --use_auth_token
-else
-    conda activate lm-eval
-    cd "${REPO_ROOT}/OrthoMerge/eval/lm-evaluation-harness"
+echo "Evaluating ${MODEL_PATH} on ${TASK_NAME} with lm_eval task ${LM_EVAL_TASK}${PEFT_MODEL:+ and PEFT adapter ${PEFT_MODEL}}"
 
-    echo "Evaluating ${MODEL_PATH} on ${TASK_NAME} with lm_eval task ${LM_EVAL_TASK}${PEFT_MODEL:+ and PEFT adapter ${PEFT_MODEL}}"
-
-    # otherwise complains
-    if [ "${TASK_NAME}" = "mbpp" ]; then
-        export HF_ALLOW_CODE_EVAL=1
-    fi
-
-    # --gen_kwargs max_gen_toks=128 \
-
-    lm_eval --model hf \
-        --tasks "${LM_EVAL_TASK}" \
-        --model_args "pretrained=${MODEL_PATH}${PEFT_MODEL:+,peft=${PEFT_MODEL}}" \
-        --device cuda:0 \
-        --batch_size "${LM_EVAL_BATCH_SIZE}" \
-        --output_path "${OUTPUT_ROOT}/${TASK_NAME}" \
-        "${LM_EVAL_LIMIT_ARGS[@]}" \
-        --confirm_run_unsafe_code \
-        --trust_remote_code
+if [ "${TASK_NAME}" = "mbpp" ]; then
+    export HF_ALLOW_CODE_EVAL=1
 fi
+
+# --gen_kwargs max_gen_toks=128 \
+
+lm_eval --model hf \
+    --tasks "${LM_EVAL_TASK}" \
+    --model_args "pretrained=${MODEL_PATH}${PEFT_MODEL:+,peft=${PEFT_MODEL}}" \
+    --device cuda:0 \
+    --batch_size "${LM_EVAL_BATCH_SIZE}" \
+    --output_path "${OUTPUT_ROOT}/${TASK_NAME}" \
+    "${LM_EVAL_LIMIT_ARGS[@]}" \
+    --confirm_run_unsafe_code \
+    --trust_remote_code

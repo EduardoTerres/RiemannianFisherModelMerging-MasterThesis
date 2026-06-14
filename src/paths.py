@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.dataset.dataset_1 import DATASET_1_TRAIN
-from src.dataset.dataset_2 import DATASET_2_TRAIN
+from src.dataset.dataset_3 import DATASET_3_TRAIN
 
 RELATIVE_ROOTDIR = Path("../..")
 ROOTDIR = (Path(__file__) / RELATIVE_ROOTDIR).resolve()
@@ -80,24 +80,25 @@ LLAMA_D1_PRETRAINED_FISHER_PATHS = [
     for task in LLAMA_D1_TASKS
 ]
 
-# LLAMA WITH DATASET 2
-LLAMA_D2_ADAPTERS_FOLDER = f"{MODELS_DIR}/Llama-3.1-8B_OFT_dataset2_adapters"
-LLAMA_D2_TASKS = [tag for tag, *_ in DATASET_2_TRAIN]
-LLAMA_D2_ADAPTER_PATHS = [
-    f"{LLAMA_D2_ADAPTERS_FOLDER}/llama3-1_8b_finetune_{adapter_task_name(task)}"
-    for task in LLAMA_D2_TASKS
+# LLAMA WITH DATASET 3
+# its dataset2
+LLAMA_D3_ADAPTERS_FOLDER = f"{MODELS_DIR}/Llama-3.1-8B_OFT_dataset2_adapters"
+LLAMA_D3_TASKS = [tag for tag, *_ in DATASET_3_TRAIN]
+LLAMA_D3_ADAPTER_PATHS = [
+    f"{LLAMA_D3_ADAPTERS_FOLDER}/llama3-1_8b_finetune_{adapter_task_name(task)}"
+    for task in LLAMA_D3_TASKS
 ]
-LLAMA_D2_FISHER_PATHS = [
+LLAMA_D3_FISHER_PATHS = [
     fisher_path(
         "llama3.1", task, f"llama3-1_8b_finetune_{adapter_task_name(task)}", "finetuned"
     )
-    for task in LLAMA_D2_TASKS
+    for task in LLAMA_D3_TASKS
 ]
-LLAMA_D2_PRETRAINED_FISHER_PATHS = [
+LLAMA_D3_PRETRAINED_FISHER_PATHS = [
     fisher_path(
         "llama3.1", task, f"llama3-1_8b_finetune_{adapter_task_name(task)}", "pretrained"
     )
-    for task in LLAMA_D2_TASKS
+    for task in LLAMA_D3_TASKS
 ]
 
 # QWEN WITH DATASET 1
@@ -122,24 +123,25 @@ QWEN_D1_PRETRAINED_FISHER_PATHS = [
     for task in QWEN_D1_TASKS
 ]
 
-# QWEN WITH DATASET 2
-QWEN_D2_ADAPTERS_FOLDER = f"{MODELS_DIR}/Qwen-2.5-3B_OFT_dataset2_adapters"
-QWEN_D2_TASKS = [tag for tag, *_ in DATASET_2_TRAIN]
-QWEN_D2_ADAPTER_PATHS = [
-    f"{QWEN_D2_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_{adapter_task_name(task)}"
-    for task in QWEN_D2_TASKS
+# QWEN WITH DATASET 3
+# its dataset2
+QWEN_D3_ADAPTERS_FOLDER = f"{MODELS_DIR}/Qwen-2.5-3B_OFT_dataset2_adapters"
+QWEN_D3_TASKS = [tag for tag, *_ in DATASET_3_TRAIN]
+QWEN_D3_ADAPTER_PATHS = [
+    f"{QWEN_D3_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_{adapter_task_name(task)}"
+    for task in QWEN_D3_TASKS
 ]
-QWEN_D2_FISHER_PATHS = [
+QWEN_D3_FISHER_PATHS = [
     fisher_path(
         "qwen2.5", task, f"qwen2.5_3b_finetune_{adapter_task_name(task)}", "finetuned"
     )
-    for task in QWEN_D2_TASKS
+    for task in QWEN_D3_TASKS
 ]
-QWEN_D2_PRETRAINED_FISHER_PATHS = [
+QWEN_D3_PRETRAINED_FISHER_PATHS = [
     fisher_path(
         "qwen2.5", task, f"qwen2.5_3b_finetune_{adapter_task_name(task)}", "pretrained"
     )
-    for task in QWEN_D2_TASKS
+    for task in QWEN_D3_TASKS
 ]
 
 # MODEL FAMILIES for importing
@@ -160,23 +162,23 @@ MODEL_FAMILIES_D1 = {
     ),
 }
 
-MODEL_FAMILIES_D2 = {
+MODEL_FAMILIES_D3 = {
     "llama3.1": ModelFamily(
         name="llama3.1",
         base_model_path=LLAMA_BASE_MODEL_PATH,
-        adapter_paths=LLAMA_D2_ADAPTER_PATHS,
-        fisher_finetuned_paths=LLAMA_D2_FISHER_PATHS,
-        fisher_pretrained_paths=LLAMA_D2_PRETRAINED_FISHER_PATHS,
+        adapter_paths=LLAMA_D3_ADAPTER_PATHS,
+        fisher_finetuned_paths=LLAMA_D3_FISHER_PATHS,
+        fisher_pretrained_paths=LLAMA_D3_PRETRAINED_FISHER_PATHS,
     ),
     "qwen2.5": ModelFamily(
         name="qwen2.5",
         base_model_path=QWEN_BASE_MODEL_PATH,
-        adapter_paths=QWEN_D2_ADAPTER_PATHS,
-        fisher_finetuned_paths=QWEN_D2_FISHER_PATHS,
-        fisher_pretrained_paths=QWEN_D2_PRETRAINED_FISHER_PATHS,
+        adapter_paths=QWEN_D3_ADAPTER_PATHS,
+        fisher_finetuned_paths=QWEN_D3_FISHER_PATHS,
+        fisher_pretrained_paths=QWEN_D3_PRETRAINED_FISHER_PATHS,
     ),
 }
 
-MODEL_FAMILIES_D2_FISHER_FINETUNES = with_default_fisher(MODEL_FAMILIES_D2, "finetuned")
-MODEL_FAMILIES_D2_FISHER_PRETRAINED = with_default_fisher(MODEL_FAMILIES_D2, "pretrained")
-MODEL_FAMILIES = MODEL_FAMILIES_D2_FISHER_FINETUNES
+MODEL_FAMILIES_D3_FISHER_FINETUNES = with_default_fisher(MODEL_FAMILIES_D3, "finetuned")
+MODEL_FAMILIES_D3_FISHER_PRETRAINED = with_default_fisher(MODEL_FAMILIES_D3, "pretrained")
+MODEL_FAMILIES = MODEL_FAMILIES_D3_FISHER_FINETUNES

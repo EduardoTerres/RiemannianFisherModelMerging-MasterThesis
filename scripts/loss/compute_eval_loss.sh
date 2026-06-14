@@ -5,20 +5,18 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=01:00:00
-#SBATCH --array=0-14%5
+#SBATCH --array=6,7
 #SBATCH --output=/gpfs/home6/eterres/MasterThesis/outputs/eval_loss/slurm/eval_loss_%A_%a.out
-
-# 0,2,4,5,6,10,12
 
 set -e
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_ROOT="${REPO_ROOT}/outputs/eval_loss"
 DATASET_CACHE_DIR="${REPO_ROOT}/data/hf_cache"
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
-MODEL="qwen2.5"  # "llama3.1" or "qwen2.5"
+MODEL="llama3.1"  # "llama3.1" or "qwen2.5"
 LOSS_BATCH_SIZE=4
 MODEL_SOURCE="adapter"
-MERGE_MODE="diagonal_fisher_std_rescaled"
+MERGE_MODE="standard_rescaled"
 PEFT_MODEL="${REPO_ROOT}/outputs/models/${MERGE_MODE}/${MODEL}/merged_model/merged_adapter"
 RUN_NAME="${MERGE_MODE}"
 

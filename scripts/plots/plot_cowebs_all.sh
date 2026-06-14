@@ -17,7 +17,7 @@ python "${REPO_ROOT}/src/plots/plot_cowebs.py" \
     --models standard_rescaled diagonal_fisher\
     --legend-names "OrthoMerge" "Diagonal Fisher (Ours)"\
     --repo-root "${REPO_ROOT}" \
-    --plot-mode eval_loss \
+    --plot-mode eval_performance eval_loss \
     --log-scale \
     --ordering alphabet
 
@@ -27,6 +27,6 @@ python "${REPO_ROOT}/src/plots/plot_cowebs.py" \
     --models standard_rescaled diagonal_fisher\
     --legend-names "OrthoMerge" "Diagonal Fisher (Ours)"\
     --repo-root "${REPO_ROOT}" \
-    --plot-mode eval_loss \
+    --plot-mode eval_performance eval_loss\
     --log-scale \
     --ordering alphabet

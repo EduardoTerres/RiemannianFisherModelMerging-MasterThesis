@@ -16,11 +16,11 @@ MODEL_NAME="qwen2.5"
 
 if [ ${MODEL_NAME} == "llama3.1" ]; then
     MODEL_PATH="${REPO_ROOT}/data/models/Llama-3.1-8B"
-    ADAPTER_ROOT="${REPO_ROOT}/data/models/Llama-3.1-8B_OFT_dataset2_adapters"
-    MODEL_NAME_ADAPTERS_PREFIX="llama3-1_8b_finetune"  # TODO these files
+    ADAPTER_ROOT="${REPO_ROOT}/data/models/Llama-3.1-8B_OFT_dataset3_adapters"
+    MODEL_NAME_ADAPTERS_PREFIX="llama3-1_8b_finetune" # TODO rename to llama3.1_8b_finetune
 elif [ ${MODEL_NAME} == "qwen2.5" ]; then
     MODEL_PATH="${REPO_ROOT}/data/models/Qwen-2.5-3B"
-    ADAPTER_ROOT="${REPO_ROOT}/data/models/Qwen-2.5-3B_OFT_dataset2_adapters"
+    ADAPTER_ROOT="${REPO_ROOT}/data/models/Qwen-2.5-3B_OFT_dataset3_adapters"
     MODEL_NAME_ADAPTERS_PREFIX="qwen2.5_3b_finetune"
 else
     echo "Unsupported model family: ${MODEL_NAME}"

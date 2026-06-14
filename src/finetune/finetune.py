@@ -26,16 +26,16 @@ from transformers import (
     TrainingArguments,
 )
 
-from src.dataset.dataset_2 import DATASET_2_TRAIN, doc_to_text, expand_doc
+from src.dataset.dataset_3 import DATASET_3_TRAIN, doc_to_text, expand_doc
 from src.paths import (
-    LLAMA_D2_ADAPTERS_FOLDER as LLAMA_ADAPTERS_FOLDER,
+    LLAMA_D3_ADAPTERS_FOLDER as LLAMA_ADAPTERS_FOLDER,
     LLAMA_BASE_MODEL_PATH,
-    QWEN_D2_ADAPTERS_FOLDER as QWEN_ADAPTERS_FOLDER,
+    QWEN_D3_ADAPTERS_FOLDER as QWEN_ADAPTERS_FOLDER,
     QWEN_BASE_MODEL_PATH,
     ROOTDIR,
 )
 
-NEW_ADAPTER_TASKS = DATASET_2_TRAIN
+NEW_ADAPTER_TASKS = DATASET_3_TRAIN
 
 WANDB_PROJECT = "thesis-finetunes"
 WANDB_ENTITY = None
@@ -103,7 +103,7 @@ MODELS = {
         base_model_path=LLAMA_BASE_MODEL_PATH,
         adapters_folder=LLAMA_ADAPTERS_FOLDER,
         reference_adapter_name="llama3-1_8b_finetune_numinamath",  # copies OFT adapters format
-        output_dir_name="Llama-3.1-8B_OFT_dataset2_adapters",
+        output_dir_name="Llama-3.1-8B_OFT_dataset3_adapters",
         output_prefix="llama3-1_8b",
     ),
     "qwen2.5": FinetuneModel(
@@ -111,7 +111,7 @@ MODELS = {
         base_model_path=QWEN_BASE_MODEL_PATH,
         adapters_folder=QWEN_ADAPTERS_FOLDER,
         reference_adapter_name="qwen2.5_3b_finetune_numinamath",  # copies OFT adapters format
-        output_dir_name="Qwen-2.5-3B_OFT_dataset2_adapters",
+        output_dir_name="Qwen-2.5-3B_OFT_dataset3_adapters",
         output_prefix="qwen2.5_3b",
     ),
 }

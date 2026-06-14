@@ -12,11 +12,11 @@ from tqdm import tqdm
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.dataset.dataset_2 import DATASET_2_TEST as DATASET_TEST, build_loader
+from src.dataset.dataset_3 import DATASET_3_TEST as DATASET_TEST, build_loader
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compute target-token eval loss on dataset_2 tests.")
+    parser = argparse.ArgumentParser(description="Compute target-token eval loss on dataset_3 tests.")
     parser.add_argument(
         "--model-source",
         "--eval-type",
@@ -42,10 +42,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
-    from src.paths import MODEL_FAMILIES_D2
+    from src.paths import MODEL_FAMILIES_D3
 
     family_key = args.model_name or args.model
-    family = MODEL_FAMILIES_D2[family_key]
+    family = MODEL_FAMILIES_D3[family_key]
     args.model_name = family.name
     args.model_path = args.model_path or Path(family.base_model_path)
     args.run_name = args.run_name or args.model_source
@@ -64,6 +64,7 @@ def load_model(args: argparse.Namespace):
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    print(f"Loading model: {args.model_path}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -74,6 +75,7 @@ def load_model(args: argparse.Namespace):
         trust_remote_code=True,
     )
     if args.peft_model:
+        print(f"Loading merged adapter: {args.peft_model}")
         model = PeftModel.from_pretrained(model, args.peft_model, is_trainable=False)
         model.enable_adapter_layers()
     model.to(args.device)
@@ -82,9 +84,9 @@ def load_model(args: argparse.Namespace):
 
 
 def adapter_path_for_task(args: argparse.Namespace, task: str) -> Path:
-    from src.paths import MODEL_FAMILIES_D2
+    from src.paths import MODEL_FAMILIES_D3
 
-    family = MODEL_FAMILIES_D2[args.model_name]
+    family = MODEL_FAMILIES_D3[args.model_name]
     task_names = [task_name for task_name, *_ in DATASET_TEST]
     task_id = task_names.index(task)
     return Path(family.adapter_paths[task_id])

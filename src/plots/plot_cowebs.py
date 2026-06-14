@@ -15,7 +15,7 @@ from matplotlib.colors import to_rgb
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from dataset.dataset_2 import DATASET_2_PLOT_LABELS, DATASET_2_PLOT_METRICS
+from dataset.dataset_3 import DATASET_3_PLOT_LABELS, DATASET_3_PLOT_METRICS
 
 RESULT_TASK_ALIASES = {
     "cnn_dailymail": ("cnn_dailymail_abisee",),
@@ -33,10 +33,13 @@ rcParams.update(
         "text.usetex": True,
         "font.family": "serif",
         "font.serif": ["Computer Modern Roman"],
-        "axes.titlesize": 18,
-        "axes.labelsize": 12,
-        "xtick.labelsize": 11,
-        "ytick.labelsize": 10,
+        "font.weight": "bold",
+        "axes.labelweight": "bold",
+        "axes.titleweight": "bold",
+        "axes.titlesize": 20,
+        "axes.labelsize": 14,
+        "xtick.labelsize": 13,
+        "ytick.labelsize": 12,
     }
 )
 
@@ -76,8 +79,12 @@ def latex_escape(text: str) -> str:
     return text.replace("_", r"\_")
 
 
+def latex_bold(text: str) -> str:
+    return rf"\textbf{{{latex_escape(text)}}}"
+
+
 def format_model_title(name: str) -> str:
-    return name.replace("_", r"\_")
+    return latex_bold(name)
 
 
 def filename_model_name(name: str) -> str:
@@ -100,7 +107,7 @@ def format_decimal_power_of_ten(exponent: int) -> str:
 
 def collect_metrics(model_dir: Path, plot_mode: str) -> dict[str, float]:
     metrics = {}
-    for task, (performance_metric, preprocess) in DATASET_2_PLOT_METRICS.items():
+    for task, (performance_metric, preprocess) in DATASET_3_PLOT_METRICS.items():
         metric = "eval_loss" if plot_mode == "eval_loss" else performance_metric
         value = read_metric(model_dir, task, metric)
         if value is not None:
@@ -112,7 +119,7 @@ def collect_metrics(model_dir: Path, plot_mode: str) -> dict[str, float]:
 
 
 def method_colors(model_metrics: dict[str, dict[str, float]]) -> dict[str, str]:
-    preferred_colors = ["#3f455f", "#7db69f", "#ef7f5f", "#f7d488", "#fff8e8"]
+    preferred_colors = ["#3f455f", "#ef7f5f", "#7db69f", "#f7d488", "#fff8e8"]
     extra_colors = plt.get_cmap("tab20").colors
     return {
         model_name: (
@@ -172,9 +179,9 @@ def select_runs(results_root: Path, family: str, models: Iterable[str] | None) -
     return runs
 
 
-def plot_models(
+def draw_models(
+    ax,
     runs: list[tuple[str, Path]],
-    output_dir: Path,
     family: str,
     plot_mode: str,
     log_scale: bool = False,
@@ -182,8 +189,14 @@ def plot_models(
     only_well_finetuned: bool = False,
     well_finetuned_tolerance: float = 0.1,
     radial_max: float | None = None,
-) -> None:
+    print_title: bool = False,
+    legend_names: list[str] | None = None,
+) -> tuple[list, list]:
     model_metrics = {label: collect_metrics(model_dir, plot_mode) for label, model_dir in runs}
+    legend_labels = {
+        run_name: legend_name
+        for (run_name, _), legend_name in zip(runs, legend_names or [], strict=False)
+    }
     if only_well_finetuned:
         pretrained = model_metrics.get("pretrained")
         finetunes = model_metrics.get("finetunes")
@@ -191,7 +204,7 @@ def plot_models(
             raise SystemExit("--only-well-finetuned requires runs named pretrained and finetunes")
         keep = {
             task
-            for task in DATASET_2_PLOT_METRICS
+            for task in DATASET_3_PLOT_METRICS
             if task in pretrained
             and task in finetunes
             and (
@@ -208,7 +221,7 @@ def plot_models(
     first_metrics = model_metrics[runs[0][0]]
     all_labels = [
         task
-        for task in DATASET_2_PLOT_METRICS
+        for task in DATASET_3_PLOT_METRICS
         if any(task in metrics for metrics in model_metrics.values())
     ]
     if ordering == "alphabet":
@@ -218,7 +231,7 @@ def plot_models(
         labels += sorted(task for task in all_labels if task not in first_metrics)
     if not labels:
         print("Skipping plot: found 0 metrics")
-        return
+        return [], []
     finite_values = [
         value
         for metrics in model_metrics.values()
@@ -229,7 +242,6 @@ def plot_models(
     angles = [2 * math.pi * idx / len(labels) for idx in range(len(labels))]
     angles += angles[:1]
 
-    fig, ax = plt.subplots(figsize=(11.5, 9.5), subplot_kw={"projection": "polar"})
     ax.set_theta_offset(math.pi / 2)
     ax.set_theta_direction(1)
     colors = method_colors(model_metrics)
@@ -241,8 +253,8 @@ def plot_models(
             angles,
             values,
             color=color,
-            linewidth=3.0,
-            label=format_model_title(model_name),
+            linewidth=3.8,
+            label=format_model_title(legend_labels.get(model_name, model_name)),
         )
         if all(math.isfinite(value) for value in values):
             ax.fill(angles, values, color=color, alpha=0.12)
@@ -253,7 +265,7 @@ def plot_models(
         ]
         if present:
             present_angles, present_values = zip(*present, strict=True)
-            ax.scatter(present_angles, present_values, color=color, s=28, zorder=3)
+            ax.scatter(present_angles, present_values, color=color, s=42, zorder=3)
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels([])
     if log_scale:
@@ -272,11 +284,14 @@ def plot_models(
         ticks = [10**exponent for exponent in range(min_exponent, max_exponent + 1)]
         if plot_mode == "eval_performance":
             tick_labels = [
-                format_decimal_power_of_ten(exponent)
+                latex_bold(format_decimal_power_of_ten(exponent))
                 for exponent in range(min_exponent, max_exponent + 1)
             ]
         else:
-            tick_labels = [rf"$10^{{{exponent}}}$" for exponent in range(min_exponent, max_exponent + 1)]
+            tick_labels = [
+                latex_bold(format_decimal_power_of_ten(exponent))
+                for exponent in range(min_exponent, max_exponent + 1)
+            ]
     elif plot_mode == "eval_loss":
         ymin = 0
         ymax = max(finite_values) if finite_values else 1
@@ -284,12 +299,12 @@ def plot_models(
         if radial_max is not None:
             ymax = radial_max
         ticks = [ymax * frac for frac in (0.2, 0.4, 0.6, 0.8, 1.0)]
-        tick_labels = [f"{tick:.2g}" for tick in ticks]
+        tick_labels = [latex_bold(f"{tick:.2g}") for tick in ticks]
     else:
         ymin = 0
         ymax = radial_max if radial_max is not None else max(finite_values) * 1.08 if finite_values else 1
         ticks = [ymax * frac for frac in (0.2, 0.4, 0.6, 0.8, 1.0)]
-        tick_labels = [f"{tick:.2g}" for tick in ticks]
+        tick_labels = [latex_bold(f"{tick:.2g}") for tick in ticks]
     ax.set_ylim(ymin, ymax)
     ax.set_yticks(ticks)
     if log_scale:
@@ -306,21 +321,19 @@ def plot_models(
         ]
     ax.set_yticks(minor_ticks, minor=True)
     ax.set_rlabel_position(-15)
-    ax.set_yticklabels(tick_labels, color="#555555", fontsize=16)
+    ax.set_yticklabels(tick_labels, color="#555555", fontsize=24, fontweight="bold")
     # for label in ax.get_yticklabels():
     #     label.set_zorder(20)
     #     label.set_bbox(dict(facecolor="white", alpha=0.65, edgecolor="none", pad=0.35))
     ax.set_yticklabels([], minor=True)
-    title = f"{format_family_title(family)} {format_plot_mode_title(plot_mode)}"
-    ax.set_title(rf"\textbf{{{latex_escape(title)}}}", pad=60)
+    if print_title:
+        title = f"{format_family_title(family)} {format_plot_mode_title(plot_mode)}"
+        ax.set_title(latex_bold(title), pad=60)
     ax.spines["polar"].set_color("#777777")
     ax.spines["polar"].set_alpha(0.55)
     ax.xaxis.grid(True, color="#999999", alpha=0.28, linewidth=0.75)
     ax.yaxis.grid(True, which="major", color="#666666", alpha=0.55, linewidth=1.0)
     ax.yaxis.grid(True, which="minor", color="#999999", alpha=0.42, linewidth=0.6)
-    legend = ax.legend(loc="upper left", bbox_to_anchor=(1.06, 1.02), frameon=False)
-    add_legend_line_outlines(legend)
-
     for angle, label in zip(angles[:-1], labels, strict=True):
         display_angle = (angle + math.pi / 2) % (2 * math.pi)
         if math.pi / 2 < display_angle < 3 * math.pi / 2:
@@ -332,27 +345,95 @@ def plot_models(
         ax.text(
             angle,
             ymax * 1.14,
-            DATASET_2_PLOT_LABELS.get(label, latex_escape(label)),
+            latex_bold(DATASET_3_PLOT_LABELS.get(label, label)),
             ha=ha,
             va="center",
-            fontsize=12,
+            fontsize=20,
+            fontweight="bold",
             clip_on=False,
         )
 
-    fig.subplots_adjust(left=0.08, right=0.76, top=0.86, bottom=0.12)
+    return ax.get_legend_handles_labels()
+
+
+def plot_models(
+    runs_by_mode: dict[str, list[tuple[str, Path]]],
+    output_dir: Path,
+    family: str,
+    plot_modes: list[str],
+    log_scale: bool = False,
+    ordering: str = "first",
+    only_well_finetuned: bool = False,
+    well_finetuned_tolerance: float = 0.1,
+    radial_max: float | None = None,
+    print_title: bool = False,
+    legend_names: list[str] | None = None,
+    no_legend: bool = False,
+) -> None:
+    fig, axes = plt.subplots(
+        1,
+        len(plot_modes),
+        figsize=(11.5 * len(plot_modes), 9.5),
+        subplot_kw={"projection": "polar"},
+    )
+    if len(plot_modes) == 1:
+        axes = [axes]
+
+    handles, labels = [], []
+    for ax, plot_mode in zip(axes, plot_modes, strict=True):
+        effective_radial_max = radial_max
+        if len(plot_modes) > 1 and plot_mode == "eval_performance" and effective_radial_max is None:
+            effective_radial_max = 1.0
+        handles, labels = draw_models(
+            ax,
+            runs_by_mode[plot_mode],
+            family,
+            plot_mode,
+            log_scale and (len(plot_modes) == 1 or plot_mode == "eval_loss"),
+            ordering,
+            only_well_finetuned,
+            well_finetuned_tolerance,
+            effective_radial_max,
+            print_title,
+            legend_names,
+        )
+
+    if not no_legend and handles:
+        if len(plot_modes) == 2:
+            legend = fig.legend(
+                handles,
+                labels,
+                loc="upper center",
+                bbox_to_anchor=(0.5, 0.98),
+                ncol=1,
+                frameon=False,
+                prop={"weight": "bold", "size": 30},
+            )
+        else:
+            legend = fig.legend(
+                handles,
+                labels,
+                loc="lower center",
+                ncol=len(labels),
+                frameon=False,
+                prop={"weight": "bold", "size": 30},
+            )
+        add_legend_line_outlines(legend)
+
+    fig.subplots_adjust(left=0.04, right=0.96, top=0.88, bottom=0.16, wspace=0.42)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = (
         "coweb_"
-        + plot_mode
+        + "_".join(plot_modes)
         + "_"
         + filename_model_name(family)
         + "_"
-        + "_".join(filename_model_name(name) for name in model_metrics)
+        + "_".join(filename_model_name(name) for name, _ in runs_by_mode[plot_modes[0]])
     )
     png_path = output_dir / f"{stem}.png"
     pdf_path = output_dir / f"{stem}.pdf"
-    fig.savefig(png_path, dpi=200, bbox_inches="tight")
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
     fig.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved spiderweb plot to {png_path} and {pdf_path}")
@@ -367,21 +448,29 @@ def main() -> None:
         nargs="+",
         help="Evaluation output directories under outputs/evaluation or outputs/eval_loss.",
     )
-    parser.add_argument("--plot-mode", choices=PLOT_MODES, default="eval_performance")
+    parser.add_argument("--plot-mode", choices=PLOT_MODES, nargs="+", default=["eval_performance"])
     parser.add_argument("--log-scale", "--log_scale", action="store_true", help="Use a log-scaled radial axis")
     parser.add_argument("--ordering", choices=["first", "alphabet"], default="first")
     parser.add_argument("--only-well-finetuned", action="store_true")
     parser.add_argument("--well-finetuned-tolerance", type=float, default=0.1)
     parser.add_argument("--radial-max", type=float, help="Optional maximum value for the radial axis")
+    parser.add_argument("--print-title", action="store_true", help="Print the plot title")
+    parser.add_argument("--legend-names", nargs="+", help="Legend labels in the same order as --models")
+    parser.add_argument("--no-legend", action="store_true", help="Do not print the legend")
     args = parser.parse_args()
 
-    results_root = args.repo_root / "outputs" / (
-        "evaluation" if args.plot_mode == "eval_performance" else "eval_loss"
-    )
     output_dir = args.repo_root / "outputs" / "coweb_plots"
-    runs = select_runs(results_root, args.model_family, args.models)
+    runs_by_mode = {}
+    for plot_mode in args.plot_mode:
+        results_root = args.repo_root / "outputs" / (
+            "evaluation" if plot_mode == "eval_performance" else "eval_loss"
+        )
+        runs_by_mode[plot_mode] = select_runs(results_root, args.model_family, args.models)
+    runs = runs_by_mode[args.plot_mode[0]]
+    if args.legend_names and len(args.legend_names) != len(runs):
+        raise SystemExit("--legend-names must have the same length as --models")
     plot_models(
-        runs,
+        runs_by_mode,
         output_dir,
         args.model_family,
         args.plot_mode,
@@ -390,6 +479,9 @@ def main() -> None:
         args.only_well_finetuned,
         args.well_finetuned_tolerance,
         args.radial_max,
+        args.print_title,
+        args.legend_names,
+        args.no_legend,
     )
 
 

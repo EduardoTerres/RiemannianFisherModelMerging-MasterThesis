@@ -16,10 +16,11 @@ from peft import PeftModel
 
 from src.merging import OFTMerging, WudiOFTMerging, OFTKarcherMerging, AdaMergingPP
 from src.utils import parse_device
-from src.paths import MODEL_FAMILIES_D2_FISHER_PRETRAINED as MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
+from src.paths import MODEL_FAMILIES_D3_FISHER_PRETRAINED as MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
 # from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
-from src.dataset.dataset_2 import DATASET_2_TEST, build_loader
+from src.dataset.dataset_3 import DATASET_3_TEST, build_loader
 
+DATASET_TEST = DATASET_3_TEST
 
 def _build_alpha_optimizer_inputs(
     model_family: ModelFamily,
@@ -38,7 +39,7 @@ def _build_alpha_optimizer_inputs(
             dataset_path=ds_path,
             dataset_name=ds_name,
             split=split,
-            doc_to_text=doc_to_text,
+            doc_to_text_fn=doc_to_text,
             tokenizer=tokenizer,
             num_samples=num_samples,
             batch_size=batch_size,
@@ -75,7 +76,7 @@ def _build_adamerging(
             dataset_path=ds_path,
             dataset_name=ds_name,
             split=split,
-            doc_to_text=doc_to_text,
+            doc_to_text_fn=doc_to_text,
             tokenizer=tokenizer,
             num_samples=num_samples,
             batch_size=batch_size,

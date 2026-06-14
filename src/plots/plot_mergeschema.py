@@ -17,9 +17,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = REPO_ROOT / "outputs" / "mergeschema"
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.dataset.dataset_2 import DATASET_2_TEST, DATASET_2_TRAIN, build_loader
+from src.dataset.dataset_3 import DATASET_3_TEST, DATASET_3_TRAIN, build_loader
 from src.merging import OFTMerging
-from src.paths import MODEL_FAMILIES_D2
+from src.paths import MODEL_FAMILIES_D3
 
 WATER_CMAP = LinearSegmentedColormap.from_list(
     "water_dark_to_white",
@@ -49,13 +49,13 @@ def latex_escape(text: str) -> str:
 
 
 def task_specs(names: list[str]):
-    specs = {task: spec for task, *spec in DATASET_2_TEST}
+    specs = {task: spec for task, *spec in DATASET_3_TEST}
     return [(task, *specs[task]) for task in names]
 
 
 def adapter_paths_for_tasks(model_name: str, names: list[str]) -> list[str]:
-    family = MODEL_FAMILIES_D2[model_name]
-    adapter_by_task = {task: family.adapter_paths[i] for i, (task, *_) in enumerate(DATASET_2_TRAIN)}
+    family = MODEL_FAMILIES_D3[model_name]
+    adapter_by_task = {task: family.adapter_paths[i] for i, (task, *_) in enumerate(DATASET_3_TRAIN)}
     return [adapter_by_task[name] for name in names]
 
 
@@ -141,7 +141,7 @@ def require_cuda(device: str) -> str:
 
 def evaluate_grid(args: argparse.Namespace, cache: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
     args.device = require_cuda(args.device)
-    family = MODEL_FAMILIES_D2[args.model_name]
+    family = MODEL_FAMILIES_D3[args.model_name]
     names = args.tasks
     selected = task_specs(names)
     adapter_paths = adapter_paths_for_tasks(args.model_name, names)
@@ -358,8 +358,8 @@ def plot_manifold_3d(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
-    parser.add_argument("--model-name", default="llama3.1", choices=list(MODEL_FAMILIES_D2))
-    parser.add_argument("--tasks", nargs=2, default=["drop", "triviaqa"])
+    parser.add_argument("--model-name", default="llama3.1", choices=list(MODEL_FAMILIES_D3))
+    parser.add_argument("--tasks", nargs=2, default=["coqa", "triviaqa"])
     parser.add_argument("--num-samples", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--max-length", type=int, default=512)

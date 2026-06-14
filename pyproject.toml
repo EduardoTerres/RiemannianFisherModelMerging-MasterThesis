@@ -35,3 +35,6 @@ line-length = 100
 # Enable Flake8 rules (E, F) by default
 select = ["E", "F", "W"] 
 ignore = ["E203"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

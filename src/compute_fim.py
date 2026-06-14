@@ -14,8 +14,8 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from src.paths import FISHERS_DIR as FIM_OUTPUT_ROOT, MODEL_FAMILIES_D2 as MODEL_FAMILIES
-from src.dataset.dataset_2 import DATASET_2_TRAIN as TASKS, build_loader
+from src.paths import FISHERS_DIR as FIM_OUTPUT_ROOT, MODEL_FAMILIES_D3 as MODEL_FAMILIES
+from src.dataset.dataset_3 import DATASET_3_TRAIN as TASKS, build_loader
 from src.utils import parse_device
 
 WANDB_PROJECT = "fim"

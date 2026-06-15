@@ -451,22 +451,12 @@ def save_paired_xy_plot(
     fisher_x = np.asarray(kl_rows["diagonal_fisher"], dtype=float)
     fisher_y = np.asarray(geodesic_rows["diagonal_fisher"], dtype=float)
 
-    fig, ax = plt.subplots(figsize=(4.2, 3.3))
+    fig, ax = plt.subplots(figsize=(4.8, 4.3))
     for x0, y0, x1, y1 in zip(ortho_x, ortho_y, fisher_x, fisher_y, strict=True):
         ax.plot([x0, x1], [y0, y1], color="0.55", linewidth=0.8, alpha=0.65, zorder=1)
     for task, x0, y0, x1, y1 in zip(
         TASKS, ortho_x, ortho_y, fisher_x, fisher_y, strict=True
     ):
-        ax.annotate(
-            task.replace("_", r"\_"),
-            (x0, y0),
-            xytext=(0, 5),
-            textcoords="offset points",
-            ha="center",
-            va="bottom",
-            fontsize=6,
-            color="black",
-        )
         ax.annotate(
             task.replace("_", r"\_"),
             (x1, y1),
@@ -591,6 +581,7 @@ def save_performance_ratio_kl_plot(
 ) -> dict[str, float]:
     import matplotlib.pyplot as plt
     from matplotlib.ticker import LogFormatterSciNotation, LogLocator
+    from matplotlib.lines import Line2D
 
     _configure_latex_plot(plt)
     metrics = _performance_metrics(family_name)
@@ -623,28 +614,51 @@ def save_performance_ratio_kl_plot(
         "slope": float("nan"),
         "intercept": float("nan"),
     }
-    ax.scatter(
-        x_fit,
-        y_fit,
-        s=54,
-        marker="^",
-        color="#2A9D8F",
-        edgecolor="black",
-        linewidth=0.6,
-        alpha=0.9,
+    markers = ("s", "^", "D", "P", "X", "v", "<", ">", "*", "h", "p", "8")
+    colors = (
+        "#0072B2",
+        "#D55E00",
+        "#009E73",
+        "#CC79A7",
+        "#E69F00",
+        "#56B4E9",
+        "#C8B400",
+        "#6A3D9A",
+        "#4D4D4D",
+        "#A6761D",
+        "#E7298A",
+        "#1B9E77",
     )
+    legend_handles = []
     for label, x_value, y_value in zip(labels, x_values, y_values, strict=True):
         if not (np.isfinite(x_value) and np.isfinite(y_value) and y_value > 0):
             continue
-        ax.annotate(
-            _performance_plot_label(label),
-            (x_value, y_value),
-            xytext=(0, 5),
-            textcoords="offset points",
-            ha="center",
-            va="bottom",
-            fontsize=7,
-            fontweight="bold",
+        style_idx = len(legend_handles)
+        marker = markers[style_idx % len(markers)]
+        color = colors[style_idx % len(colors)]
+        ax.scatter(
+            x_value,
+            y_value,
+            s=54,
+            marker=marker,
+            color=color,
+            edgecolor="black",
+            linewidth=0.6,
+            alpha=0.9,
+            zorder=3,
+        )
+        legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker=marker,
+                color="none",
+                markerfacecolor=color,
+                markeredgecolor="black",
+                markeredgewidth=0.6,
+                markersize=5,
+                label=_performance_plot_label(label),
+            )
         )
     if x_fit.size >= 2:
         try:
@@ -672,6 +686,23 @@ def save_performance_ratio_kl_plot(
             va="top",
             ha="right",
             fontsize=9,
+        )
+    if legend_handles:
+        ax.legend(
+            handles=legend_handles,
+            frameon=True,
+            fancybox=False,
+            framealpha=0.78,
+            facecolor="white",
+            edgecolor="0.75",
+            fontsize=6.5,
+            loc="upper right",
+            bbox_to_anchor=(0.98, 0.86),
+            borderaxespad=0.0,
+            handletextpad=0.35,
+            labelspacing=0.18,
+            columnspacing=0.7,
+            ncol=2,
         )
     ax.set_xlabel(r"Performance ratio")
     ax.set_ylabel(r"KL ratio")

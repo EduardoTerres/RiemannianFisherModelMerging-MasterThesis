@@ -404,11 +404,22 @@ def plot_models(
                 handles,
                 labels,
                 loc="upper center",
-                bbox_to_anchor=(0.5, 0.98),
+                bbox_to_anchor=(0.49, 0.98),
                 ncol=1,
-                frameon=False,
+                frameon=True,
+                fancybox=False,
+                framealpha=0.78,
+                facecolor="white",
+                edgecolor="0.4",
+                handlelength=1.2,
+                borderpad=0.4,
                 prop={"weight": "bold", "size": 30},
             )
+            legend_handles = getattr(legend, "legend_handles", None)
+            if legend_handles is None:
+                legend_handles = legend.legendHandles
+            for handle in legend_handles:
+                handle.set_linewidth(6.0)
         else:
             legend = fig.legend(
                 handles,

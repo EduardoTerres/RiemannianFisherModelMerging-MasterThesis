@@ -23,6 +23,7 @@ MergeMode = Literal[
     "standard",
     "standard_rescaled",
     "diagonal_fisher",
+    "diagonal_fisher_avg",
     "diagonal_fisher_rescaled",
     "diagonal_fisher_max_rescaled",
     "diagonal_fisher_std_rescaled",
@@ -241,6 +242,16 @@ class OFTMerging(RiemannianMerging):
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
             return self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
+
+        if mode == "diagonal_fisher_avg":
+            if fisher_list is None:
+                raise ValueError(f"Fisher data is required for mode {mode!r}")
+            avg_alphas = torch.full_like(alphas, 1.0 / len(weights_list))
+            return self._diagonal_fisher_merging(
+                weights_list,
+                fisher_list,
+                avg_alphas,
+            )
 
         if mode == "diagonal_fisher_rescaled":
             if fisher_list is None:

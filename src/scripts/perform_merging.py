@@ -123,13 +123,14 @@ def parse_args():
             "standard",
             "standard_rescaled",
             "diagonal_fisher",
+            "diagonal_fisher_avg",
             "diagonal_fisher_rescaled",
             "diagonal_fisher_max_rescaled",
             "diagonal_fisher_std_rescaled",
             "diagonal_fisher_kl_rescaled",
             "fisher",
         ],
-        help="Merging strategy: standard, rescaled standard, diagonal Fisher, rescaled/max-rescaled/std-rescaled/KL-rescaled diagonal Fisher, or full Fisher.",  # noqa: E501
+        help="Merging strategy: standard, rescaled standard, diagonal Fisher, averaged/rescaled/max-rescaled/std-rescaled/KL-rescaled diagonal Fisher, or full Fisher.",  # noqa: E501
     )
     parser.add_argument(
         "--lam", type=float, default=0.0,

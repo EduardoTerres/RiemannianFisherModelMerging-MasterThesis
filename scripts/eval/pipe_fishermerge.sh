@@ -5,15 +5,15 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=00:10:00
-#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/diagonal_fisher/slurm/pipe_fishermerge_%A.out
+#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/diagonal_fisher_avg/slurm/pipe_fishermerge_%A.out
 
 set -e
 
-MODEL_NAME="llama3.1"  # "llama3.1" or "qwen2.5"
+# MODEL_NAME="llama3.1"  # "llama3.1" or "qwen2.5"
 MODEL_NAME="qwen2.5"
 
 MERGE_METHOD="gradients"
-MERGE_MODE="diagonal_fisher"
+MERGE_MODE="diagonal_fisher_avg"
 SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
 REPO_ROOT="/home/eterres/MasterThesis"
 
@@ -37,14 +37,14 @@ mkdir -p "${SLURM_DIR}"
 
 conda activate merge
 
-# python "${REPO_ROOT}/src/scripts/perform_merging.py" \
-#     --model_family "${MODEL_NAME}" \
-#     --merge_method "${MERGE_METHOD}" \
-#     --merge_mode "${MERGE_MODE}" \
-#     --output_dir "${MODEL_DIR}" \
-#     --save_merged_model \
-#     --lam 0.0 \
-#     --device gpu
+python "${REPO_ROOT}/src/scripts/perform_merging.py" \
+    --model_family "${MODEL_NAME}" \
+    --merge_method "${MERGE_METHOD}" \
+    --merge_mode "${MERGE_MODE}" \
+    --output_dir "${MODEL_DIR}" \
+    --save_merged_model \
+    --lam 0.0 \
+    --device gpu
 
 sbatch \
     --output="${SLURM_DIR}/eval_model_%A_%a.out" \

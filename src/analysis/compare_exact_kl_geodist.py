@@ -1,26 +1,21 @@
-"""Compare merged adapters under transported-Fisher KL and geodesic distance.
-
-Usage:
-    python -m src.analysis.compare_kl
-    python src/analysis/compare_kl.py
-"""
+"""Compare merged adapters by dataset KL and OFT geodesic distance."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
-from tqdm import tqdm
 
 import numpy as np
 import torch
 from safetensors.torch import load_file
+from tqdm import tqdm
 
 ROOTDIR = Path(__file__).resolve().parents[2]
 if str(ROOTDIR) not in sys.path:
     sys.path.insert(0, str(ROOTDIR))
 
-from src.dataset.dataset_3 import DATASET_3_PLOT_LABELS, DATASET_3_TRAIN
+from src.dataset.dataset_3 import DATASET_3_PLOT_LABELS, DATASET_3_TRAIN, build_loader
 from src.geometry import SOnManifold
 from src.plots.plot_cowebs import collect_metrics, latex_bold
 
@@ -29,53 +24,17 @@ MERGE_MODES = ("diagonal_fisher", "standard_rescaled")
 XY_PLOT_MODES = ("standard_rescaled", "diagonal_fisher")
 TASKS = [tag for tag, *_ in DATASET_3_TRAIN]
 FAMILIES = ("llama3.1", "qwen2.5")
-FISHERS_DIR = Path("/scratch-shared/eterres/fishers")
-DATA_DIR = ROOTDIR / "outputs" / "analysis" / "data"
+KL_NUM_SAMPLES = 256
+MODELS_DIR = ROOTDIR / "data" / "models"
+BASE_MODEL_PATHS = {
+    "llama3.1": MODELS_DIR / "Llama-3.1-8B",
+    "qwen2.5": MODELS_DIR / "Qwen-2.5-3B",
+}
+ANALYSIS_DIR = ROOTDIR / "outputs" / "analysis_exact"
+DATA_DIR = ANALYSIS_DIR / "data"
 EVAL_DIR = ROOTDIR / "outputs" / "evaluation"
 MANIFOLD = SOnManifold()
 VIOLIN_COLORS = ("black", "#7B2CBF")
-
-
-def _adapter_task_name(task: str) -> str:
-    return {
-        "social_iqa": "socialiqa",
-        "commonsense_qa": "commonsense",
-        "science_qa": "scienceqa",
-    }.get(task, task)
-
-
-def _adapter_prefix(family_name: str) -> str:
-    return {
-        "llama3.1": "llama3-1_8b_finetune",
-        "qwen2.5": "qwen2.5_3b_finetune",
-    }[family_name]
-
-
-def _adapter_root(family_name: str) -> Path:
-    folder = {
-        "llama3.1": "Llama-3.1-8B_OFT_dataset2_adapters",
-        "qwen2.5": "Qwen-2.5-3B_OFT_dataset2_adapters",
-    }[family_name]
-    return ROOTDIR / "data" / "models" / folder
-
-
-def _task_adapter_paths(family_name: str) -> list[Path]:
-    prefix = _adapter_prefix(family_name)
-    return [
-        _adapter_root(family_name) / f"{prefix}_{_adapter_task_name(task)}"
-        for task in TASKS
-    ]
-
-
-def _finetuned_fisher_paths(family_name: str) -> list[Path]:
-    prefix = _adapter_prefix(family_name)
-    return [
-        FISHERS_DIR
-        / family_name
-        / task
-        / f"{prefix}_{_adapter_task_name(task)}_finetuned.safetensors"
-        for task in TASKS
-    ]
 
 
 def _load_state(path: Path) -> dict[str, torch.Tensor]:
@@ -89,54 +48,31 @@ def _merged_adapter_path(mode: str, family_name: str) -> Path:
     return ROOTDIR / "outputs" / "models" / mode / family_name / "merged_model" / "merged_adapter"
 
 
-def fisher_kl(
-    merged: dict[str, torch.Tensor],
-    task: dict[str, torch.Tensor],
-    fisher: dict[str, torch.Tensor],
-) -> float:
-    """Diagonal approximation to the transported-Fisher quadratic form.
+def _adapter_task_name(task: str) -> str:
+    return {
+        "social_iqa": "socialiqa",
+        "commonsense_qa": "commonsense",
+        "science_qa": "scienceqa",
+    }.get(task, task)
 
-    The stored Fisher is the transported diagonal at the pretrained tangent
-    space, so the vector entering the quadratic form must use the relative
-    task-to-merged displacement in the same upper-triangular skew coordinates.
-    """
-    total = torch.zeros((), dtype=torch.float64)
-    seen = 0
-    for key, fisher_value in fisher.items():
-        if key not in merged or key not in task:
-            continue
-        relative_value = _relative_oft_params(
-            task_oft_params=task[key].double(),
-            merged_oft_params=merged[key].double(),
-        )
-        fisher_diag = fisher_value.double()
-        if fisher_diag.shape != relative_value.shape:
-            raise ValueError(
-                f"Shape mismatch for {key}: Fisher has {tuple(fisher_diag.shape)}, "
-                f"relative vector has {tuple(relative_value.shape)}."
-            )
-        total += 0.5 * (fisher_diag * relative_value.square()).sum()
-        seen += 1
-    if seen == 0:
-        raise ValueError("No matching keys between task, merged adapter, and Fisher.")
-    return total.item()
+
+def _task_adapter_paths(family_name: str) -> list[Path]:
+    folder, prefix = {
+        "llama3.1": ("Llama-3.1-8B_OFT_dataset2_adapters", "llama3-1_8b_finetune"),
+        "qwen2.5": ("Qwen-2.5-3B_OFT_dataset2_adapters", "qwen2.5_3b_finetune"),
+    }[family_name]
+    return [MODELS_DIR / folder / f"{prefix}_{_adapter_task_name(task)}" for task in TASKS]
 
 
 def _oft_keys(*states: dict[str, torch.Tensor]) -> list[str]:
     return sorted(
         key
         for key in states[0]
-        if ("oft_r" in key or "oft_" in key.lower())
-        and all(key in state for state in states[1:])
+        if ("oft_r" in key or "oft_" in key.lower()) and all(key in state for state in states[1:])
     )
 
 
 def _oft_params_to_so(oft_params: torch.Tensor) -> torch.Tensor:
-    skew = _oft_params_to_skew(oft_params)
-    return MANIFOLD.cayley_exp(skew)
-
-
-def _oft_params_to_skew(oft_params: torch.Tensor) -> torch.Tensor:
     num_blocks, son_dim = oft_params.shape
     block_size = int((1 + (1 + 8 * son_dim) ** 0.5) / 2)
     if block_size * (block_size - 1) // 2 != son_dim:
@@ -151,40 +87,133 @@ def _oft_params_to_skew(oft_params: torch.Tensor) -> torch.Tensor:
         device=oft_params.device,
     )
     skew[:, indices[0], indices[1]] = oft_params
-    skew = skew - skew.transpose(-1, -2)
-    return skew
+    return MANIFOLD.cayley_exp(skew - skew.transpose(-1, -2))
 
 
-def _skew_to_oft_params(skew: torch.Tensor) -> torch.Tensor:
-    block_size = skew.shape[-1]
-    indices = torch.triu_indices(block_size, block_size, offset=1, device=skew.device)
-    return skew[:, indices[0], indices[1]]
-
-
-def _relative_oft_params(
-    task_oft_params: torch.Tensor,
-    merged_oft_params: torch.Tensor,
-) -> torch.Tensor:
-    task_so = _oft_params_to_so(task_oft_params)
-    merged_so = _oft_params_to_so(merged_oft_params)
-    relative_so = task_so.transpose(-1, -2) @ merged_so
-    relative_skew = MANIFOLD.cayley_inverse_log(relative_so)
-    return _skew_to_oft_params(relative_skew)
-
-
-def geodesic_distance(
-    merged: dict[str, torch.Tensor],
-    task: dict[str, torch.Tensor],
-) -> float:
+def geodesic_distance(merged: dict[str, torch.Tensor], task: dict[str, torch.Tensor]) -> float:
     distances = []
     for key in _oft_keys(merged, task):
         merged_so = _oft_params_to_so(merged[key].float())
         task_so = _oft_params_to_so(task[key].float())
-        dist = MANIFOLD.dist_sq(merged_so, task_so).clamp_min(0).sqrt().mean()
-        distances.append(dist)
+        distances.append(MANIFOLD.dist_sq(merged_so, task_so).clamp_min(0).sqrt().mean())
     if not distances:
         raise ValueError("No matching OFT keys between merged adapter and task adapter.")
     return torch.stack(distances).mean().item()
+
+
+def _load_model(family_name: str, merged_adapter: Path, device: str):
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    base_path = BASE_MODEL_PATHS[family_name]
+    tokenizer = AutoTokenizer.from_pretrained(base_path, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_path,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+    )
+    model = PeftModel.from_pretrained(
+        base_model,
+        str(merged_adapter),
+        adapter_name="merged",
+        is_trainable=False,
+    )
+    model.to(device)
+    model.eval()
+    return model, tokenizer
+
+
+def _target_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    mask = labels[..., 1:].ne(-100)
+    return logits[..., :-1, :][mask].float()
+
+
+@torch.inference_mode()
+def kl_divergence(
+    model,
+    loader,
+    device: str,
+    finetuned_adapter: str,
+    chunk_size: int,
+) -> tuple[float, int]:
+    total_kl = 0.0
+    total_tokens = 0
+    for batch in tqdm(loader, desc="KL", leave=False):
+        batch = {key: value.to(device) for key, value in batch.items()}
+
+        model.set_adapter(finetuned_adapter)
+        p_logits = _target_logits(
+            model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits,
+            batch["labels"],
+        )
+        model.set_adapter("merged")
+        q_logits = _target_logits(
+            model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits,
+            batch["labels"],
+        )
+
+        for start in range(0, p_logits.size(0), chunk_size):
+            p_log_probs = p_logits[start : start + chunk_size].log_softmax(dim=-1)
+            q_log_probs = q_logits[start : start + chunk_size].log_softmax(dim=-1)
+            total_kl += (p_log_probs.exp() * (p_log_probs - q_log_probs)).sum().item()
+        total_tokens += p_logits.size(0)
+
+    return total_kl / max(total_tokens, 1), total_tokens
+
+
+def compare_family(
+    args: argparse.Namespace,
+    family_name: str,
+) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
+    task_adapter_paths = _task_adapter_paths(family_name)
+    task_states = [_load_state(path / "adapter_model.safetensors") for path in task_adapter_paths]
+    kl_rows: dict[str, list[float]] = {}
+    geodesic_rows: dict[str, list[float]] = {}
+
+    for mode in MERGE_MODES:
+        merged_path = _merged_adapter_path(mode, family_name)
+        merged_state = _load_state(merged_path / "adapter_model.safetensors")
+        model, tokenizer = _load_model(family_name, merged_path, args.device)
+        kl_rows[mode] = []
+        geodesic_rows[mode] = [
+            geodesic_distance(merged=merged_state, task=task_state)
+            for task_state in tqdm(task_states, desc=f"{mode} geodesic")
+        ]
+
+        for task_id, task_spec in enumerate(DATASET_3_TRAIN):
+            task, dataset_path, dataset_name, split, formatter = task_spec
+            adapter_name = f"finetuned_{task}"
+            if adapter_name not in model.peft_config:
+                model.load_adapter(
+                    str(task_adapter_paths[task_id]),
+                    adapter_name=adapter_name,
+                    is_trainable=False,
+                )
+            loader = build_loader(
+                dataset_path=dataset_path,
+                dataset_name=dataset_name,
+                split=split,
+                doc_to_text_fn=formatter,
+                tokenizer=tokenizer,
+                num_samples=KL_NUM_SAMPLES,
+                batch_size=args.batch_size,
+                max_length=args.max_length,
+                task=task,
+                cache_dir=str(args.dataset_cache_dir) if args.dataset_cache_dir else None,
+            )
+            kl, tokens = kl_divergence(model, loader, args.device, adapter_name, args.kl_chunk_size)
+            print(f"{family_name}/{mode}/{task}: KL={kl:.6g}, tokens={tokens}")
+            kl_rows[mode].append(kl)
+
+        del model
+        if args.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+    return kl_rows, geodesic_rows
 
 
 def markdown_table(rows: dict[str, list[float]]) -> str:
@@ -216,40 +245,6 @@ def _latex_label(mode: str) -> str:
     }[mode]
 
 
-def save_violin_plot(rows: dict[str, list[float]], save_path: Path, ylabel: str) -> None:
-    import matplotlib.pyplot as plt
-
-    _configure_latex_plot(plt)
-
-    positions = [1.0, 1.55]
-    values_by_mode = [rows[mode] for mode in MERGE_MODES]
-
-    fig, ax = plt.subplots(figsize=(2.45, 2.7))
-    parts = ax.violinplot(
-        values_by_mode,
-        positions=positions,
-        widths=0.42,
-        showmeans=True,
-        showextrema=False,
-    )
-    for body, color in zip(parts["bodies"], VIOLIN_COLORS, strict=True):
-        body.set_facecolor(color)
-        body.set_edgecolor("black")
-        body.set_alpha(0.75)
-    parts["cmeans"].set_color(VIOLIN_COLORS)
-    parts["cmeans"].set_linewidth(1.8)
-
-    ax.set_xticks(positions, [_latex_label(mode) for mode in MERGE_MODES])
-    ax.set_xlim(0.72, 1.83)
-    ax.set_ylabel(ylabel)
-    ax.grid(axis="y", alpha=0.25)
-    fig.tight_layout()
-
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
 def _configure_latex_plot(plt) -> None:
     plt.rcParams.update({
         "text.usetex": True,
@@ -261,89 +256,33 @@ def _configure_latex_plot(plt) -> None:
     })
 
 
-def _clip_violin_halves(parts, positions: list[float], side: str) -> None:
-    for body, position in zip(parts["bodies"], positions, strict=True):
-        vertices = body.get_paths()[0].vertices
-        if side == "left":
-            vertices[:, 0] = vertices[:, 0].clip(max=position)
-        elif side == "right":
-            vertices[:, 0] = vertices[:, 0].clip(min=position)
-        else:
-            raise ValueError(f"Unsupported violin side: {side}")
-
-
-def save_mixed_violin_plot(
-    kl_rows: dict[str, list[float]],
-    geodesic_rows: dict[str, list[float]],
-    save_path: Path,
-) -> None:
+def save_violin_plot(rows: dict[str, list[float]], save_path: Path, ylabel: str) -> None:
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Patch
 
     _configure_latex_plot(plt)
-
     positions = [1.0, 1.55]
-    kl_values = [kl_rows[mode] for mode in MERGE_MODES]
-    geodesic_values = [geodesic_rows[mode] for mode in MERGE_MODES]
-
-    fig, ax_kl = plt.subplots(figsize=(3.7, 3.7))
-    ax_geo = ax_kl.twinx()
-
-    kl_parts = ax_kl.violinplot(
-        kl_values,
+    parts = plt.violinplot(
+        [rows[mode] for mode in MERGE_MODES],
         positions=positions,
-        widths=0.44,
+        widths=0.42,
         showmeans=True,
         showextrema=False,
     )
-    geo_parts = ax_geo.violinplot(
-        geodesic_values,
-        positions=positions,
-        widths=0.44,
-        showmeans=True,
-        showextrema=False,
-    )
-    _clip_violin_halves(kl_parts, positions, "left")
-    _clip_violin_halves(geo_parts, positions, "right")
-
-    for body in kl_parts["bodies"]:
-        body.set_facecolor(VIOLIN_COLORS[0])
+    ax = plt.gca()
+    for body, color in zip(parts["bodies"], VIOLIN_COLORS, strict=True):
+        body.set_facecolor(color)
         body.set_edgecolor("black")
         body.set_alpha(0.75)
-    for body in geo_parts["bodies"]:
-        body.set_facecolor(VIOLIN_COLORS[1])
-        body.set_edgecolor("black")
-        body.set_alpha(0.75)
-
-    kl_parts["cmeans"].set_color(VIOLIN_COLORS[0])
-    geo_parts["cmeans"].set_color(VIOLIN_COLORS[1])
-    kl_parts["cmeans"].set_linewidth(1.8)
-    geo_parts["cmeans"].set_linewidth(1.8)
-
-    ax_kl.set_xticks(positions, [_latex_label(mode) for mode in MERGE_MODES])
-    ax_kl.set_xlim(0.72, 1.83)
-    # ax_kl.set_ylabel("KL Divergence")
-    # ax_geo.set_ylabel("Geodesic Distance")
-    ax_kl.grid(axis="y", alpha=0.22)
-    ax_kl.legend(
-        handles=[
-            Patch(facecolor=VIOLIN_COLORS[0], edgecolor="black", label=r"$\approx$ KL divergence (left axis)"),
-            Patch(facecolor=VIOLIN_COLORS[1], edgecolor="black", label="Geodesic Distance (right axis)"),
-        ],
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.16),
-        ncol=1,
-        frameon=False,
-        handlelength=1.0,
-        columnspacing=1.0,
-        fontsize=15,
-    )
-
-    fig.tight_layout()
-    fig.subplots_adjust(bottom=0.23)
+    parts["cmeans"].set_color(VIOLIN_COLORS)
+    parts["cmeans"].set_linewidth(1.8)
+    ax.set_xticks(positions, [_latex_label(mode) for mode in MERGE_MODES])
+    ax.set_xlim(0.72, 1.83)
+    ax.set_ylabel(ylabel)
+    ax.grid(axis="y", alpha=0.25)
+    plt.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
+    plt.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.close()
 
 
 def save_xy_plot(
@@ -381,7 +320,7 @@ def save_xy_plot(
             fontsize=9,
         )
         ax.set_title(_latex_label(mode))
-        ax.set_xlabel(r"$\widehat{D}_{\mathrm{KL}}$")
+        ax.set_xlabel(r"$D_{\mathrm{KL}}$")
         ax.grid(alpha=0.25)
     axes[0].set_ylabel(r"Geodesic Distance")
     plt.tight_layout()
@@ -429,7 +368,7 @@ def save_ratio_xy_plot(
     ax.set_ylim(0.0, upper)
     ax.set_xticks(ticks)
     ax.set_yticks(ticks)
-    ax.set_xlabel(r"$\widehat{D}_{\mathrm{KL}}(\mathrm{Ours}) / \widehat{D}_{\mathrm{KL}}(\mathrm{OrthoMerge})$")
+    ax.set_xlabel(r"$D_{\mathrm{KL}}(\mathrm{Ours}) / D_{\mathrm{KL}}(\mathrm{OrthoMerge})$")
     ax.set_ylabel(r"$d_{\mathrm{geo}}(\mathrm{Ours}) / d_{\mathrm{geo}}(\mathrm{OrthoMerge})$")
     ax.grid(alpha=0.25)
     plt.tight_layout()
@@ -500,16 +439,10 @@ def save_paired_xy_plot(
         label=r"\textsc{Diagonal Fisher (Ours)}",
         zorder=3,
     )
-    ax.set_xlabel(r"$\widehat{D}_{\mathrm{KL}}$")
+    ax.set_xlabel(r"$D_{\mathrm{KL}}$")
     ax.set_ylabel(r"Geodesic Distance")
     ax.grid(alpha=0.25)
-    ax.legend(
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.22),
-        ncol=2,
-        frameon=False,
-        fontsize=10,
-    )
+    ax.legend(frameon=False, fontsize=9)
     plt.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(save_path, dpi=200, bbox_inches="tight")
@@ -559,7 +492,7 @@ def save_kl_geodesic_method_ratio_plot(
         zorder=3,
     )
     ax.set_xticks(x, [task.replace("_", r"\_") for task in TASKS], rotation=70, ha="right")
-    ax.set_ylabel(r"$\widehat{D}_{\mathrm{KL}} / d_{\mathrm{geo}}$")
+    ax.set_ylabel(r"$D_{\mathrm{KL}} / d_{\mathrm{geo}}$")
     ax.grid(axis="y", alpha=0.25)
     ax.legend(frameon=False, fontsize=9)
     plt.tight_layout()
@@ -588,7 +521,7 @@ def save_performance_ratio_kl_plot(
     kl_rows: dict[str, list[float]],
     family_name: str,
     save_path: Path,
-) -> dict[str, float]:
+) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.ticker import LogFormatterSciNotation, LogLocator
 
@@ -596,7 +529,7 @@ def save_performance_ratio_kl_plot(
     metrics = _performance_metrics(family_name)
     fig, ax = plt.subplots(figsize=(3.8, 3.3))
     xs, ys, labels = [], [], []
-    for task, ortho_kl, fisher_kl_value in zip(
+    for task, ortho_kl, fisher_kl in zip(
         TASKS,
         kl_rows["standard_rescaled"],
         kl_rows["diagonal_fisher"],
@@ -605,24 +538,16 @@ def save_performance_ratio_kl_plot(
         performance_task = _performance_task_name(task)
         ortho_performance = metrics["standard_rescaled"].get(performance_task)
         fisher_performance = metrics["diagonal_fisher"].get(performance_task)
-        if fisher_performance in (None, 0) or ortho_performance is None or fisher_kl_value == 0:
+        if fisher_performance in (None, 0) or ortho_performance is None or fisher_kl == 0:
             continue
         xs.append(ortho_performance / fisher_performance)
-        ys.append(ortho_kl / fisher_kl_value)
+        ys.append(ortho_kl / fisher_kl)
         labels.append(task)
     x_values = np.asarray(xs, dtype=float)
     y_values = np.asarray(ys, dtype=float)
     keep = np.isfinite(x_values) & np.isfinite(y_values) & (y_values > 0)
     x_fit = x_values[keep]
     y_fit = y_values[keep]
-    log_y_fit = np.log10(y_fit)
-    stats = {
-        "n": float(x_fit.size),
-        "r": float("nan"),
-        "p": float("nan"),
-        "slope": float("nan"),
-        "intercept": float("nan"),
-    }
     ax.scatter(
         x_fit,
         y_fit,
@@ -652,15 +577,10 @@ def save_performance_ratio_kl_plot(
         except ImportError:
             pearsonr = None
 
+        log_y_fit = np.log10(y_fit)
         slope, intercept = np.polyfit(x_fit, log_y_fit, deg=1)
         r = float(np.corrcoef(x_fit, log_y_fit)[0, 1])
         p = float(pearsonr(x_fit, log_y_fit).pvalue) if pearsonr is not None else float("nan")
-        stats.update({
-            "r": r,
-            "p": p,
-            "slope": float(slope),
-            "intercept": float(intercept),
-        })
         line_x = np.linspace(float(x_fit.min()), float(x_fit.max()), 100)
         line_y = 10 ** (slope * line_x + intercept)
         ax.plot(line_x, line_y, color="black", linewidth=1.2, alpha=0.75)
@@ -684,7 +604,6 @@ def save_performance_ratio_kl_plot(
     save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(save_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-    return stats
 
 
 def save_performance_over_kl_by_method_plot(
@@ -703,15 +622,15 @@ def save_performance_over_kl_by_method_plot(
         ortho_performance = metrics["standard_rescaled"].get(performance_task)
         fisher_performance = metrics["diagonal_fisher"].get(performance_task)
         ortho_kl = kl_rows["standard_rescaled"][task_idx]
-        fisher_kl_value = kl_rows["diagonal_fisher"][task_idx]
+        fisher_kl = kl_rows["diagonal_fisher"][task_idx]
         if (
             ortho_performance is None
             or fisher_performance is None
             or ortho_kl == 0
-            or fisher_kl_value == 0
+            or fisher_kl == 0
         ):
             continue
-        x_value = fisher_performance / fisher_kl_value
+        x_value = fisher_performance / fisher_kl
         y_value = ortho_performance / ortho_kl
         if x_value <= 0 or y_value <= 0:
             continue
@@ -723,10 +642,8 @@ def save_performance_over_kl_by_method_plot(
     y_values = np.asarray(ys, dtype=float)
     if x_values.size == 0:
         raise ValueError(f"No valid performance/KL pairs found for {family_name}.")
-    lower = min(float(np.min(x_values)), float(np.min(y_values)))
-    upper = max(float(np.max(x_values)), float(np.max(y_values)), 1.0)
-    lower *= 0.8
-    upper *= 1.2
+    lower = min(float(np.min(x_values)), float(np.min(y_values))) * 0.8
+    upper = max(float(np.max(x_values)), float(np.max(y_values)), 1.0) * 1.2
 
     fig, ax = plt.subplots(figsize=(4.3, 3.3))
     ax.scatter(
@@ -760,85 +677,11 @@ def save_performance_over_kl_by_method_plot(
     ax.set_yscale("log")
     ax.set_xlim(lower, upper)
     ax.set_ylim(lower, upper)
-    ax.set_xlabel(
-        r"$\mathrm{Performance}(\textsc{Ours}) / \widehat{D}_{\mathrm{KL}}(\textsc{Ours})$"
-    )
+    ax.set_xlabel(r"$\mathrm{Performance}(\textsc{Ours}) / D_{\mathrm{KL}}(\textsc{Ours})$")
     ax.set_ylabel(
-        r"$\mathrm{Performance}(\textsc{OrthoMerge}) / \widehat{D}_{\mathrm{KL}}(\textsc{OrthoMerge})$"
+        r"$\mathrm{Performance}(\textsc{OrthoMerge}) / D_{\mathrm{KL}}(\textsc{OrthoMerge})$"
     )
     ax.grid(alpha=0.25)
-    plt.tight_layout()
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_performance_kl_distribution_plot(
-    kl_rows: dict[str, list[float]],
-    family_name: str,
-    save_path: Path,
-) -> None:
-    import matplotlib.pyplot as plt
-
-    _configure_latex_plot(plt)
-    metrics = _performance_metrics(family_name)
-    fig, ax = plt.subplots(figsize=(4.5, 3.4))
-
-    style_by_mode = {
-        "standard_rescaled": {
-            "marker": "o",
-            "color": VIOLIN_COLORS[MERGE_MODES.index("standard_rescaled")],
-            "label": r"\textsc{OrthoMerge}",
-        },
-        "diagonal_fisher": {
-            "marker": "x",
-            "color": VIOLIN_COLORS[MERGE_MODES.index("diagonal_fisher")],
-            "label": r"\textsc{Diagonal Fisher (Ours)}",
-        },
-    }
-
-    for task_idx, task in enumerate(TASKS):
-        ortho_performance = metrics["standard_rescaled"].get(_performance_task_name(task))
-        fisher_performance = metrics["diagonal_fisher"].get(_performance_task_name(task))
-        if ortho_performance is None or fisher_performance is None:
-            continue
-        ax.plot(
-            [ortho_performance, fisher_performance],
-            [
-                kl_rows["standard_rescaled"][task_idx],
-                kl_rows["diagonal_fisher"][task_idx],
-            ],
-            color="0.55",
-            linewidth=0.8,
-            alpha=0.65,
-            zorder=1,
-        )
-
-    for mode, style in style_by_mode.items():
-        xs, ys = [], []
-        for task_idx, task in enumerate(TASKS):
-            performance = metrics[mode].get(_performance_task_name(task))
-            if performance is None:
-                continue
-            xs.append(performance)
-            ys.append(kl_rows[mode][task_idx])
-        ax.scatter(
-            xs,
-            ys,
-            s=42,
-            marker=style["marker"],
-            color=style["color"],
-            edgecolor="black" if style["marker"] != "x" else None,
-            linewidth=0.6 if style["marker"] != "x" else 1.4,
-            alpha=0.88,
-            label=style["label"],
-            zorder=2,
-        )
-
-    ax.set_xlabel(r"Performance")
-    ax.set_ylabel(r"$\widehat{D}_{\mathrm{KL}}$")
-    ax.grid(alpha=0.25)
-    ax.legend(frameon=False, fontsize=9)
     plt.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(save_path, dpi=200, bbox_inches="tight")
@@ -873,7 +716,7 @@ def correlation_stats(
 
 
 def print_correlation_stats(family_name: str, stats: dict[str, dict[str, float]]) -> None:
-    print(f"\nApproximate KL/geodesic Pearson correlation ({family_name})")
+    print(f"\nKL/geodesic Pearson correlation ({family_name})")
     for mode in XY_PLOT_MODES:
         values = stats[mode]
         print(
@@ -883,47 +726,50 @@ def print_correlation_stats(family_name: str, stats: dict[str, dict[str, float]]
         )
 
 
-def compare_family(family_name: str) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
-    task_states = [_load_state(path / "adapter_model.safetensors") for path in _task_adapter_paths(family_name)]
-    finetuned_fishers = [_load_state(path) for path in _finetuned_fisher_paths(family_name)]
-
-    kl_rows: dict[str, list[float]] = {}
-    geodesic_rows: dict[str, list[float]] = {}
-    for mode in MERGE_MODES:
-        merged = _load_state(_merged_adapter_path(mode, family_name) / "adapter_model.safetensors")
-        kl_rows[mode] = [
-            fisher_kl(merged=merged, task=task, fisher=fisher)
-            for task, fisher in tqdm(zip(task_states, finetuned_fishers, strict=True), total=len(TASKS))
-        ]
-        geodesic_rows[mode] = [
-            geodesic_distance(merged=merged, task=task)
-            for task in tqdm(task_states)
-        ]
-    return kl_rows, geodesic_rows
-
-
 def _cache_path(family_name: str) -> Path:
-    return DATA_DIR / f"compare_kl_geodist_relative_fisher_{family_name}.pt"
+    return DATA_DIR / f"compare_dataset_kl_geodist_{family_name}.pt"
+
+
+def _cache_config(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "tasks": TASKS,
+        "merge_modes": MERGE_MODES,
+        "num_samples": KL_NUM_SAMPLES,
+        "batch_size": args.batch_size,
+        "max_length": args.max_length,
+    }
+
+
+def _cache_payload_matches(payload: dict, args: argparse.Namespace) -> bool:
+    config = payload.get("config")
+    if config is not None:
+        return config == _cache_config(args)
+
+    return (
+        payload.get("tasks") == TASKS
+        and tuple(payload.get("merge_modes", ())) == MERGE_MODES
+    )
 
 
 def load_or_compute_family(
+    args: argparse.Namespace,
     family_name: str,
-    force_compute: bool = False,
 ) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
     cache_path = _cache_path(family_name)
-    if cache_path.exists() and not force_compute:
-        print(f"Loading computed data from {cache_path}")
+    if cache_path.exists() and not args.force_compute:
         payload = torch.load(cache_path, weights_only=False)
-        return payload["kl_rows"], payload["geodesic_rows"]
+        if _cache_payload_matches(payload, args):
+            print(f"Loading computed data from {cache_path}")
+            return payload["kl_rows"], payload["geodesic_rows"]
+        print(f"Ignoring stale cache at {cache_path}")
 
     print(f"Computing data for {family_name}; cache path is {cache_path}")
-    kl_rows, geodesic_rows = compare_family(family_name)
+    kl_rows, geodesic_rows = compare_family(args, family_name)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "family": family_name,
-            "tasks": TASKS,
-            "merge_modes": MERGE_MODES,
+            "config": _cache_config(args),
             "kl_rows": kl_rows,
             "geodesic_rows": geodesic_rows,
         },
@@ -935,137 +781,69 @@ def load_or_compute_family(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--families",
-        nargs="+",
-        default=FAMILIES,
-        choices=FAMILIES,
-    )
-    parser.add_argument("--plot_dir", type=Path, default=ROOTDIR / "outputs" / "analysis")
+    parser.add_argument("--families", nargs="+", default=FAMILIES, choices=FAMILIES)
+    parser.add_argument("--plot_dir", type=Path, default=ANALYSIS_DIR)
+    parser.add_argument("--dataset-cache-dir", type=Path, default=ROOTDIR / "data" / "hf_cache")
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--max-length", type=int, default=2048)
+    parser.add_argument("--kl-chunk-size", type=int, default=64)
+    parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--force-compute", action="store_true")
     args = parser.parse_args()
+    if args.kl_chunk_size < 1:
+        raise ValueError("--kl-chunk-size must be positive")
 
     results = {
-        family_name: load_or_compute_family(
-            family_name,
-            force_compute=args.force_compute,
-        )
+        family_name: load_or_compute_family(args, family_name)
         for family_name in args.families
     }
-    for family_name in args.families:
-        print(f"\n --- {family_name} ---")
-        kl_rows, geodesic_rows = results[family_name]
+    for family_name, (kl_rows, geodesic_rows) in results.items():
+        print(f"\n--- {family_name} ---")
         print("\nKL")
         print(markdown_table(kl_rows))
         print("\nGeodesic distance")
         print(markdown_table(geodesic_rows))
 
-    for family_name, (kl_rows, geodesic_rows) in results.items():
         kl_path = args.plot_dir / f"compare_kl_violin_{family_name}.png"
-        ylabel="KL"
-        save_violin_plot(kl_rows, kl_path, ylabel)
-        save_violin_plot(kl_rows, kl_path.with_suffix(".pdf"), ylabel)
+        save_violin_plot(kl_rows, kl_path, "KL")
+        save_violin_plot(kl_rows, kl_path.with_suffix(".pdf"), "KL")
         print(f"\nSaved KL violin plot to {kl_path} and {kl_path.with_suffix('.pdf')}")
 
         geodesic_path = args.plot_dir / f"compare_geodesic_violin_{family_name}.png"
-        ylabel=r"${\mathrm{Geodesic\_Distance}(\theta_{1:T}, \theta_t)}$"
-        ylabel="Geodesic Distance"
-        save_violin_plot(geodesic_rows, geodesic_path, ylabel)
-        save_violin_plot(geodesic_rows, geodesic_path.with_suffix(".pdf"), ylabel)
-        print(f"Saved geodesic violin plot to {geodesic_path} and {geodesic_path.with_suffix('.pdf')}")
-
-        mixed_path = args.plot_dir / f"compare_mixed_violin_{family_name}.png"
-        save_mixed_violin_plot(kl_rows, geodesic_rows, mixed_path)
-        save_mixed_violin_plot(kl_rows, geodesic_rows, mixed_path.with_suffix(".pdf"))
-        print(f"Saved mixed violin plot to {mixed_path} and {mixed_path.with_suffix('.pdf')}")
+        save_violin_plot(geodesic_rows, geodesic_path, "Geodesic Distance")
+        save_violin_plot(geodesic_rows, geodesic_path.with_suffix(".pdf"), "Geodesic Distance")
+        print(
+            f"Saved geodesic violin plot to {geodesic_path} "
+            f"and {geodesic_path.with_suffix('.pdf')}"
+        )
 
         xy_path = args.plot_dir / f"compare_kl_geodesic_xy_{family_name}.png"
         stats = save_xy_plot(kl_rows, geodesic_rows, xy_path)
-        save_xy_plot(kl_rows, geodesic_rows, xy_path.with_suffix(".pdf"))
-        print(f"Saved KL/geodesic xy plot to {xy_path} and {xy_path.with_suffix('.pdf')}")
+        print(f"Saved KL/geodesic xy plot to {xy_path}")
         print_correlation_stats(family_name, stats)
 
         ratio_xy_path = args.plot_dir / f"compare_kl_geodesic_ratio_xy_{family_name}.png"
         save_ratio_xy_plot(kl_rows, geodesic_rows, ratio_xy_path)
-        save_ratio_xy_plot(kl_rows, geodesic_rows, ratio_xy_path.with_suffix(".pdf"))
-        print(
-            f"Saved KL/geodesic ratio xy plot to {ratio_xy_path} "
-            f"and {ratio_xy_path.with_suffix('.pdf')}"
-        )
+        print(f"Saved KL/geodesic ratio xy plot to {ratio_xy_path}")
 
         paired_xy_path = args.plot_dir / f"compare_kl_geodesic_paired_xy_{family_name}.png"
         save_paired_xy_plot(kl_rows, geodesic_rows, paired_xy_path)
-        save_paired_xy_plot(kl_rows, geodesic_rows, paired_xy_path.with_suffix(".pdf"))
-        print(
-            f"Saved paired KL/geodesic xy plot to {paired_xy_path} "
-            f"and {paired_xy_path.with_suffix('.pdf')}"
-        )
+        print(f"Saved paired KL/geodesic xy plot to {paired_xy_path}")
 
         method_ratio_path = args.plot_dir / f"compare_kl_over_geodesic_by_method_{family_name}.png"
         save_kl_geodesic_method_ratio_plot(kl_rows, geodesic_rows, method_ratio_path)
-        save_kl_geodesic_method_ratio_plot(
-            kl_rows,
-            geodesic_rows,
-            method_ratio_path.with_suffix(".pdf"),
-        )
-        print(
-            f"Saved KL/geodesic method-ratio plot to {method_ratio_path} "
-            f"and {method_ratio_path.with_suffix('.pdf')}"
-        )
+        print(f"Saved KL/geodesic method-ratio plot to {method_ratio_path}")
 
         performance_kl_path = args.plot_dir / f"compare_performance_ratio_kl_{family_name}.png"
-        performance_ratio_stats = save_performance_ratio_kl_plot(
-            kl_rows,
-            family_name,
-            performance_kl_path,
-        )
-        save_performance_ratio_kl_plot(
-            kl_rows,
-            family_name,
-            performance_kl_path.with_suffix(".pdf"),
-        )
-        print(
-            f"Saved performance-ratio/KL plot to {performance_kl_path} "
-            f"and {performance_kl_path.with_suffix('.pdf')}"
-        )
-        print(
-            f"Performance-ratio/KL stats ({family_name}): "
-            f"n={performance_ratio_stats['n']:.0f}, "
-            f"Pearson r={performance_ratio_stats['r']:.6g}, "
-            f"p={performance_ratio_stats['p']:.6g}"
-        )
+        save_performance_ratio_kl_plot(kl_rows, family_name, performance_kl_path)
+        print(f"Saved performance-ratio/KL plot to {performance_kl_path}")
 
         performance_over_kl_path = (
             args.plot_dir / f"compare_performance_over_kl_by_method_{family_name}.png"
         )
         save_performance_over_kl_by_method_plot(kl_rows, family_name, performance_over_kl_path)
-        save_performance_over_kl_by_method_plot(
-            kl_rows,
-            family_name,
-            performance_over_kl_path.with_suffix(".pdf"),
-        )
-        print(
-            f"Saved performance/KL by-method plot to {performance_over_kl_path} "
-            f"and {performance_over_kl_path.with_suffix('.pdf')}"
-        )
+        print(f"Saved performance/KL by-method plot to {performance_over_kl_path}")
 
-        performance_kl_distribution_path = (
-            args.plot_dir / f"compare_performance_kl_distribution_{family_name}.png"
-        )
-        save_performance_kl_distribution_plot(
-            kl_rows,
-            family_name,
-            performance_kl_distribution_path,
-        )
-        save_performance_kl_distribution_plot(
-            kl_rows,
-            family_name,
-            performance_kl_distribution_path.with_suffix(".pdf"),
-        )
-        print(
-            f"Saved performance/KL distribution plot to {performance_kl_distribution_path} "
-            f"and {performance_kl_distribution_path.with_suffix('.pdf')}"
-        )
 
 if __name__ == "__main__":
     main()

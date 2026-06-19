@@ -490,7 +490,7 @@ def save_paired_xy_plot(
         label=r"\textsc{Diagonal Fisher (Ours)}",
         zorder=3,
     )
-    ax.set_xlabel(r"$\widehat{D}_{\mathrm{KL}}$")
+    ax.set_xlabel(r"$\widehat{\mathrm{KL}}$")
     ax.set_ylabel(r"Geodesic Distance")
     ax.grid(alpha=0.25)
     ax.legend(

@@ -1046,7 +1046,18 @@ class OFTKarcherMerging(OFTMerging):
         inner_opt = geoopt.optim.RiemannianAdam([R_m], lr=self.lr)
 
         alphas_d_dev = alphas_d.to(self.device)
-        for _ in range(self.n_steps):
+        convergence_interval = max(1, self.n_steps // 10)
+        for step in range(self.n_steps):
+            should_track_convergence = (
+                wandb.run is not None
+                and hasattr(self, "_karcher_convergence")
+                and (
+                    step == 0
+                    or (step + 1) % convergence_interval == 0
+                    or step + 1 == self.n_steps
+                )
+            )
+            previous_R_m = R_m.detach().clone() if should_track_convergence else None
             inner_opt.zero_grad()
             loss: Tensor = torch.zeros(1, device=self.device)
             fisher_iter = iter(fisher_list) if fisher_list is not None else None
@@ -1059,6 +1070,19 @@ class OFTKarcherMerging(OFTMerging):
                     loss = loss + alpha_t * 0.5 * omega_t.pow(2).sum()
             loss.backward()
             inner_opt.step()
+            if previous_R_m is not None:
+                with torch.no_grad():
+                    step_omega = self._matrix_log_skew(
+                        previous_R_m.transpose(-1, -2) @ R_m.detach()
+                    )
+                    current_omega = self._matrix_log_skew(R_m.detach())
+                    step_delta = step_omega.norm().item()
+                    current_norm = current_omega.norm().item()
+                    self._karcher_convergence[step + 1]["delta"].append(step_delta)
+                    self._karcher_convergence[step + 1]["relative_delta"].append(
+                        step_delta / (current_norm + 1e-12)
+                    )
+                    self._karcher_convergence[step + 1]["loss"].append(loss.item())
 
         self._last_loss: float = loss.item()
         with torch.no_grad():
@@ -1120,6 +1144,7 @@ class OFTKarcherMerging(OFTMerging):
 
         merged_weights: Dict[str, Tensor] = {}
         key_losses: Dict[str, float] = {}
+        self._karcher_convergence = defaultdict(lambda: defaultdict(list))
 
         for key in all_weights[0].keys():
             if "oft_r" in key or ("oft_" in key.lower() and "classifier" not in key.lower()):
@@ -1144,6 +1169,19 @@ class OFTKarcherMerging(OFTMerging):
                 **{f"karcher/layer/{n}": sum(vs) / len(vs) for n, vs in by_num.items()},
                 **{f"karcher/type/{t}": sum(vs) / len(vs) for t, vs in by_type.items()},
             })
+            for iteration, metrics in sorted(self._karcher_convergence.items()):
+                wandb.log({
+                    "karcher/convergence/iteration": iteration,
+                    "karcher/convergence/mean_delta": (
+                        sum(metrics["delta"]) / len(metrics["delta"])
+                    ),
+                    "karcher/convergence/mean_relative_delta": (
+                        sum(metrics["relative_delta"]) / len(metrics["relative_delta"])
+                    ),
+                    "karcher/convergence/mean_loss": (
+                        sum(metrics["loss"]) / len(metrics["loss"])
+                    ),
+                })
 
         return merged_weights
 

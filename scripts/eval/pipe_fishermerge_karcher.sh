@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --partition=gpu_h100
+#SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
 #SBATCH --job-name=pipe_fmerge
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=00:10:00
-#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/diagonal_fisher_avg/slurm/pipe_fishermerge_%A.out
+#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/karcher/slurm/pipe_fishermerge_%A.out
 
 set -e
 
@@ -13,7 +13,7 @@ set -e
 MODEL_NAME="qwen2.5"
 
 MERGE_METHOD="gradients"
-MERGE_MODE="diagonal_fisher"
+MERGE_MODE="karcher"
 SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
 REPO_ROOT="/home/eterres/MasterThesis"
 
@@ -39,8 +39,8 @@ conda activate merge
 
 python "${REPO_ROOT}/src/scripts/perform_merging.py" \
     --model_family "${MODEL_NAME}" \
-    --merge_method "${MERGE_METHOD}" \
-    --merge_mode "${MERGE_MODE}" \
+    --merge_method "karcher" \
+    --merge_mode "diagonal_fisher" \
     --output_dir "${MODEL_DIR}" \
     --save_merged_model \
     --lam 0.0 \

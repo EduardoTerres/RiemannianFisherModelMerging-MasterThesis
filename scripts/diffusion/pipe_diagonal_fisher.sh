@@ -16,10 +16,8 @@ export HF_HOME=/scratch-shared/eterres/huggingface-cache
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-cd /home/eterres/MasterThesis/OrthoFuse
-
-python ../src/diffusion/pipe_diagonal_fisher.py \
-  --config_path=output/concept_style/sdxl_merge/example/logs/hparams.yml \
+python src/diffusion/pipe_diagonal_fisher.py \
+  --config_path=src/diffusion/config/config.yaml \
   --output_dir=/home/eterres/MasterThesis/outputs/diffusion \
   --all_dataset \
   --merge_mode=diagonal_fisher_rescaled \

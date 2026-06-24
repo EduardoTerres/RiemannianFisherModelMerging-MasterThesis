@@ -29,6 +29,54 @@ import time
 import json 
 
 
+HF_HUB_CACHE_ENV = "HF_HUB_CACHE"
+HF_HOME_ENV = "HF_HOME"
+HF_HUB_SUBDIR = "hub"
+
+
+def _truthy_env(name, default="1"):
+    value = os.environ.get(name, default)
+    return value.lower() not in {"0", "false", "no", "off"}
+
+
+def _hf_cache_dir():
+    return os.environ.get(HF_HUB_CACHE_ENV) or (
+        os.path.join(os.environ[HF_HOME_ENV], HF_HUB_SUBDIR) if os.environ.get(HF_HOME_ENV) else None
+    )
+
+
+def _hf_load_kwargs():
+    return {
+        "cache_dir": _hf_cache_dir(),
+        "local_files_only": _truthy_env("ORTHOFUSE_LOCAL_FILES_ONLY"),
+    }
+
+
+def _load_pretrained(component_name, loader_cls, model_name_or_path, **kwargs):
+    load_kwargs = _hf_load_kwargs()
+    load_kwargs.update(kwargs)
+    cache_dir = load_kwargs.get("cache_dir") or "<default>"
+    print(
+        f"loading {component_name} from {model_name_or_path} "
+        f"(cache_dir={cache_dir}, local_files_only={load_kwargs.get('local_files_only')})...",
+        flush=True,
+    )
+    component = loader_cls.from_pretrained(model_name_or_path, **load_kwargs)
+    print(f"loaded {component_name}", flush=True)
+    return component
+
+
+def _load_pretrained_on_device(component_name, loader_cls, model_name_or_path, device, **kwargs):
+    load_kwargs = dict(kwargs)
+    if str(device).startswith("cuda"):
+        load_kwargs.setdefault("device_map", {"": device})
+        load_kwargs.setdefault("low_cpu_mem_usage", True)
+    component = _load_pretrained(component_name, loader_cls, model_name_or_path, **load_kwargs)
+    if not str(device).startswith("cuda"):
+        component = component.to(device)
+    return component
+
+
 def _load_orthofuse_adapter_info():
     module_path = Path(__file__).resolve().parents[2] / "src" / "diffusion" / "oft_adapter_info.py"
     spec = importlib.util.spec_from_file_location(
@@ -185,19 +233,26 @@ class BaseInferencer:
         #     self.config['pretrained_model_name_or_path'], subfolder="scheduler"
         # )
 
-        self.unet = UNet2DConditionModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="unet"
+        model_name_or_path = self.config['pretrained_model_name_or_path']
+        self.unet = _load_pretrained_on_device(
+            "UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
         )
-        self.vae = AutoencoderKL.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.vae = _load_pretrained(
+            "VAE",
+            AutoencoderKL,
+            model_name_or_path,
             subfolder="vae", revision=self.config['revision']
         )
-        self.tokenizer = CLIPTokenizer.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.tokenizer = _load_pretrained(
+            "tokenizer",
+            CLIPTokenizer,
+            model_name_or_path,
             subfolder="tokenizer", revision=self.config['revision']
         )
-        self.text_encoder = CLIPTextModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.text_encoder = _load_pretrained(
+            "text encoder",
+            CLIPTextModel,
+            model_name_or_path,
             subfolder="text_encoder", revision=self.config['revision']
         )
 
@@ -207,9 +262,11 @@ class BaseInferencer:
         ))
 
     def setup_pipeline(self):
-        print("setup_pipeline for SDXL")
+        print("setup_pipeline for SDXL", flush=True)
         #self.pipe = StableDiffusionPipeline.from_pretrained(
-        self.pipe = StableDiffusionXLPipeline.from_pretrained(
+        self.pipe = _load_pretrained(
+            "SDXL pipeline",
+            StableDiffusionXLPipeline,
             self.config['pretrained_model_name_or_path'],
             # scheduler=self.scheduler,
             # tokenizer=self.tokenizer,
@@ -218,7 +275,6 @@ class BaseInferencer:
             revision=None,
             requires_safety_checker=False,
             torch_dtype=self.dtype,
-            # local_files_only=True
         ).to(self.device)
         self.pipe.set_progress_bar_config(disable=True)
 
@@ -727,26 +783,33 @@ class MOFTMergeInferencer(BaseInferencer):
 
     def setup_base_model(self):
         # Here we create base models
-        print("setup_base_model SDXL ...")
-        self.scheduler = DDIMScheduler.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="scheduler"
+        print("setup_base_model SDXL ...", flush=True)
+        model_name_or_path = self.config['pretrained_model_name_or_path']
+        self.scheduler = _load_pretrained(
+            "scheduler", DDIMScheduler, model_name_or_path, subfolder="scheduler"
         )
-        self.unet = UNet2DConditionModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="unet"
-        ).to(self.device)
-        self.unet_style = UNet2DConditionModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="unet"
-        ).to(self.device)
-        self.vae = AutoencoderKL.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.unet = _load_pretrained_on_device(
+            "concept UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
+        )
+        self.unet_style = _load_pretrained_on_device(
+            "style UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
+        )
+        self.vae = _load_pretrained(
+            "VAE",
+            AutoencoderKL,
+            model_name_or_path,
             subfolder="vae", revision=self.config['revision']
         )
-        self.tokenizer = CLIPTokenizer.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.tokenizer = _load_pretrained(
+            "tokenizer",
+            CLIPTokenizer,
+            model_name_or_path,
             subfolder="tokenizer", revision=self.config['revision']
         )
-        self.text_encoder = CLIPTextModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.text_encoder = _load_pretrained(
+            "text encoder",
+            CLIPTextModel,
+            model_name_or_path,
             subfolder="text_encoder", revision=self.config['revision']
         )
 
@@ -1086,25 +1149,32 @@ class MOFTMergeFastInferencer(BaseInferencer):
     def setup_base_model(self):
         # Here we create base models
         print("setup_base_model SDXL ...")
-        self.scheduler = DDIMScheduler.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="scheduler"
+        model_name_or_path = self.config['pretrained_model_name_or_path']
+        self.scheduler = _load_pretrained(
+            "fast scheduler", DDIMScheduler, model_name_or_path, subfolder="scheduler"
         )
-        self.unet = UNet2DConditionModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="unet"
-        ).to(self.device)
-        self.unet_style = UNet2DConditionModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="unet"
-        ).to(self.device)
-        self.vae = AutoencoderKL.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.unet = _load_pretrained_on_device(
+            "fast concept UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
+        )
+        self.unet_style = _load_pretrained_on_device(
+            "fast style UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
+        )
+        self.vae = _load_pretrained(
+            "fast VAE",
+            AutoencoderKL,
+            model_name_or_path,
             subfolder="vae", revision=self.config['revision']
         )
-        self.tokenizer = CLIPTokenizer.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.tokenizer = _load_pretrained(
+            "fast tokenizer",
+            CLIPTokenizer,
+            model_name_or_path,
             subfolder="tokenizer", revision=self.config['revision']
         )
-        self.text_encoder = CLIPTextModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.text_encoder = _load_pretrained(
+            "fast text encoder",
+            CLIPTextModel,
+            model_name_or_path,
             subfolder="text_encoder", revision=self.config['revision']
         )
 

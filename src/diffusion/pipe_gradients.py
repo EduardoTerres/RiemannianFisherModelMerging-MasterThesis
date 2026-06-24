@@ -54,7 +54,19 @@ def apply_pair(args, pair):
     args.concept_fisher_path = pair["concept"]["fim_path"]
     args.style_fisher_path = pair["style"]["fim_path"]
     args.dataset_pair_name = pair["name"]
+    args.concept_class_name = pair["concept"]["class_name"]
+    args.placeholder_token_concept = pair["concept"]["placeholder_token"]
+    args.placeholder_token_style = pair["style"]["placeholder_token"]
     return args
+
+
+def apply_pair_config(config, args):
+    if getattr(args, "concept_class_name", None) is None:
+        return config
+    config["class_name"] = args.concept_class_name
+    config["placeholder_token_concept"] = args.placeholder_token_concept
+    config["placeholder_token_style"] = args.placeholder_token_style
+    return config
 
 
 def selected_pairs(args):
@@ -77,6 +89,7 @@ def run_pipe(args):
 
     with open(args.config_path, "r", encoding="utf-8") as config_file:
         config = yaml.safe_load(config_file)
+    config = apply_pair_config(config, args)
     if args.output_dir is not None:
         config["output_dir"] = args.output_dir
 

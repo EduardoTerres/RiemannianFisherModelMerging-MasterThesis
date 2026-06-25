@@ -14,6 +14,9 @@ conda activate orthofuse_env
 
 export HF_HOME=/scratch-shared/eterres/huggingface-cache
 export HF_HUB_CACHE="${HF_HOME}/hub"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export DIFFUSERS_OFFLINE=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 python src/diffusion/pipe_diagonal_fisher.py \
@@ -22,8 +25,8 @@ python src/diffusion/pipe_diagonal_fisher.py \
   --all_dataset \
   --merge_mode=diagonal_fisher_rescaled \
   --alphas 1.0 1.0 \
-  --num_images_per_medium_prompt=2 \
+  --num_images_per_medium_prompt=5 \
   --replace_inference_output \
-  --fisher_min=0 \
+  --fisher_min=1e-14 \
   --fisher_rescale=1e10 \
   --debug

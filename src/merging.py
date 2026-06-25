@@ -396,11 +396,13 @@ class OFTMerging(RiemannianMerging):
             )
 
             correction = sum_of_norms / norm_of_merged.clamp(min=1e-8)
+            norm_rescaled = correction * norm_of_merged
 
             print(
                 "[fisher_norm_rescale] "
                 f"sum_of_norms={sum_of_norms.item():.6g}, "
                 f"norm_of_sum={norm_of_merged.item():.6g}, "
+                f"norm_rescaled={norm_rescaled.item():.6g}, "
                 f"correction={correction.item():.6g}"
             )
 

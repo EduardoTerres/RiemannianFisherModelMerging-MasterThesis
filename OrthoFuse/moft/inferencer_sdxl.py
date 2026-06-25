@@ -15,7 +15,7 @@ from diffusers import (
     StableDiffusionPipeline, AutoencoderKL, DDIMScheduler, UNet2DConditionModel, StableDiffusionXLPipeline
 )
 from diffusers.loaders import AttnProcsLayers
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
 from safetensors.torch import load_file
 from peft import  LoraConfig, get_peft_model
 from .model.moft import MOFTCrossAttnProcessor, DoubleMOFTCrossAttnProcessor, MOFTDoubleCrossAttnProcessor
@@ -164,13 +164,12 @@ def _gradients_merge_with_merging_py(
             fisher.to(device=device, dtype=coords[0].dtype)
             for fisher in fishers
         ]
-    with contextlib.redirect_stdout(io.StringIO()):
-        merged_coords = merger.merge_formula(
-            coords,
-            fisher_list=fisher_list,
-            mode=mode,
-            alphas=None if alphas is None else torch.tensor(alphas, dtype=torch.float32, device=device),
-        )
+    merged_coords = merger.merge_formula(
+        coords,
+        fisher_list=fisher_list,
+        mode=mode,
+        alphas=None if alphas is None else torch.tensor(alphas, dtype=torch.float32, device=device),
+    )
     return _oft_coords_to_full_generator(merger, merged_coords, tensors[0].dtype)
 
 
@@ -229,11 +228,10 @@ class BaseInferencer:
 
     def setup_base_model(self):
         # Here we create base models
-        # self.scheduler = DDIMScheduler.from_pretrained(
-        #     self.config['pretrained_model_name_or_path'], subfolder="scheduler"
-        # )
-
         model_name_or_path = self.config['pretrained_model_name_or_path']
+        self.scheduler = _load_pretrained(
+            "scheduler", DDIMScheduler, model_name_or_path, subfolder="scheduler"
+        )
         self.unet = _load_pretrained_on_device(
             "UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
         )
@@ -249,11 +247,23 @@ class BaseInferencer:
             model_name_or_path,
             subfolder="tokenizer", revision=self.config['revision']
         )
+        self.tokenizer_2 = _load_pretrained(
+            "tokenizer_2",
+            CLIPTokenizer,
+            model_name_or_path,
+            subfolder="tokenizer_2", revision=self.config['revision']
+        )
         self.text_encoder = _load_pretrained(
             "text encoder",
             CLIPTextModel,
             model_name_or_path,
             subfolder="text_encoder", revision=self.config['revision']
+        )
+        self.text_encoder_2 = _load_pretrained(
+            "text encoder 2",
+            CLIPTextModelWithProjection,
+            model_name_or_path,
+            subfolder="text_encoder_2", revision=self.config['revision']
         )
 
     def setup_model(self):
@@ -263,19 +273,17 @@ class BaseInferencer:
 
     def setup_pipeline(self):
         print("setup_pipeline for SDXL", flush=True)
-        #self.pipe = StableDiffusionPipeline.from_pretrained(
-        self.pipe = _load_pretrained(
-            "SDXL pipeline",
-            StableDiffusionXLPipeline,
-            self.config['pretrained_model_name_or_path'],
-            # scheduler=self.scheduler,
-            # tokenizer=self.tokenizer,
+        print("building SDXL pipeline from preloaded components...", flush=True)
+        self.pipe = StableDiffusionXLPipeline(
+            vae=self.vae,
+            text_encoder=self.text_encoder,
+            text_encoder_2=self.text_encoder_2,
+            tokenizer=self.tokenizer,
+            tokenizer_2=self.tokenizer_2,
             unet=self.unet,
-            # text_encoder=self.text_encoder,
-            revision=None,
-            requires_safety_checker=False,
-            torch_dtype=self.dtype,
+            scheduler=self.scheduler,
         ).to(self.device)
+        print("built SDXL pipeline", flush=True)
         self.pipe.set_progress_bar_config(disable=True)
 
     def setup(self):
@@ -806,11 +814,23 @@ class MOFTMergeInferencer(BaseInferencer):
             model_name_or_path,
             subfolder="tokenizer", revision=self.config['revision']
         )
+        self.tokenizer_2 = _load_pretrained(
+            "tokenizer_2",
+            CLIPTokenizer,
+            model_name_or_path,
+            subfolder="tokenizer_2", revision=self.config['revision']
+        )
         self.text_encoder = _load_pretrained(
             "text encoder",
             CLIPTextModel,
             model_name_or_path,
             subfolder="text_encoder", revision=self.config['revision']
+        )
+        self.text_encoder_2 = _load_pretrained(
+            "text encoder 2",
+            CLIPTextModelWithProjection,
+            model_name_or_path,
+            subfolder="text_encoder_2", revision=self.config['revision']
         )
 
     def setup_model(self,):
@@ -1171,11 +1191,23 @@ class MOFTMergeFastInferencer(BaseInferencer):
             model_name_or_path,
             subfolder="tokenizer", revision=self.config['revision']
         )
+        self.tokenizer_2 = _load_pretrained(
+            "fast tokenizer_2",
+            CLIPTokenizer,
+            model_name_or_path,
+            subfolder="tokenizer_2", revision=self.config['revision']
+        )
         self.text_encoder = _load_pretrained(
             "fast text encoder",
             CLIPTextModel,
             model_name_or_path,
             subfolder="text_encoder", revision=self.config['revision']
+        )
+        self.text_encoder_2 = _load_pretrained(
+            "fast text encoder 2",
+            CLIPTextModelWithProjection,
+            model_name_or_path,
+            subfolder="text_encoder_2", revision=self.config['revision']
         )
 
     def setup_model(self,):

@@ -21,6 +21,6 @@ python src/diffusion/pipe_orthofuse.py \
   --output_dir=/home/eterres/MasterThesis/outputs/diffusion \
   --all_dataset \
   --t=0.6 \
-  --num_images_per_medium_prompt=2 \
+  --num_images_per_medium_prompt=5 \
   --replace_inference_output \
   --debug

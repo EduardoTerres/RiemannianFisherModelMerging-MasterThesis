@@ -14,7 +14,7 @@ def prepare_fim_args(args):
     if args.fisher_rescale is None:
         args.fisher_rescale = 1e10
     if args.concept_fisher_path is None:
-        args.concept_fisher_path = "/scratch-shared/eterres/fishers/cat_oft_lie_fim.safetensors"
+        args.concept_fisher_path = "/scratch-shared/eterres/fishers/dog_oft_lie_fim.safetensors"
     if args.style_fisher_path is None:
         args.style_fisher_path = args.concept_fisher_path
     for path in (args.concept_fisher_path, args.style_fisher_path):

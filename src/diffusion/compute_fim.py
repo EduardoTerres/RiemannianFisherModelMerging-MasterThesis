@@ -47,6 +47,14 @@ def log_stage(message):
     print(f"[fim {time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
 
 
+def weight_dtype(name):
+    return {
+        "float32": torch.float32,
+        "bf16": torch.bfloat16,
+        "fp16": torch.float16,
+    }[name]
+
+
 def maybe_init_wandb(args, config):
     try:
         import wandb
@@ -263,6 +271,7 @@ def parse_args():
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--repeats", type=int, default=100)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--weight_dtype", choices=["float32", "bf16", "fp16"], default="float32")
     return parser.parse_args()
 
 
@@ -271,10 +280,11 @@ def load_base_components(args, config, device):
     vae_model_path = VAE_MODEL_PATH
     pretrained_kwargs = pretrained_load_kwargs(args, config)
     vae_kwargs = vae_load_kwargs(args)
+    dtype = weight_dtype(args.weight_dtype)
     log_stage(
         f"Using device={device}; pretrained_model={config.pretrained_model_name_or_path}; "
         f"revision={config.revision}; vae_model={vae_model_path}; cache_dir={pretrained_kwargs['cache_dir']}; "
-        "local_files_only=False"
+        f"local_files_only=False; weight_dtype={args.weight_dtype}"
     )
 
     log_stage(
@@ -297,6 +307,7 @@ def load_base_components(args, config, device):
     unet = UNet2DConditionModel.from_pretrained(
         pretrained_model_path,
         subfolder=UNET_SUBFOLDER,
+        torch_dtype=dtype,
         **pretrained_kwargs,
     )
     log_stage(f"DONE load UNet from_pretrained in {time.time() - start:.1f}s")
@@ -309,6 +320,7 @@ def load_base_components(args, config, device):
     start = time.time()
     vae = AutoencoderKL.from_pretrained(
         vae_model_path,
+        torch_dtype=dtype,
         **vae_kwargs,
     )
     log_stage(f"DONE load VAE from_pretrained in {time.time() - start:.1f}s")
@@ -349,6 +361,7 @@ def load_base_components(args, config, device):
     text_encoder = CLIPTextModel.from_pretrained(
         pretrained_model_path,
         subfolder=TEXT_ENCODER_SUBFOLDER,
+        torch_dtype=dtype,
         **pretrained_kwargs,
     )
     log_stage(f"DONE load text_encoder from_pretrained in {time.time() - start:.1f}s")
@@ -365,6 +378,7 @@ def load_base_components(args, config, device):
     text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
         pretrained_model_path,
         subfolder=TEXT_ENCODER_2_SUBFOLDER,
+        torch_dtype=dtype,
         **pretrained_kwargs,
     )
     log_stage(f"DONE load text_encoder_2 from_pretrained in {time.time() - start:.1f}s")

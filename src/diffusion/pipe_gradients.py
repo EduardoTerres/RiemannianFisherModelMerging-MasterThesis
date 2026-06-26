@@ -30,8 +30,7 @@ def parse_args():
     parser.add_argument("--fisher_rescale", type=float, default=None)
     parser.add_argument("--alphas", type=float, nargs=2, default=None, metavar=("CONCEPT", "STYLE"))
     parser.add_argument("--merge_mode", type=str, default=None)
-    parser.add_argument("--all_dataset", action="store_true")
-    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--samples", type=str, default=None)
     parser.add_argument("--concept_name", type=str, default=None)
     parser.add_argument("--style_name", type=str, default=None)
     parser.add_argument("--dataset_pair_name", type=str, default=None)
@@ -70,10 +69,13 @@ def apply_pair_config(config, args):
 
 
 def selected_pairs(args):
-    if args.debug:
-        return [get_pair(DIFFUSION_MERGE_PAIRS[0]["concept"]["name"], "01_08")]
-    if args.all_dataset:
+    if args.samples == "all_dataset_pairs":
         return DIFFUSION_MERGE_PAIRS
+    if args.samples is not None:
+        if ":" not in args.samples:
+            raise ValueError("samples must be 'all_dataset_pairs' or '<concept_name>:<style_name>'.")
+        concept_name, style_name = args.samples.split(":", 1)
+        return [get_pair(concept_name, style_name)]
     if args.concept_name is not None or args.style_name is not None:
         if args.concept_name is None or args.style_name is None:
             raise ValueError("Both concept_name and style_name are required.")

@@ -22,11 +22,10 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 python src/diffusion/pipe_diagonal_fisher.py \
   --config_path=src/diffusion/config/config.yaml \
   --output_dir=/home/eterres/MasterThesis/outputs/diffusion \
-  --all_dataset \
-  --merge_mode=diagonal_fisher_rescaled \
+  --samples dog6:01_07 \
+  --merge_mode=diagonal_fisher \
   --alphas 1.0 1.0 \
-  --num_images_per_medium_prompt=5 \
+  --num_images_per_medium_prompt=2 \
   --replace_inference_output \
   --fisher_min=1e-14 \
-  --fisher_rescale=1e10 \
-  --debug
+  --fisher_rescale=1e10

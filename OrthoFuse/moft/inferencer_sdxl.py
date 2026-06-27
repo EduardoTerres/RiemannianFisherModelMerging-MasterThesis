@@ -96,6 +96,7 @@ print_unet_oft_summary = _adapter_info.print_unet_oft_summary
 inferencers = ClassRegistry()
 
 _ROOT_OFT_MERGING_CLASS = None
+_ROOT_OFT_GEODESIC_MERGING_CLASS = None
 
 
 def _load_root_oft_merging_class():
@@ -134,6 +135,28 @@ def _load_root_oft_merging_class():
     return _ROOT_OFT_MERGING_CLASS
 
 
+def _load_root_oft_geodesic_merging_class():
+    """Load top-level src/merging_geodesic.py without import-package ambiguity."""
+    global _ROOT_OFT_GEODESIC_MERGING_CLASS
+    if _ROOT_OFT_GEODESIC_MERGING_CLASS is not None:
+        return _ROOT_OFT_GEODESIC_MERGING_CLASS
+
+    repo_root = Path(__file__).resolve().parents[2]
+    geodesic_path = repo_root / "src" / "merging_geodesic.py"
+
+    if "src.geometry" not in sys.modules:
+        _load_root_oft_merging_class()
+
+    geodesic_spec = importlib.util.spec_from_file_location(
+        "_root_oft_geodesic_merging",
+        geodesic_path,
+    )
+    geodesic_module = importlib.util.module_from_spec(geodesic_spec)
+    geodesic_spec.loader.exec_module(geodesic_module)
+    _ROOT_OFT_GEODESIC_MERGING_CLASS = geodesic_module.OFTGeodesicMerging
+    return _ROOT_OFT_GEODESIC_MERGING_CLASS
+
+
 def _full_generator_to_oft_coords(merger, tensor):
     skew = 0.5 * (tensor - tensor.transpose(-1, -2))
     return merger.skew_matrix_to_oft_params(skew)
@@ -143,6 +166,102 @@ def _oft_coords_to_full_generator(merger, coords, dtype):
     return merger.oft_params_to_skew_matrix(coords, coords.shape[-1]).to(dtype=dtype)
 
 
+def _skew(data):
+    return 0.5 * (data - data.transpose(-1, -2))
+
+
+def _cayley(data):
+    skew = _skew(data)
+    n = skew.shape[-1]
+    eye = torch.eye(n, dtype=skew.dtype, device=skew.device).expand_as(skew)
+    return torch.linalg.solve(eye - skew, eye + skew, left=False)
+
+
+def _inverse_cayley(q):
+    n = q.shape[-1]
+    eye = torch.eye(n, dtype=q.dtype, device=q.device).expand_as(q)
+    generator = torch.linalg.solve(q + eye, q - eye, left=False)
+    return _skew(generator)
+
+
+def _upper_coords(tensor):
+    n = tensor.shape[-1]
+    idx = torch.triu_indices(n, n, offset=1, device=tensor.device)
+    return tensor[:, idx[0], idx[1]]
+
+
+def _coords_to_skew(coords, n):
+    idx = torch.triu_indices(n, n, offset=1, device=coords.device)
+    skew = torch.zeros(coords.shape[0], n, n, dtype=coords.dtype, device=coords.device)
+    skew[:, idx[0], idx[1]] = coords
+    return skew - skew.transpose(-1, -2)
+
+
+def _transport_matrix(skew_matrix):
+    block_size = skew_matrix.shape[-1]
+    idx = torch.triu_indices(block_size, block_size, offset=1, device=skew_matrix.device)
+    r = torch.matrix_exp(skew_matrix / 2)
+    i, j = idx[0], idx[1]
+    return r[:, i][:, :, i] * r[:, j][:, :, j] - r[:, i][:, :, j] * r[:, j][:, :, i]
+
+
+def _fisher_to_matrix(fisher, ref_coords):
+    fisher = fisher.to(device=ref_coords.device, dtype=torch.float32)
+    if fisher.dim() == 3 and fisher.shape[-1] == fisher.shape[-2]:
+        if fisher.shape[-1] == ref_coords.shape[-1]:
+            return fisher
+        fisher = _upper_coords(fisher)
+    if fisher.shape == ref_coords.shape:
+        return torch.diag_embed(fisher.clamp(min=0.0))
+    raise ValueError(f"Unsupported Fisher shape {tuple(fisher.shape)} for {tuple(ref_coords.shape)}")
+
+
+def _cayley_fisher_tangent(tangent, fishers, beta):
+    log_coords = _upper_coords(tangent)
+    h1 = _fisher_to_matrix(fishers[0], log_coords)
+    h2 = _fisher_to_matrix(fishers[1], log_coords)
+    pt = _transport_matrix(tangent).to(dtype=torch.float32)
+    h2 = pt @ h2 @ pt.transpose(-1, -2)
+
+    d = log_coords.shape[-1]
+    eye = torch.eye(d, dtype=torch.float32, device=log_coords.device).expand(
+        log_coords.shape[0], d, d
+    )
+    system = (1.0 - beta) * h1 + beta * h2
+    rhs = beta * (h2 @ log_coords.float().unsqueeze(-1)).squeeze(-1)
+    coords = torch.linalg.solve(system + 1e-8 * eye, rhs.unsqueeze(-1)).squeeze(-1)
+    return _coords_to_skew(coords, tangent.shape[-1])
+
+
+def _cayley_geodesic_merge_with_generators(tensors, device, alphas=None, fishers=None):
+    if len(tensors) != 2:
+        raise ValueError(f"Geodesic interpolation requires exactly 2 tensors; got {len(tensors)}")
+    if alphas is None:
+        t = torch.tensor(0.5, dtype=torch.float32, device=device)
+    else:
+        alpha_tensor = torch.tensor(alphas, dtype=torch.float32, device=device).flatten()
+        if alpha_tensor.numel() != 2:
+            raise ValueError(f"Geodesic alphas must have length 2; got {alpha_tensor.numel()}")
+        t = alpha_tensor[1] / alpha_tensor.sum().clamp_min(1e-8)
+
+    if t <= 1e-8:
+        return _skew(tensors[0]).to(dtype=tensors[0].dtype)
+    if t >= 1.0 - 1e-8:
+        return _skew(tensors[1]).to(dtype=tensors[0].dtype)
+
+    q0 = _cayley(tensors[0].to(device=device, dtype=torch.float32))
+    q1 = _cayley(tensors[1].to(device=device, dtype=torch.float32))
+    relative = q0.transpose(-1, -2) @ q1
+    tangent = _inverse_cayley(relative)
+    tangent_step = (
+        _cayley_fisher_tangent(tangent, fishers, t)
+        if fishers is not None
+        else t * tangent
+    )
+    qt = q0 @ _cayley(tangent_step)
+    return _inverse_cayley(qt).to(dtype=tensors[0].dtype)
+
+
 def _gradients_merge_with_merging_py(
     tensors,
     device,
@@ -150,10 +269,16 @@ def _gradients_merge_with_merging_py(
     fishers=None,
     merger=None,
     alphas=None,
+    geodesic_backend="cayley",
 ):
+    if mode == "geodesic":
+        if geodesic_backend == "cayley":
+            return _cayley_geodesic_merge_with_generators(tensors, device, alphas, fishers)
+        raise ValueError(f"Unsupported geodesic_backend: {geodesic_backend!r}")
+
     if merger is None:
-        OFTMerging = _load_root_oft_merging_class()
-        merger = OFTMerging(device=str(device))
+        merger_cls = _load_root_oft_merging_class()
+        merger = merger_cls(device=str(device))
     coords = [
         _full_generator_to_oft_coords(merger, tensor).to(device=device)
         for tensor in tensors
@@ -468,14 +593,25 @@ class GradientsMergeInferencer(MOFTInferencer):
 
     def create_folder_name(self):
         mode = self._merge_mode()
+        backend_suffix = ""
+        if mode == "geodesic":
+            backend_suffix = f"_{getattr(self.args, 'geodesic_backend', 'cayley')}"
+            if getattr(self.args, "geodesic_use_fishers", False):
+                backend_suffix += "_fisher"
         pair_name = getattr(self.args, "dataset_pair_name", None)
         pair_suffix = f"_{pair_name}" if pair_name else ""
         self.inference_folder_name = (
             f"ns{self.args.num_inference_steps}_gs{self.args.guidance_scale}"
-            f"_gradients_{mode}{pair_suffix}"
+            f"_gradients_{mode}{backend_suffix}{pair_suffix}"
         )
 
     def _fisher_paths(self):
+        if getattr(self.args, "merge_mode", None) == "geodesic" and not getattr(
+            self.args,
+            "geodesic_use_fishers",
+            False,
+        ):
+            return None
         concept_fisher_path = getattr(self.args, "concept_fisher_path", None)
         style_fisher_path = getattr(self.args, "style_fisher_path", None)
         if concept_fisher_path is None and style_fisher_path is None:
@@ -614,9 +750,18 @@ class GradientsMergeInferencer(MOFTInferencer):
         )
         _log_merge(f"summary: tensor shapes={shape_summary}")
         merged_state = {}
-        OFTMerging = _load_root_oft_merging_class()
-        merge_engine = OFTMerging(device=str(self.device))
-        _log_merge("initialized OFTMerging engine once for this adapter merge")
+        geodesic_backend = getattr(self.args, "geodesic_backend", "cayley")
+        if merge_mode == "geodesic" and geodesic_backend == "cayley":
+            merge_engine = None
+            _log_merge("using fast Cayley geodesic merge for this adapter merge")
+        else:
+            merger_cls = (
+                _load_root_oft_geodesic_merging_class()
+                if merge_mode == "geodesic"
+                else _load_root_oft_merging_class()
+            )
+            merge_engine = merger_cls(device=str(self.device))
+            _log_merge(f"initialized {merger_cls.__name__} engine once for this adapter merge")
         merge_start = time.time()
         merged_count = 0
         slowest_key = None
@@ -643,6 +788,7 @@ class GradientsMergeInferencer(MOFTInferencer):
                     fishers=fishers,
                     merger=merge_engine,
                     alphas=merge_alphas,
+                    geodesic_backend=geodesic_backend,
                 )
                 tensor_seconds = time.time() - tensor_start
                 merged_count += 1

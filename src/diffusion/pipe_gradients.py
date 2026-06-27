@@ -30,6 +30,8 @@ def parse_args():
     parser.add_argument("--fisher_rescale", type=float, default=None)
     parser.add_argument("--alphas", type=float, nargs=2, default=None, metavar=("CONCEPT", "STYLE"))
     parser.add_argument("--merge_mode", type=str, default=None)
+    parser.add_argument("--geodesic_backend", choices=["cayley"], default="cayley")
+    parser.add_argument("--geodesic_use_fishers", action="store_true")
     parser.add_argument("--samples", type=str, default=None)
     parser.add_argument("--concept_name", type=str, default=None)
     parser.add_argument("--style_name", type=str, default=None)

@@ -12,7 +12,10 @@ from torch import Tensor
 from torch.func import functional_call
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import geoopt
+try:
+    import geoopt
+except ModuleNotFoundError:
+    geoopt = None
 import re
 from collections import defaultdict
 
@@ -1030,6 +1033,9 @@ class OFTKarcherMerging(OFTMerging):
                    coordinate Fisher F_t^SO = (E_ij theta_0)^T R_t^T F_t R_t (E_kl theta_0).
         R_m lives on the Stiefel manifold; RiemannianAdam handles gradient projection + retraction.
         """
+        if geoopt is None:
+            raise ImportError("OFTKarcherMerging requires geoopt to be installed.")
+
         son_dimension = weights_list[0].shape[1]
         R_list = [
             torch.matrix_exp(self.oft_params_to_skew_matrix(w.float(), son_dimension)).detach()

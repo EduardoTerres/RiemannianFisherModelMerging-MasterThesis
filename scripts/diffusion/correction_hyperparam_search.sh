@@ -35,7 +35,8 @@ PAIRS=(
 )
 
 PAIRS=(
-  "cat2:pots"
+  "dog:03_04"
+  "cat:01_01"
 )
 
 python "${REPO_ROOT}/src/diffusion/correction_hyperparam_search.py" \

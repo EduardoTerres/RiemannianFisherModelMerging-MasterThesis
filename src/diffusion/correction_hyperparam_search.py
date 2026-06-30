@@ -60,7 +60,7 @@ def parse_args():
 
 
 def corrections():
-    return [1.0 + 0.25 * idx for idx in range(9)]
+    return [1.0 + 0.25 * t for t in np.linspace(0, 1, 8)]
 
 
 def alpha_grid(num_points):

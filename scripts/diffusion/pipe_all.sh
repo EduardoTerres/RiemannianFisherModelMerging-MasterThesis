@@ -31,6 +31,7 @@ export DIFFUSERS_OFFLINE="${DIFFUSERS_OFFLINE:-1}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONPATH="${REPO_ROOT}/OrthoFuse:${REPO_ROOT}:${PYTHONPATH:-}"
 
+# Short script to create all pairs
 mapfile -t PAIRS < <(
   python - <<'PY'
 from src.diffusion.dataset_1 import DIFFUSION_MERGE_PAIRS

@@ -140,7 +140,7 @@ def fisher_key(adapter_key, processor_to_fisher):
 def standard(weights, alphas):
     stacked = torch.stack(weights).float()
     a = torch.tensor(alphas, dtype=stacked.dtype, device=stacked.device)
-    return torch.einsum("t,t...->...", a, stacked) / len(weights)
+    return torch.einsum("t,t...->...", a, stacked)
 
 
 def norm_rescale(weights, merged, alphas):
@@ -149,7 +149,7 @@ def norm_rescale(weights, merged, alphas):
     while a.dim() < stacked.dim():
         a = a.unsqueeze(-1)
     target = torch.linalg.vector_norm((a * stacked).flatten(1), dim=1).sum()
-    source = torch.linalg.vector_norm(len(weights) * merged.float())
+    source = torch.linalg.vector_norm(merged.float())
     return merged * target / source.clamp_min(1e-8)
 
 

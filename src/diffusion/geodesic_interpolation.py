@@ -17,7 +17,19 @@ from src.diffusion.pipe_orthofuse import (
 )
 
 
-METHODS = ("standard_geodesic", "fisher_geodesic", "orthofuse_geodesic")
+ORTHOFUSE_METHODS = {
+    "orthofuse_geodesic": "no_modification",
+    "orthofuse_geodesic_curve_over_id": "curve_over_id",
+    "orthofuse_geodesic_rotation": "rotation",
+}
+METHODS = (
+    "standard_geodesic",
+    "fisher_geodesic",
+    "standard_rescaled",
+    "diagonal_fisher",
+    "diagonal_fisher_rescaled",
+    *ORTHOFUSE_METHODS.keys(),
+)
 
 
 def parse_args():
@@ -70,18 +82,22 @@ def prompt_path(args, pair, folder, version):
     )
 
 
-def gradient_folder(args, pair_name, use_fishers, backend):
-    suffix = "_fisher" if use_fishers else ""
+def gradient_folder(args, pair_name, merge_mode, use_fishers, backend):
+    suffix = ""
+    if merge_mode == "geodesic":
+        suffix = f"_{backend}"
+        if use_fishers:
+            suffix += "_fisher"
     return (
         f"ns{args.num_inference_steps}_gs{args.guidance_scale}"
-        f"_gradients_geodesic_{backend}{suffix}_{pair_name}"
+        f"_gradients_{merge_mode}{suffix}_{pair_name}"
     )
 
 
-def orthofuse_folder(args, pair_name, t):
+def orthofuse_folder(args, pair_name, t, postprocessing_method):
     return (
         f"ns{args.num_inference_steps}_gs{args.guidance_scale}"
-        f"_orthofuse_t{t}_method_{args.orthofuse_postprocessing_method}_{pair_name}"
+        f"_orthofuse_t{t}_method_{postprocessing_method}_{pair_name}"
     )
 
 
@@ -106,7 +122,7 @@ def make_montage(image_paths, alphas, save_path):
     canvas.save(save_path)
 
 
-def gradient_args(args, alphas, version, use_fishers, backend):
+def gradient_args(args, alphas, version, merge_mode, use_fishers, backend):
     return argparse.Namespace(
         config_path=args.config_path,
         output_dir=str(interpolation_root(args)),
@@ -118,7 +134,7 @@ def gradient_args(args, alphas, version, use_fishers, backend):
         fisher_min=args.fisher_min,
         fisher_rescale=args.fisher_rescale,
         alphas=list(alphas),
-        merge_mode="geodesic",
+        merge_mode=merge_mode,
         geodesic_backend=backend,
         geodesic_use_fishers=use_fishers,
         samples=None,
@@ -138,7 +154,7 @@ def gradient_args(args, alphas, version, use_fishers, backend):
     )
 
 
-def orthofuse_args(args, beta, version):
+def orthofuse_args(args, beta, version, postprocessing_method):
     return argparse.Namespace(
         config_path=args.config_path,
         output_dir=str(interpolation_root(args)),
@@ -152,7 +168,7 @@ def orthofuse_args(args, beta, version):
         dataset_pair_name=None,
         t=beta,
         parameter=None,
-        postprocessing_method=args.orthofuse_postprocessing_method,
+        postprocessing_method=postprocessing_method,
         num_images_per_medium_prompt=args.num_images_per_medium_prompt,
         num_images_per_base_prompt=0,
         batch_size_medium=args.batch_size_medium,
@@ -165,21 +181,21 @@ def orthofuse_args(args, beta, version):
     )
 
 
-def run_gradient_method(args, pair, alphas, method, use_fishers, backend):
+def run_gradient_method(args, pair, alphas, method, merge_mode, use_fishers, backend):
     paths = []
     for idx, alpha in enumerate(alphas):
         version = args.version_start + idx
-        run_args = gradient_args(args, alpha, version, use_fishers, backend)
+        run_args = gradient_args(args, alpha, version, merge_mode, use_fishers, backend)
         apply_gradient_pair(run_args, pair)
         print(
-            f"[interpolate] {method} {pair['name']} beta={alpha[1]:.3f} backend={backend}",
+            f"[interpolate] {method} {pair['name']} beta={alpha[1]:.3f}",
             flush=True,
         )
         run_gradient_pipe(run_args)
         path = prompt_path(
             args,
             pair,
-            gradient_folder(args, pair["name"], use_fishers, backend),
+            gradient_folder(args, pair["name"], merge_mode, use_fishers, backend),
             version,
         )
         if not path.exists():
@@ -188,16 +204,25 @@ def run_gradient_method(args, pair, alphas, method, use_fishers, backend):
     return paths
 
 
-def run_orthofuse_method(args, pair, alphas):
+def run_orthofuse_method(args, pair, alphas, method, postprocessing_method):
     paths = []
     for idx, alpha in enumerate(alphas):
         version = args.version_start + idx
         beta = alpha[1]
-        run_args = orthofuse_args(args, beta, version)
+        run_args = orthofuse_args(args, beta, version, postprocessing_method)
         apply_orthofuse_pair(run_args, pair)
-        print(f"[interpolate] orthofuse_geodesic {pair['name']} t={beta:.3f}", flush=True)
+        print(
+            f"[interpolate] {method} {pair['name']} t={beta:.3f} "
+            f"post={postprocessing_method}",
+            flush=True,
+        )
         run_orthofuse_pipe(run_args)
-        path = prompt_path(args, pair, orthofuse_folder(args, pair["name"], beta), version)
+        path = prompt_path(
+            args,
+            pair,
+            orthofuse_folder(args, pair["name"], beta, postprocessing_method),
+            version,
+        )
         if not path.exists():
             raise FileNotFoundError(f"Expected generated image missing: {path}")
         paths.append(path)
@@ -219,6 +244,7 @@ def main():
                 pair,
                 alphas,
                 method="standard_geodesic",
+                merge_mode="geodesic",
                 use_fishers=False,
                 backend=args.geodesic_backend,
             )
@@ -228,11 +254,40 @@ def main():
                 pair,
                 alphas,
                 method="fisher_geodesic",
+                merge_mode="geodesic",
                 use_fishers=True,
                 backend=args.geodesic_backend,
             )
-        if "orthofuse_geodesic" in args.methods:
-            method_paths["orthofuse_geodesic"] = run_orthofuse_method(args, pair, alphas)
+        if "standard_rescaled" in args.methods:
+            method_paths["standard_rescaled"] = run_gradient_method(
+                args,
+                pair,
+                alphas,
+                method="standard_rescaled",
+                merge_mode="standard_rescaled",
+                use_fishers=False,
+                backend=args.geodesic_backend,
+            )
+        for method in ("diagonal_fisher", "diagonal_fisher_rescaled"):
+            if method in args.methods:
+                method_paths[method] = run_gradient_method(
+                    args,
+                    pair,
+                    alphas,
+                    method=method,
+                    merge_mode=method,
+                    use_fishers=True,
+                    backend=args.geodesic_backend,
+                )
+        for method, postprocessing_method in ORTHOFUSE_METHODS.items():
+            if method in args.methods:
+                method_paths[method] = run_orthofuse_method(
+                    args,
+                    pair,
+                    alphas,
+                    method=method,
+                    postprocessing_method=postprocessing_method,
+                )
 
         for method, paths in method_paths.items():
             save_path = (

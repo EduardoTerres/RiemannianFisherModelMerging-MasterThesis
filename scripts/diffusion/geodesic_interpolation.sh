@@ -31,13 +31,30 @@ PAIRS=(
   "dog:03_04"
 )
 
+METHODS=(
+  orthofuse_geodesic_curve_over_id
+)
+
+# METHODS=(
+#   standard_rescaled
+#   diagonal_fisher
+#   diagonal_fisher_rescaled
+#   standard_geodesic
+#   fisher_geodesic
+#   standard_rescaled
+#   orthofuse_geodesic
+#   orthofuse_geodesic_curve_over_id
+# )
+
 for PAIR in "${PAIRS[@]}"; do
   python "${REPO_ROOT}/src/diffusion/geodesic_interpolation.py" \
     --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
     --output_dir="${REPO_ROOT}/outputs/diffusion" \
     --samples "${PAIR}" \
-    --methods ${METHODS:-standard_geodesic fisher_geodesic orthofuse_geodesic} \
-    --geodesic_backend "${GEODESIC_BACKEND:-cayley}" \
+    --methods "${METHODS[@]}" \
+    --geodesic_backend "cayley" \
+    --fisher_min 1e-14 \
+    --fisher_rescale 1e10 \
     --num_points 10 \
     --num_images_per_medium_prompt 1 \
     --replace_inference_output

@@ -234,7 +234,7 @@ class OFTMerging(RiemannianMerging):
             alphas = self._resolve_alphas(T).to(self.device)
 
         if mode == "standard":
-            return self._standard_merging(weights_list, alphas)
+            return len(weights_list) * self._standard_merging(weights_list, alphas)
 
         if mode == "standard_rescaled":
             # assumes alpha_t = 1 and then applies orthomerge correction
@@ -312,13 +312,12 @@ class OFTMerging(RiemannianMerging):
         Returns:
             Merged parameters of shape (num_blocks, d).
         """
-        num_models = len(weights_list)
         stacked = torch.stack(weights_list, dim=0)  # (T, num_blocks, n, n)
         if isinstance(alphas, torch.Tensor):
             a = alphas.to(dtype=stacked.dtype, device=stacked.device)
         else:
             a = torch.tensor(alphas, dtype=stacked.dtype, device=stacked.device)
-        return torch.einsum("t,t...->...", a, stacked) / num_models
+        return torch.einsum("t,t...->...", a, stacked)
 
     def _orthomerge_rescale(
         self,
@@ -336,7 +335,6 @@ class OFTMerging(RiemannianMerging):
         Returns:
             Rescaled merged parameters of shape (num_blocks, d).
         """
-        num_models = len(weights_list)
         stacked = torch.stack(weights_list, dim=0).float().to(merged.device)
         if isinstance(alphas, torch.Tensor):
             a = alphas.to(dtype=stacked.dtype, device=stacked.device)
@@ -348,7 +346,7 @@ class OFTMerging(RiemannianMerging):
 
         weighted = a * stacked
         sum_of_norms = torch.norm(weighted.flatten(1), p="fro", dim=1).sum()
-        norm_of_merged = torch.norm(num_models * merged.float(), p="fro")
+        norm_of_merged = torch.norm(merged.float(), p="fro")
         correction = sum_of_norms / norm_of_merged.clamp(min=1e-8)
         print("[orthomerge_rescale] " f"sum_of_norms={sum_of_norms.item():.6g}, " f"norm_of_sum={norm_of_merged.item():.6g}, " f"correction={correction.item():.6g}")
         return (correction * merged).to(dtype=weights_list[0].dtype)

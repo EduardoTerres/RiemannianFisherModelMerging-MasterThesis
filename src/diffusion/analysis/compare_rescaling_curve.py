@@ -1,5 +1,4 @@
 import argparse
-import csv
 import os
 import sys
 from collections import defaultdict
@@ -37,7 +36,6 @@ from src.diffusion.analysis.sdxl_merge_stats import (
 METHODS = (
     "orthofuse__curve_over_id",
     "diagonal_fisher__rescaled",
-    "diagonal_fisher__max_rescaled",
     "diagonal_fisher__std_rescaled",
     "standard__rescaled",
 )
@@ -111,7 +109,7 @@ def norm_ratio_rows(base_by_key, corrected_by_key):
         )
         rows[f"base_{side.lower()}_mean"] = base_norms.mean().item()
         rows[f"corrected_{side.lower()}_mean"] = corrected_norms.mean().item()
-        rows[f"ratio_{side.lower()}_mean"] = (base_norms / corrected_norms.clamp_min(1e-8)).mean().item()
+        rows[f"ratio_{side.lower()}_mean"] = (corrected_norms / base_norms.clamp_min(1e-8)).mean().item()
 
     base_total = torch.sqrt(
         sum(base.float().pow(2).sum() for base in base_by_key.values())
@@ -121,7 +119,7 @@ def norm_ratio_rows(base_by_key, corrected_by_key):
     )
     rows["base_total"] = base_total.item()
     rows["corrected_total"] = corrected_total.item()
-    rows["ratio_total"] = (base_total / corrected_total.clamp_min(1e-8)).item()
+    rows["ratio_total"] = (corrected_total / base_total.clamp_min(1e-8)).item()
     return rows
 
 
@@ -140,19 +138,6 @@ def fisher_norm_rescale(weights, fishers, merged, alphas):
     return merged * target / source.clamp_min(1e-8)
 
 
-def fisher_norm_max_rescale(weights, fishers, merged, alphas):
-    stacked = torch.stack(weights).float().to(merged.device)
-    fishers = torch.stack([f.float().to(merged.device).clamp_min(0.0) for f in fishers])
-    a = torch.tensor(alphas, dtype=stacked.dtype, device=stacked.device)
-    while a.dim() < stacked.dim():
-        a = a.unsqueeze(-1)
-    a_flat = a.reshape(a.shape[0], -1)[:, 0].abs()
-    target = a_flat * (fishers * stacked.square()).flatten(1).sum(dim=1)
-    source = (fishers * merged.float().square()).flatten(1).sum(dim=1)
-    correction = torch.sqrt((target / source.clamp_min(1e-8)).clamp_min(0.0)).max()
-    return merged * correction
-
-
 def analyze_pair(pair, args):
     device = torch.device(args.device)
     concept_state = load_file(pair["concept"]["adapter_path"], device=str(device))
@@ -166,10 +151,10 @@ def analyze_pair(pair, args):
     rows = []
 
     for alpha_concept in grid:
-        alphas = (alpha_concept, 1.0 - alpha_concept)
+        alphas = (1.0 - alpha_concept, alpha_concept)
         ortho_base, ortho_curve = {}, {}
         standard_base, standard_rescaled = {}, {}
-        fisher_base, fisher_rescaled, fisher_max_rescaled, fisher_std_rescaled = {}, {}, {}, {}
+        fisher_base, fisher_rescaled, fisher_std_rescaled = {}, {}, {}
 
         for key in keys:
             concept = concept_state[key]
@@ -195,22 +180,18 @@ def analyze_pair(pair, args):
                 standard_rescaled[key] = coords_to_skew(norm_rescale(weights, merged_standard, alphas))
             if (
                 "diagonal_fisher__rescaled" in args.methods
-                or "diagonal_fisher__max_rescaled" in args.methods
                 or "diagonal_fisher__std_rescaled" in args.methods
             ):
                 merged_fisher = diagonal_fisher(weights, fishers, alphas)
                 fisher_base[key] = coords_to_skew(merged_fisher)
                 if "diagonal_fisher__rescaled" in args.methods:
                     fisher_rescaled[key] = coords_to_skew(fisher_norm_rescale(weights, fishers, merged_fisher, alphas))
-                if "diagonal_fisher__max_rescaled" in args.methods:
-                    fisher_max_rescaled[key] = coords_to_skew(fisher_norm_max_rescale(weights, fishers, merged_fisher, alphas))
                 if "diagonal_fisher__std_rescaled" in args.methods:
                     fisher_std_rescaled[key] = coords_to_skew(standard_norm_rescale(weights, merged_fisher, alphas))
 
         comparisons = {
             "orthofuse__curve_over_id": (ortho_base, ortho_curve),
             "diagonal_fisher__rescaled": (fisher_base, fisher_rescaled),
-            "diagonal_fisher__max_rescaled": (fisher_base, fisher_max_rescaled),
             "diagonal_fisher__std_rescaled": (fisher_base, fisher_std_rescaled),
             "standard__rescaled": (standard_base, standard_rescaled),
         }
@@ -220,19 +201,12 @@ def analyze_pair(pair, args):
                 {
                     "pair": pair["name"],
                     "method_pair": method,
-                    "alpha_concept": alpha_concept,
-                    "alpha_style": 1.0 - alpha_concept,
+                    "alpha_concept": alphas[0],
+                    "alpha_style": alphas[1],
                     **norm_ratio_rows(base, corrected),
                 }
             )
     return rows
-
-
-def write_csv(path, rows):
-    with open(path, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def average_rows(rows):
@@ -262,13 +236,35 @@ def plot(rows, path):
         axes[1].plot(x, [row["ratio_l_mean"] for row in series], marker="o", label=f"{method_pair} L")
         axes[1].plot(x, [row["ratio_r_mean"] for row in series], marker="s", linestyle="--", label=f"{method_pair} R")
     axes[0].set_title("Correction norm ratio")
-    axes[0].set_ylabel("global skew ||base|| / ||corrected||")
+    axes[0].set_ylabel("global skew ||corrected|| / ||base||")
     axes[1].set_title("Average L/R skew norm ratios")
-    axes[1].set_ylabel("mean per-tensor skew ||base|| / ||corrected||")
+    axes[1].set_ylabel("mean per-tensor skew ||corrected|| / ||base||")
     for ax in axes:
         ax.set_xlabel("alpha_concept")
         ax.grid(alpha=0.25)
         ax.legend(fontsize=8)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def plot_rescaled_norm(rows, path):
+    fig, ax = plt.subplots(figsize=(7, 4.5), constrained_layout=True)
+    for method_pair in sorted({row["method_pair"] for row in rows}):
+        series = sorted(
+            [row for row in rows if row["method_pair"] == method_pair],
+            key=lambda row: row["alpha_concept"],
+        )
+        ax.plot(
+            [row["alpha_concept"] for row in series],
+            [row["corrected_total"] for row in series],
+            marker="o",
+            label=method_pair,
+        )
+    ax.set_title("Rescaled merge norm")
+    ax.set_xlabel("alpha_concept")
+    ax.set_ylabel("global skew ||corrected||")
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8)
     fig.savefig(path, dpi=180)
     plt.close(fig)
 
@@ -286,8 +282,8 @@ def main():
 
     prefix = "all_pairs" if args.all_dataset else pairs[0]["name"]
     averaged = average_rows(rows) if args.all_dataset else rows
-    write_csv(output_dir / f"{prefix}_rescaling_curve.csv", rows)
     plot(averaged, output_dir / f"{prefix}_rescaling_curve.png")
+    plot_rescaled_norm(averaged, output_dir / f"{prefix}_rescaled_norm.png")
     print(f"Saved {prefix} rescaling curve to {output_dir}", flush=True)
 
 

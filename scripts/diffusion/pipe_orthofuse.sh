@@ -16,11 +16,24 @@ export HF_HOME=/scratch-shared/eterres/huggingface-cache
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+# curve over id
+# python src/diffusion/pipe_orthofuse.py \
+#   --config_path=src/diffusion/config/config.yaml \
+#   --output_dir=/home/eterres/MasterThesis/outputs/diffusion \
+#   --all_dataset \
+#   --t=0.6 \
+#   --postprocessing_method=curve_over_id \
+#   --num_images_per_medium_prompt=5 \
+#   --replace_inference_output \
+#   --debug
+
+# eigenvalue rotation
 python src/diffusion/pipe_orthofuse.py \
   --config_path=src/diffusion/config/config.yaml \
   --output_dir=/home/eterres/MasterThesis/outputs/diffusion \
   --all_dataset \
   --t=0.6 \
+  --postprocessing_method=rotation \
   --num_images_per_medium_prompt=5 \
   --replace_inference_output \
   --debug

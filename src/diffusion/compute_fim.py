@@ -184,9 +184,9 @@ def iter_entries(args):
     entries = []
     selected = set(args.datasets)
     if "concepts" in selected:
-        entries += [get_entry("concept", "cat")] if args.debug else CONCEPT_ADAPTERS
+        entries += [get_entry("concept", "cat2")] if args.debug else CONCEPT_ADAPTERS
     if "styles" in selected:
-        entries += [get_entry("style", "01_08")] if args.debug else STYLE_ADAPTERS
+        entries += [get_entry("style", "01_07")] if args.debug else STYLE_ADAPTERS
     return entries
 
 

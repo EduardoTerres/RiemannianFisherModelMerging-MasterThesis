@@ -57,10 +57,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def alpha_grid(num_points):
+def t_grid(num_points):
     if num_points < 2:
         raise ValueError("--num_points must be at least 2.")
-    return [(1.0 - i / (num_points - 1), i / (num_points - 1)) for i in range(num_points)]
+    return [i / (num_points - 1) for i in range(num_points)]
+
+
+def alphas_from_t(t):
+    return (t, 1.0 - t)
 
 
 def interpolation_root(args):
@@ -101,7 +105,7 @@ def orthofuse_folder(args, pair_name, t, postprocessing_method):
     )
 
 
-def make_montage(image_paths, alphas, save_path):
+def make_montage(image_paths, ts, save_path):
     tiles = [Image.open(path).convert("RGB") for path in image_paths]
     w, h = tiles[0].size
     label_h = 42
@@ -109,12 +113,12 @@ def make_montage(image_paths, alphas, save_path):
     canvas = Image.new("RGB", (w * len(tiles), h + label_h), "white")
     draw = ImageDraw.Draw(canvas)
 
-    for idx, (tile, (_, beta)) in enumerate(zip(tiles, alphas)):
+    for idx, (tile, t) in enumerate(zip(tiles, ts)):
         if tile.size != (w, h):
             tile = tile.resize((w, h), Image.Resampling.LANCZOS)
         x = idx * w
         canvas.paste(tile, (x, 0))
-        label = f"beta={beta:.2f}"
+        label = f"t={t:.2f}"
         bbox = draw.textbbox((0, 0), label, font=font)
         draw.text((x + (w - bbox[2]) / 2, h + 14), label, fill="black", font=font)
 
@@ -181,14 +185,15 @@ def orthofuse_args(args, beta, version, postprocessing_method):
     )
 
 
-def run_gradient_method(args, pair, alphas, method, merge_mode, use_fishers, backend):
+def run_gradient_method(args, pair, ts, method, merge_mode, use_fishers, backend):
     paths = []
-    for idx, alpha in enumerate(alphas):
+    for idx, t in enumerate(ts):
         version = args.version_start + idx
+        alpha = alphas_from_t(t)
         run_args = gradient_args(args, alpha, version, merge_mode, use_fishers, backend)
         apply_gradient_pair(run_args, pair)
         print(
-            f"[interpolate] {method} {pair['name']} beta={alpha[1]:.3f}",
+            f"[interpolate] {method} {pair['name']} t={t:.3f}",
             flush=True,
         )
         run_gradient_pipe(run_args)
@@ -204,15 +209,14 @@ def run_gradient_method(args, pair, alphas, method, merge_mode, use_fishers, bac
     return paths
 
 
-def run_orthofuse_method(args, pair, alphas, method, postprocessing_method):
+def run_orthofuse_method(args, pair, ts, method, postprocessing_method):
     paths = []
-    for idx, alpha in enumerate(alphas):
+    for idx, t in enumerate(ts):
         version = args.version_start + idx
-        beta = alpha[1]
-        run_args = orthofuse_args(args, beta, version, postprocessing_method)
+        run_args = orthofuse_args(args, t, version, postprocessing_method)
         apply_orthofuse_pair(run_args, pair)
         print(
-            f"[interpolate] {method} {pair['name']} t={beta:.3f} "
+            f"[interpolate] {method} {pair['name']} t={t:.3f} "
             f"post={postprocessing_method}",
             flush=True,
         )
@@ -220,7 +224,7 @@ def run_orthofuse_method(args, pair, alphas, method, postprocessing_method):
         path = prompt_path(
             args,
             pair,
-            orthofuse_folder(args, pair["name"], beta, postprocessing_method),
+            orthofuse_folder(args, pair["name"], t, postprocessing_method),
             version,
         )
         if not path.exists():
@@ -234,7 +238,7 @@ def main():
     if args.samples is None and (args.concept_name is None or args.style_name is None):
         raise ValueError("Pass --samples, or both --concept_name and --style_name.")
 
-    alphas = alpha_grid(args.num_points)
+    ts = t_grid(args.num_points)
 
     for pair in selected_pairs(args):
         method_paths = {}
@@ -242,7 +246,7 @@ def main():
             method_paths["standard_geodesic"] = run_gradient_method(
                 args,
                 pair,
-                alphas,
+                ts,
                 method="standard_geodesic",
                 merge_mode="geodesic",
                 use_fishers=False,
@@ -252,7 +256,7 @@ def main():
             method_paths["fisher_geodesic"] = run_gradient_method(
                 args,
                 pair,
-                alphas,
+                ts,
                 method="fisher_geodesic",
                 merge_mode="geodesic",
                 use_fishers=True,
@@ -262,7 +266,7 @@ def main():
             method_paths["standard_rescaled"] = run_gradient_method(
                 args,
                 pair,
-                alphas,
+                ts,
                 method="standard_rescaled",
                 merge_mode="standard_rescaled",
                 use_fishers=False,
@@ -273,7 +277,7 @@ def main():
                 method_paths[method] = run_gradient_method(
                     args,
                     pair,
-                    alphas,
+                    ts,
                     method=method,
                     merge_mode=method,
                     use_fishers=True,
@@ -284,7 +288,7 @@ def main():
                 method_paths[method] = run_orthofuse_method(
                     args,
                     pair,
-                    alphas,
+                    ts,
                     method=method,
                     postprocessing_method=postprocessing_method,
                 )
@@ -294,7 +298,7 @@ def main():
                 interpolation_root(args)
                 / f"{pair['name']}_{method}_ns{args.num_inference_steps}_gs{args.guidance_scale}.png"
             )
-            make_montage(paths, alphas, save_path)
+            make_montage(paths, ts, save_path)
             print(f"[interpolate] montage saved to {save_path}", flush=True)
 
 

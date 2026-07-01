@@ -22,8 +22,8 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 python src/diffusion/compute_fim.py \
   --config_path=src/diffusion/config/config.yaml \
   --output_dir=/scratch-shared/eterres/fishers/sdxl \
-  --datasets concepts \
+  --debug \
   --batch_size=1 \
-  --repeats=100 \
+  --repeats=500 \
   --device=cuda \
   --weight_dtype=float32

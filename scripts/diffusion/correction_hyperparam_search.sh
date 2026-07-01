@@ -5,7 +5,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=08:00:00
-#SBATCH --output=outputs/diffusion/slurms/correction_hyperparam_search_%A.out
+#SBATCH --array=0-2
+#SBATCH --output=outputs/diffusion/slurms/correction_hyperparam_search_%A_%a.out
 
 set -e
 
@@ -32,18 +33,22 @@ PAIRS=(
   "dog6:gondoliers"
   "cat2:pots"
   "dog:03_04"
+  "cat2:01_07"
 )
 
 PAIRS=(
-  "dog:03_04"
-  "cat:01_01"
+  "cat:pots"
+  "cat2:01_07"
+  "dog2:dolina"
 )
+
+PAIR="${PAIRS[${SLURM_ARRAY_TASK_ID:-0}]}"
+echo "[correction] array_task=${SLURM_ARRAY_TASK_ID:-0} pair=${PAIR}"
 
 python "${REPO_ROOT}/src/diffusion/correction_hyperparam_search.py" \
   --fisher_min 1e-14 \
   --fisher_rescale 1e10 \
-  --num_points 10 \
   --num_images_per_medium_prompt 1 \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
   --output_dir="${REPO_ROOT}/outputs/diffusion" \
-  --samples "${PAIRS[@]}"
+  --samples "${PAIR}"

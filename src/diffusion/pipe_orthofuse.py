@@ -76,6 +76,45 @@ def apply_pair_config(config, args):
     return config
 
 
+def inference_folder_name(args):
+    pair_name = getattr(args, "dataset_pair_name", None)
+    pair_suffix = f"_{pair_name}" if pair_name else ""
+    return (
+        f"ns{args.num_inference_steps}_gs{args.guidance_scale}"
+        f"_orthofuse_t{args.t}_method_{args.postprocessing_method}{pair_suffix}"
+    )
+
+
+def output_root(args):
+    if args.output_dir is not None:
+        return Path(args.output_dir)
+
+    with open(args.config_path, "r", encoding="utf-8") as config_file:
+        config = yaml.safe_load(config_file)
+    if config.get("output_dir") is None:
+        raise ValueError("output_dir is required either as an argument or in the config.")
+    return Path(config["output_dir"])
+
+
+def existing_output_path(args):
+    root = output_root(args)
+    if args.checkpoint_idx is not None:
+        root = root / f"checkpoint-{args.checkpoint_idx}"
+
+    folder = inference_folder_name(args)
+    candidates = [
+        root / folder,
+        root / "samples" / folder,
+    ]
+    if args.version is not None:
+        candidates.append(root / "samples" / folder / f"version_{args.version}")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def run_pipe(args):
     if not torch.cuda.is_available():
         raise RuntimeError("pipe_orthofuse.py requires a CUDA GPU.")
@@ -107,4 +146,8 @@ if __name__ == "__main__":
         if pair is not None:
             tqdm.write(f"Running pair: {pair['name']}")
             apply_pair(run_args, pair)
+        existing_path = existing_output_path(run_args)
+        if existing_path is not None:
+            tqdm.write(f"Skipping existing OrthoFuse output: {existing_path}")
+            continue
         run_pipe(run_args)

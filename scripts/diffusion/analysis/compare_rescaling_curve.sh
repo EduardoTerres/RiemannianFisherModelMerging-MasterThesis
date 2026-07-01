@@ -24,18 +24,16 @@ FISHER_RESCALE="1e10"
 METHODS=(
   "orthofuse__curve_over_id"
   "diagonal_fisher__rescaled"
-  "diagonal_fisher__max_rescaled"
   "diagonal_fisher__std_rescaled"
   "standard__rescaled"
 )
 
 PAIRS=(
-  "dog6:01_07"
-  "cat:01_08"
-  "cat:01_03"
-  "dog:etsy"
-  "cat2:dolina"
-  "dog3:pots"
+  "cat:01_01"
+  "dog2:dolina"
+  "dog6:gondoliers"
+  "cat2:pots"
+  "dog:03_04"
 )
 
 for pair in "${PAIRS[@]}"; do

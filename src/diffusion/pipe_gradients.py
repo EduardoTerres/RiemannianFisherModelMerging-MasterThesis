@@ -58,6 +58,30 @@ def parse_args():
     return parser.parse_args()
 
 
+def has_fisher_inputs(args):
+    concept_fisher_path = getattr(args, "concept_fisher_path", None)
+    style_fisher_path = getattr(args, "style_fisher_path", None)
+    if concept_fisher_path is None and style_fisher_path is None:
+        return False
+    if concept_fisher_path is None or style_fisher_path is None:
+        raise ValueError("Both concept_fisher_path and style_fisher_path are required.")
+    return True
+
+
+def prepare_merge_args(args):
+    if getattr(args, "merge_mode", None) is not None:
+        return args
+    if has_fisher_inputs(args):
+        args.merge_mode = "diagonal_fisher_rescaled" if getattr(args, "rescale", False) else "diagonal_fisher"
+        if getattr(args, "fisher_min", None) is None:
+            args.fisher_min = 1e-8
+        if getattr(args, "fisher_rescale", None) is None:
+            args.fisher_rescale = 1e10
+    else:
+        args.merge_mode = "standard_rescaled" if getattr(args, "rescale", False) else "standard"
+    return args
+
+
 def apply_pair(args, pair):
     args.moft_layers_concept_path = pair["concept"]["adapter_path"]
     args.moft_layers_style_path = pair["style"]["adapter_path"]
@@ -132,6 +156,7 @@ def print_selected_pairs(pairs):
 
 
 def run_pipe(args):
+    args = prepare_merge_args(args)
     if not torch.cuda.is_available():
         raise RuntimeError("pipe_gradients.py requires a CUDA GPU.")
     if args.moft_layers_concept_path is None or args.moft_layers_style_path is None:

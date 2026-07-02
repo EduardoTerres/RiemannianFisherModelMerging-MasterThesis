@@ -11,10 +11,9 @@ set -e
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-SAMPLES_DIR="${OUTPUT_DIR}/samples"
+SAMPLES_DIR="${OUTPUT_DIR}/samples_good"
 EVAL_ROOT="${OUTPUT_DIR}/eval_runs"
 TABLES_DIR="${OUTPUT_DIR}/tables"
-DIAGONAL_FISHER_MU=4
 
 METHODS=(
   diagonal_fisher
@@ -40,5 +39,5 @@ python -m src.diffusion.eval.table \
   --samples_dir "${SAMPLES_DIR}" \
   --eval_root "${EVAL_ROOT}" \
   --tables_dir "${TABLES_DIR}" \
-  --diagonal_fisher_mu "${DIAGONAL_FISHER_MU}" \
+  --diagonal_fisher_mu 4 \
   --methods "${METHODS[@]}"

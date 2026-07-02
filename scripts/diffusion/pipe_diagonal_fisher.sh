@@ -32,14 +32,16 @@ CONCEPTS=(
 )
 
 CONCEPT="${CONCEPTS[${SLURM_ARRAY_TASK_ID:-0}]}"
+ALPHA_CONCEPT=1.0  # concept alpha
+ALPHA_STYLE=1.0    # style alpha
 echo "[pipe_fisher] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
 
-python "${REPO_ROOT}/src/diffusion/pipe_diagonal_fisher.py" \
+python "${REPO_ROOT}/src/diffusion/pipe_gradients.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
   --output_dir="${REPO_ROOT}/outputs/diffusion" \
   --concept_name="${CONCEPT}" \
   --merge_mode=diagonal_fisher \
-  --alphas 1.0 1.0 \
+  --alphas "${ALPHA_CONCEPT}" "${ALPHA_STYLE}" \
   --num_images_per_medium_prompt=20 \
   --diagonal_fisher_correction_mu=4 \
   --replace_inference_output \

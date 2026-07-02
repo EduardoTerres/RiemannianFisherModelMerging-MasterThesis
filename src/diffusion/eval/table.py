@@ -13,7 +13,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.diffusion.dataset_1 import DIFFUSION_MERGE_PAIRS, get_pair
 
-
 DEFAULT_METHODS = (
     "diagonal_fisher_rescaled",
     "diagonal_fisher",
@@ -22,11 +21,13 @@ DEFAULT_METHODS = (
 )
 
 METRICS = (
-    ("image_similarities_mx", "CLIP image similarity"),
-    ("dino_image_similarities_mx", "DINO image similarity"),
+    ("image_similarities_mx", "Concept CLIP image similarity"),
+    ("style_image_similarities_mx", "Style CLIP image similarity"),
+    ("dino_image_similarities_mx", "Concept DINO image similarity"),
+    ("style_dino_image_similarities_mx", "Style DINO image similarity"),
     ("text_similarities_mx", "CLIP text similarity"),
     ("text_similarities_mx_with_class", "CLIP text similarity with class"),
-    ("real_image_similarity_mx", "CLIP reference-image similarity"),
+    ("real_image_similarity_mx", "Concept CLIP reference-image similarity"),
 )
 
 
@@ -123,6 +124,7 @@ def stage_runs(args):
     (args.output_dir / "slurms").mkdir(parents=True, exist_ok=True)
 
     exp_names = []
+    exp_pairs = {}
     exp_idx = 1
     for method in args.methods:
         for pair in selected_pairs(args.pairs):
@@ -156,14 +158,83 @@ def stage_runs(args):
             link_samples(src, dst)
 
             exp_names.append(exp_name)
+            exp_pairs[exp_name] = pair
             exp_idx += 1
 
     if not exp_names:
         raise SystemExit("No evaluable runs were staged. Check methods, pairs, and generated sample folders.")
-    return eval_root, exp_names
+    return eval_root, exp_names, exp_pairs
 
 
-def run_orthofuse_eval(args, eval_root, exp_names):
+def style_reference_path(pair, reference_root):
+    style_path = Path(pair["style"]["dataset_path"])
+    local_path = reference_root / style_path.name
+    if local_path.exists():
+        return local_path
+    if style_path.exists():
+        return style_path
+    raise FileNotFoundError(f"Missing style reference image for {pair['name']}: {local_path}")
+
+
+def load_image_array(path):
+    import numpy as np
+    import PIL.Image
+
+    return np.asarray(PIL.Image.open(path).convert("RGB"))
+
+
+def add_style_similarities(args, stats, exp_pairs, evaluator):
+    from nb_utils.images_viewer import MultifolderViewer
+
+    reference_root = args.output_dir / "d1_images"
+    style_feature_cache = {}
+    for value in stats.values():
+        config = value.get("config")
+        specs = value.get("specs")
+        if not config or not specs:
+            continue
+
+        exp_name = config.get("exp_name")
+        pair = exp_pairs.get(exp_name)
+        if pair is None:
+            continue
+
+        pair_name = pair["name"]
+        if pair_name not in style_feature_cache:
+            style_image = load_image_array(style_reference_path(pair, reference_root))
+            style_feature_cache[pair_name] = evaluator._get_image_features([style_image])
+        style_clip_features, style_dino_features = style_feature_cache[pair_name]
+
+        checkpoint_idx, num_inference_steps, guidance_scale, *_ = specs
+        samples_path = (
+            Path(config["output_dir"])
+            / f"checkpoint-{checkpoint_idx}"
+            / "samples"
+            / f"ns{num_inference_steps}_gs{guidance_scale}"
+            / f"version_{args.version}"
+        )
+        if not samples_path.is_dir():
+            print(f"[skip] missing style-eval samples: {samples_path}", file=sys.stderr)
+            continue
+
+        viewer = MultifolderViewer(str(samples_path), lazy_load=False)
+        value["style_image_similarities"] = {}
+        value["style_image_similarities_mx"] = {}
+        value["style_dino_image_similarities"] = {}
+        value["style_dino_image_similarities_mx"] = {}
+        for label, images in viewer.images.items():
+            image_features, dino_image_features = evaluator._get_image_features(images)
+            (
+                value["style_image_similarities"][label],
+                value["style_image_similarities_mx"][label],
+            ) = evaluator._calc_similarity(style_clip_features, image_features)
+            (
+                value["style_dino_image_similarities"][label],
+                value["style_dino_image_similarities_mx"][label],
+            ) = evaluator._calc_similarity(style_dino_features, dino_image_features)
+
+
+def run_orthofuse_eval(args, eval_root, exp_names, exp_pairs):
     import torch
     from nb_utils.cache import Cache, DistributedCache
     from nb_utils.clip_eval import ExpEvaluator
@@ -193,6 +264,7 @@ def run_orthofuse_eval(args, eval_root, exp_names):
         cache=cache,
         processes=args.processes,
     )
+    add_style_similarities(args, stats, exp_pairs, evaluator)
 
     summary = {}
     for key, value in stats.items():
@@ -317,7 +389,7 @@ def write_summary_table(summary_path, exp_names, args):
     lines.extend(["", "Column correspondence"])
     for prompt_idx, prompt in enumerate(prompt_labels, start=1):
         for metric_idx, (_, label) in enumerate(METRICS, start=1):
-            suffix = "" if label == "CLIP reference-image similarity" else f"; prompt {prompt_idx}: {prompt}"
+            suffix = "" if "reference-image similarity" in label else f"; prompt {prompt_idx}: {prompt}"
             lines.append(f"({prompt_idx}.{metric_idx}) {label}{suffix}")
 
     table_text = "\n".join(lines)
@@ -329,8 +401,8 @@ def write_summary_table(summary_path, exp_names, args):
 
 def main():
     args = parse_args()
-    eval_root, exp_names = stage_runs(args)
-    summary_path = run_orthofuse_eval(args, eval_root, exp_names)
+    eval_root, exp_names, exp_pairs = stage_runs(args)
+    summary_path = run_orthofuse_eval(args, eval_root, exp_names, exp_pairs)
     write_summary_table(summary_path, exp_names, args)
 
 

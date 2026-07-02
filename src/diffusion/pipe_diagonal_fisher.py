@@ -3,7 +3,7 @@ import os
 
 from tqdm import tqdm
 
-from pipe_gradients import apply_pair, parse_args, run_pipe, selected_pairs
+from pipe_gradients import apply_pair, parse_args, print_selected_pairs, run_pipe, selected_pairs
 
 
 def prepare_fim_args(args):
@@ -26,6 +26,7 @@ def prepare_fim_args(args):
 if __name__ == "__main__":
     args = parse_args()
     pairs = selected_pairs(args)
+    print_selected_pairs(pairs)
     for pair in tqdm(pairs, desc="Running Fisher merge pipeline", unit="pair"):
         run_args = argparse.Namespace(**vars(args))
         if pair is not None:

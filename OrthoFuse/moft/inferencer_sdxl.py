@@ -298,6 +298,23 @@ def _gradients_merge_with_merging_py(
     return _oft_coords_to_full_generator(merger, merged_coords, tensors[0].dtype)
 
 
+def _diagonal_fisher_correction(merged, alphas, mu):
+    if mu is None:
+        return merged
+    t = float(alphas[0]) if alphas is not None else 0.0
+    correction = 1.0 + float(mu) * t * (1.0 - t)
+    corrected = (correction * merged).to(dtype=merged.dtype)
+    base_norm = torch.linalg.vector_norm(merged.float())
+    corrected_norm = torch.linalg.vector_norm(corrected.float())
+    assert torch.isclose(
+        corrected_norm / base_norm.clamp_min(1e-8),
+        torch.tensor(correction, device=merged.device, dtype=torch.float32),
+        rtol=1e-5,
+        atol=1e-6,
+    ), "Post-merge correction sanity check failed."
+    return corrected
+
+
 def _log_merge(message):
     print(f"[merge] {message}", flush=True)
 
@@ -598,6 +615,8 @@ class GradientsMergeInferencer(MOFTInferencer):
             backend_suffix = f"_{getattr(self.args, 'geodesic_backend', 'cayley')}"
             if getattr(self.args, "geodesic_use_fishers", False):
                 backend_suffix += "_fisher"
+        if getattr(self.args, "diagonal_fisher_correction_mu", None) is not None:
+            backend_suffix += f"_mu{self.args.diagonal_fisher_correction_mu:g}"
         pair_name = getattr(self.args, "dataset_pair_name", None)
         pair_suffix = f"_{pair_name}" if pair_name else ""
         self.inference_folder_name = (
@@ -728,6 +747,9 @@ class GradientsMergeInferencer(MOFTInferencer):
         )
         merge_alphas = getattr(self.args, "alphas", None)
         _log_merge(f"alphas concept/style={merge_alphas if merge_alphas is not None else [1.0, 1.0]}")
+        correction_mu = getattr(self.args, "diagonal_fisher_correction_mu", None)
+        if correction_mu is not None:
+            _log_merge(f"post-merge correction mu={correction_mu:g}")
         shape_counts = Counter(tuple(concept_state[key].shape) for key in merge_keys)
         side_counts = Counter(key.rsplit(".", 1)[-1] for key in merge_keys)
         projection_counts = Counter(
@@ -781,7 +803,7 @@ class GradientsMergeInferencer(MOFTInferencer):
                     if fisher_rescale is not None:
                         fishers = [fisher * fisher_rescale for fisher in fishers]
                 tensor_start = time.time()
-                merged_state[key] = _gradients_merge_with_merging_py(
+                merged = _gradients_merge_with_merging_py(
                     [concept_tensor, style_tensor],
                     device=concept_tensor.device,
                     mode=merge_mode,
@@ -789,6 +811,11 @@ class GradientsMergeInferencer(MOFTInferencer):
                     merger=merge_engine,
                     alphas=merge_alphas,
                     geodesic_backend=geodesic_backend,
+                )
+                merged_state[key] = _diagonal_fisher_correction(
+                    merged,
+                    merge_alphas,
+                    correction_mu,
                 )
                 tensor_seconds = time.time() - tensor_start
                 merged_count += 1

@@ -30,9 +30,18 @@ def parse_args():
     parser.add_argument("--fisher_rescale", type=float, default=None)
     parser.add_argument("--alphas", type=float, nargs=2, default=None, metavar=("CONCEPT", "STYLE"))
     parser.add_argument("--merge_mode", type=str, default=None)
+    parser.add_argument("--diagonal_fisher_correction_mu", type=float, default=None)
     parser.add_argument("--geodesic_backend", choices=["cayley"], default="cayley")
     parser.add_argument("--geodesic_use_fishers", action="store_true")
-    parser.add_argument("--samples", type=str, default=None)
+    parser.add_argument(
+        "--samples",
+        type=str,
+        default=None,
+        help=(
+            "Dataset pair selector: all_dataset_pairs, <concept>:<style>, "
+            "concept:<concept>, or style:<style>."
+        ),
+    )
     parser.add_argument("--concept_name", type=str, default=None)
     parser.add_argument("--style_name", type=str, default=None)
     parser.add_argument("--dataset_pair_name", type=str, default=None)
@@ -75,14 +84,51 @@ def selected_pairs(args):
         return DIFFUSION_MERGE_PAIRS
     if args.samples is not None:
         if ":" not in args.samples:
-            raise ValueError("samples must be 'all_dataset_pairs' or '<concept_name>:<style_name>'.")
-        concept_name, style_name = args.samples.split(":", 1)
+            raise ValueError(
+                "samples must be 'all_dataset_pairs', '<concept_name>:<style_name>', "
+                "'concept:<concept_name>', or 'style:<style_name>'."
+            )
+        left, right = args.samples.split(":", 1)
+        if left == "concept":
+            pairs = [pair for pair in DIFFUSION_MERGE_PAIRS if pair["concept"]["name"] == right]
+            if not pairs:
+                raise KeyError(f"Unknown concept: {right}")
+            return pairs
+        if left == "style":
+            pairs = [pair for pair in DIFFUSION_MERGE_PAIRS if pair["style"]["name"] == right]
+            if not pairs:
+                raise KeyError(f"Unknown style: {right}")
+            return pairs
+        concept_name, style_name = left, right
         return [get_pair(concept_name, style_name)]
     if args.concept_name is not None or args.style_name is not None:
-        if args.concept_name is None or args.style_name is None:
-            raise ValueError("Both concept_name and style_name are required.")
+        if args.concept_name is None:
+            pairs = [
+                pair for pair in DIFFUSION_MERGE_PAIRS if pair["style"]["name"] == args.style_name
+            ]
+            if not pairs:
+                raise KeyError(f"Unknown style: {args.style_name}")
+            return pairs
+        if args.style_name is None:
+            pairs = [
+                pair for pair in DIFFUSION_MERGE_PAIRS if pair["concept"]["name"] == args.concept_name
+            ]
+            if not pairs:
+                raise KeyError(f"Unknown concept: {args.concept_name}")
+            return pairs
         return [get_pair(args.concept_name, args.style_name)]
     return [None]
+
+
+def print_selected_pairs(pairs):
+    print("=" * 40, flush=True)
+    print("Pairs to compute:", flush=True)
+    if pairs == [None]:
+        print("  custom adapter paths", flush=True)
+    else:
+        for pair in pairs:
+            print(f"  {pair['name']}", flush=True)
+    print("=" * 40, flush=True)
 
 
 def run_pipe(args):
@@ -110,7 +156,9 @@ def run_pipe(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    for pair in selected_pairs(args):
+    pairs = selected_pairs(args)
+    print_selected_pairs(pairs)
+    for pair in pairs:
         run_args = argparse.Namespace(**vars(args))
         if pair is not None:
             apply_pair(run_args, pair)

@@ -5,9 +5,12 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=02:00:00
-#SBATCH --output=outputs/diffusion/slurms/pipe_orthofuse_%A.out
+#SBATCH --array=0-5
+#SBATCH --output=outputs/diffusion/slurms/pipe_orthofuse_%A_%a.out
 
 set -e
+
+REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -16,24 +19,34 @@ export HF_HOME=/scratch-shared/eterres/huggingface-cache
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+CONCEPTS=(
+  "cat"
+  "cat2"
+  "dog"
+  "dog2"
+  "dog3"
+  "dog6"
+)
+
+CONCEPT="${CONCEPTS[${SLURM_ARRAY_TASK_ID:-0}]}"
+echo "[pipe_orthofuse] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
+
 # curve over id
-# python src/diffusion/pipe_orthofuse.py \
-#   --config_path=src/diffusion/config/config.yaml \
-#   --output_dir=/home/eterres/MasterThesis/outputs/diffusion \
-#   --all_dataset \
-#   --t=0.6 \
-#   --postprocessing_method=curve_over_id \
-#   --num_images_per_medium_prompt=5 \
-#   --replace_inference_output \
-#   --debug
+python "${REPO_ROOT}/src/diffusion/pipe_orthofuse.py" \
+  --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
+  --output_dir="${REPO_ROOT}/outputs/diffusion" \
+  --concept_name="${CONCEPT}" \
+  --t=0.6 \
+  --postprocessing_method=curve_over_id \
+  --num_images_per_medium_prompt=20 \
+  --replace_inference_output
 
 # eigenvalue rotation
-python src/diffusion/pipe_orthofuse.py \
-  --config_path=src/diffusion/config/config.yaml \
-  --output_dir=/home/eterres/MasterThesis/outputs/diffusion \
-  --all_dataset \
-  --t=0.6 \
-  --postprocessing_method=rotation \
-  --num_images_per_medium_prompt=5 \
-  --replace_inference_output \
-  --debug
+# python "${REPO_ROOT}/src/diffusion/pipe_orthofuse.py" \
+#   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
+#   --output_dir="${REPO_ROOT}/outputs/diffusion" \
+#   --concept_name="${CONCEPT}" \
+#   --t=0.6 \
+#   --postprocessing_method=rotation \
+#   --num_images_per_medium_prompt=5 \
+#   --replace_inference_output

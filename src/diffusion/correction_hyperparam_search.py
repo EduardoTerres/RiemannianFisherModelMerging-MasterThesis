@@ -13,7 +13,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "OrthoFuse"))
 sys.path.insert(0, str(REPO_ROOT))
 
-from moft import inferencer_sdxl
 from nb_utils.clip_eval import DINOEvaluator
 from src.diffusion.dataset_1 import DIFFUSION_MERGE_PAIRS, get_pair
 from src.diffusion.pipe_gradients import (
@@ -122,98 +121,49 @@ def missing_image_paths(args, pair, mu, alphas):
     return [path for path in expected_image_paths(args, pair, mu, alphas) if not path.exists()]
 
 
-def patch_correction(mu):
-    original_merge = inferencer_sdxl._gradients_merge_with_merging_py
-    original_folder = inferencer_sdxl.GradientsMergeInferencer.create_folder_name
-
-    def corrected_merge(*merge_args, **merge_kwargs):
-        merged = original_merge(*merge_args, **merge_kwargs)
-        mode = merge_kwargs.get("mode")
-        if mode is None and len(merge_args) >= 3:
-            mode = merge_args[2]
-        if mode == "diagonal_fisher":
-            alphas = merge_kwargs.get("alphas")
-            if alphas is None:
-                alphas = merge_args[5] if len(merge_args) >= 6 else None
-            t = float(alphas[0]) if alphas is not None else 0.0
-            correction = 1.0 + mu * t * (1.0 - t)
-            corrected = (correction * merged).to(dtype=merged.dtype)
-            base_norm = torch.linalg.vector_norm(merged.float())
-            corrected_norm = torch.linalg.vector_norm(corrected.float())
-            assert torch.isclose(
-                corrected_norm / base_norm.clamp_min(1e-8),
-                torch.tensor(correction, device=merged.device, dtype=torch.float32),
-                rtol=1e-5,
-                atol=1e-6,
-            ), "Post-merge correction sanity check failed."
-            return corrected
-        return merged
-
-    def corrected_folder(self):
-        original_folder(self)
-        if self._merge_mode() == "diagonal_fisher":
-            self.inference_folder_name = self.inference_folder_name.replace(
-                "_gradients_diagonal_fisher_",
-                f"_gradients_diagonal_fisher_mu{mu:g}_",
-                1,
-            )
-
-    inferencer_sdxl._gradients_merge_with_merging_py = corrected_merge
-    inferencer_sdxl.GradientsMergeInferencer.create_folder_name = corrected_folder
-
-    def restore():
-        inferencer_sdxl._gradients_merge_with_merging_py = original_merge
-        inferencer_sdxl.GradientsMergeInferencer.create_folder_name = original_folder
-
-    return restore
-
-
 def run_generation(args, pair, mu, alphas):
-    restore = patch_correction(mu)
-    try:
-        for point_idx, (t, alpha) in enumerate(alphas):
-            run_args = argparse.Namespace(
-                config_path=args.config_path,
-                output_dir=str(root(args)),
-                checkpoint_idx=None,
-                moft_layers_concept_path=None,
-                moft_layers_style_path=None,
-                concept_fisher_path=None,
-                style_fisher_path=None,
-                fisher_min=args.fisher_min,
-                fisher_rescale=args.fisher_rescale,
-                alphas=list(alpha),
-                merge_mode="diagonal_fisher",
-                parameter=None,
-                postprocessing_method="no_modification",
-                samples=None,
-                concept_name=None,
-                style_name=None,
-                dataset_pair_name=None,
-                rescale=False,
-                num_images_per_medium_prompt=args.num_images_per_medium_prompt,
-                num_images_per_base_prompt=0,
-                batch_size_medium=args.batch_size_medium,
-                batch_size_base=1,
-                num_inference_steps=args.num_inference_steps,
-                guidance_scale=args.guidance_scale,
-                replace_inference_output=args.force_generate,
-                version=args.version_start + point_idx,
-                seed=args.seed,
-            )
-            apply_pair(run_args, pair)
-            print(
-                f"[correction] pair={pair['name']} mu={mu:g} "
-                f"t={t:.3f} alpha_1={alpha[0]:.3f} alpha_2={alpha[1]:.3f}",
-                flush=True,
-            )
-            run_pipe(run_args)
-            for template in PROMPTS.values():
-                expected = image_path(args, pair, mu, point_idx, template)
-                if not expected.exists():
-                    raise FileNotFoundError(f"Expected generated image missing: {expected}")
-    finally:
-        restore()
+    for point_idx, (t, alpha) in enumerate(alphas):
+        run_args = argparse.Namespace(
+            config_path=args.config_path,
+            output_dir=str(root(args)),
+            checkpoint_idx=None,
+            moft_layers_concept_path=None,
+            moft_layers_style_path=None,
+            concept_fisher_path=None,
+            style_fisher_path=None,
+            fisher_min=args.fisher_min,
+            fisher_rescale=args.fisher_rescale,
+            alphas=list(alpha),
+            merge_mode="diagonal_fisher",
+            diagonal_fisher_correction_mu=mu,
+            parameter=None,
+            postprocessing_method="no_modification",
+            samples=None,
+            concept_name=None,
+            style_name=None,
+            dataset_pair_name=None,
+            rescale=False,
+            num_images_per_medium_prompt=args.num_images_per_medium_prompt,
+            num_images_per_base_prompt=0,
+            batch_size_medium=args.batch_size_medium,
+            batch_size_base=1,
+            num_inference_steps=args.num_inference_steps,
+            guidance_scale=args.guidance_scale,
+            replace_inference_output=args.force_generate,
+            version=args.version_start + point_idx,
+            seed=args.seed,
+        )
+        apply_pair(run_args, pair)
+        print(
+            f"[correction] pair={pair['name']} mu={mu:g} "
+            f"t={t:.3f} alpha_1={alpha[0]:.3f} alpha_2={alpha[1]:.3f}",
+            flush=True,
+        )
+        run_pipe(run_args)
+        for template in PROMPTS.values():
+            expected = image_path(args, pair, mu, point_idx, template)
+            if not expected.exists():
+                raise FileNotFoundError(f"Expected generated image missing: {expected}")
 
 
 def load_pil(path):

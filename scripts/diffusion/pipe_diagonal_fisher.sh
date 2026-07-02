@@ -4,7 +4,7 @@
 #SBATCH --job-name=pipe_fisher
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=02:00:00
+#SBATCH --time=03:00:00
 #SBATCH --array=0-5
 #SBATCH --output=outputs/diffusion/slurms/pipe_fisher_%A_%a.out
 

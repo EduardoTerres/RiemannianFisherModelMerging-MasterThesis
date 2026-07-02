@@ -12,6 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from moft.inferencer_sdxl import inferencers
 from nb_utils.eval_sets import merge_base_set, merge_test_set
 from src.diffusion.dataset_1 import DIFFUSION_MERGE_PAIRS, get_pair
+from src.diffusion.pipeline_outputs import (
+    existing_output_path,
+    gradients_inference_folder_name,
+)
 
 
 warnings.filterwarnings("ignore")
@@ -186,5 +190,11 @@ if __name__ == "__main__":
     for pair in pairs:
         run_args = argparse.Namespace(**vars(args))
         if pair is not None:
+            print(f"Running pair: {pair['name']}", flush=True)
             apply_pair(run_args, pair)
+        prepare_merge_args(run_args)
+        existing_path = existing_output_path(run_args, gradients_inference_folder_name)
+        if existing_path is not None:
+            print(f"Skipping existing Gradients output: {existing_path}", flush=True)
+            continue
         run_pipe(run_args)

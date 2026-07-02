@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=plot_correction
+#SBATCH --job-name=plot_interp_search
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=04:00:00
-#SBATCH --output=outputs/diffusion/slurms/plot_correction_hyperparam_search_%A.out
+#SBATCH --output=outputs/diffusion/slurms/plot_interpolation_hyperparam_search_%A.out
 
 set -e
 
@@ -25,23 +25,13 @@ export CUDA_VISIBLE_DEVICES=0
 export PYTHONPATH="${REPO_ROOT}/OrthoFuse:${REPO_ROOT}:${PYTHONPATH:-}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/matplotlib-${USER}}"
 
-PAIRS=(
-  cat:pots
-  cat2:01_07
-  dog2:dolina
-)
+mkdir -p "${MPLCONFIGDIR}" "${OUTPUT_DIR}/slurms"
 
-plot_samples() {
-  python "${REPO_ROOT}/src/diffusion/results/correction_hyperparam_search_results.py" \
-    --output_dir "${OUTPUT_DIR}" \
-    --samples "$@" \
-    "${EXTRA_ARGS[@]}"
-}
+MU=3
+RESULTS_FOLDER="interpolation_hyperparam_search_mu${MU}"
 
-EXTRA_ARGS=("$@")
-
-for pair in "${PAIRS[@]}"; do
-  plot_samples "${pair}"
-done
-
-plot_samples "${PAIRS[@]}"
+python "${REPO_ROOT}/src/diffusion/results/interpolation_hyperparam_search_results.py" \
+  --output_dir "${OUTPUT_DIR}" \
+  --results_folder "${RESULTS_FOLDER}" \
+  --output_prefix "all_styles" \
+  --mu "${MU}"

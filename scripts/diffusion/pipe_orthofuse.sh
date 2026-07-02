@@ -4,7 +4,7 @@
 #SBATCH --job-name=pipe_orthofuse
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=02:00:00
+#SBATCH --time=03:00:00
 #SBATCH --array=0-5
 #SBATCH --output=outputs/diffusion/slurms/pipe_orthofuse_%A_%a.out
 
@@ -42,11 +42,11 @@ python "${REPO_ROOT}/src/diffusion/pipe_orthofuse.py" \
   --replace_inference_output
 
 # eigenvalue rotation
-# python "${REPO_ROOT}/src/diffusion/pipe_orthofuse.py" \
-#   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
-#   --output_dir="${REPO_ROOT}/outputs/diffusion" \
-#   --concept_name="${CONCEPT}" \
-#   --t=0.6 \
-#   --postprocessing_method=rotation \
-#   --num_images_per_medium_prompt=5 \
-#   --replace_inference_output
+python "${REPO_ROOT}/src/diffusion/pipe_orthofuse.py" \
+  --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
+  --output_dir="${REPO_ROOT}/outputs/diffusion" \
+  --concept_name="${CONCEPT}" \
+  --t=0.6 \
+  --postprocessing_method=rotation \
+  --num_images_per_medium_prompt=5 \
+  --replace_inference_output

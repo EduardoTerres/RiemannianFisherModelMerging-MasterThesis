@@ -11,7 +11,7 @@ set -e
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-SAMPLES_DIR="${OUTPUT_DIR}/samples_good"
+SAMPLES_DIR="${OUTPUT_DIR}/samples"
 EVAL_ROOT="${OUTPUT_DIR}/eval_runs"
 TABLES_DIR="${OUTPUT_DIR}/tables"
 

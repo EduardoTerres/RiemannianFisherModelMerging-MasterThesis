@@ -541,6 +541,7 @@ class OFTMerging(RiemannianMerging):
 
         for alpha_t, omega_t, f_t in zip(alphas, weights_list, fisher_list):
             ft = f_t.float().to(ref.device)
+            ft = ft / torch.norm(ft, p="fro").clamp(min=1e-8)
             A = A + alpha_t * ft
             b = b + alpha_t * (self.lam + ft) * omega_t.float().to(ref.device)
 

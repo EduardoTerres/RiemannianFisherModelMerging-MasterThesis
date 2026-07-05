@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=diffusion_eval
+#SBATCH --job-name=eval
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=02:00:00
@@ -18,6 +18,7 @@ TABLES_DIR="${OUTPUT_DIR}/tables"
 METHODS=(
   diagonal_fisher
   orthofuse
+  standard_rescaled
 )
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -39,5 +40,5 @@ python -m src.diffusion.eval.table \
   --samples_dir "${SAMPLES_DIR}" \
   --eval_root "${EVAL_ROOT}" \
   --tables_dir "${TABLES_DIR}" \
-  --diagonal_fisher_mu 4 \
+  --diagonal_fisher_mu 3 \
   --methods "${METHODS[@]}"

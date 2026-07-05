@@ -181,6 +181,11 @@ def apply_entry_defaults(args):
 
 
 def iter_entries(args):
+    if getattr(args, "entry_type", None) is not None or getattr(args, "dataset_name", None) is not None:
+        if args.entry_type is None or args.dataset_name is None:
+            raise ValueError("--entry_type and --dataset_name must be set together.")
+        return [get_entry(args.entry_type, args.dataset_name)]
+
     entries = []
     selected = set(args.datasets)
     if "concepts" in selected:
@@ -188,6 +193,10 @@ def iter_entries(args):
     if "styles" in selected:
         entries += [get_entry("style", "01_07")] if args.debug else STYLE_ADAPTERS
     return entries
+
+
+def resolve_seed(args, config):
+    return args.seed if args.seed is not None else getattr(config, "seed", 8)
 
 
 def resolve_repo_path(path):
@@ -266,10 +275,13 @@ def parse_args():
     parser.add_argument("--config_path", default="src/diffusion/config/config.yaml")
     parser.add_argument("--output_dir", default="/scratch-shared/eterres/fishers/sdxl")
     parser.add_argument("--datasets", nargs="+", choices=["concepts", "styles"], default=["concepts", "styles"])
+    parser.add_argument("--entry_type", choices=["concept", "style"], default=None)
+    parser.add_argument("--dataset_name", default=None)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--repeats", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--weight_dtype", choices=["float32", "bf16", "fp16"], default="float32")
     return parser.parse_args()
@@ -439,7 +451,9 @@ def compute_one(args, config, base):
     wandb = maybe_init_wandb(args, config)
 
     device = torch.device(args.device)
-    torch.manual_seed(getattr(config, "seed", 8))
+    seed = resolve_seed(args, config)
+    log_stage(f"Using seed={seed}")
+    torch.manual_seed(seed)
     scheduler = base.scheduler
     unet = base.unet
     vae = base.vae
@@ -597,7 +611,9 @@ def main():
     log_stage(f"DONE load config in {time.time() - start:.1f}s")
 
     device = torch.device(args.device)
-    torch.manual_seed(getattr(config, "seed", 8))
+    seed = resolve_seed(args, config)
+    log_stage(f"Using seed={seed}")
+    torch.manual_seed(seed)
     base = load_base_components(args, config, device)
 
     for entry in iter_entries(args):

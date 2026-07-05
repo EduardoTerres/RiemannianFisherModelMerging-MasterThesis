@@ -4,7 +4,7 @@
 #SBATCH --job-name=pipe_fisher
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=03:00:00
+#SBATCH --time=05:00:00
 #SBATCH --array=0-5
 #SBATCH --output=outputs/diffusion/slurms/pipe_fisher_%A_%a.out
 
@@ -32,8 +32,8 @@ CONCEPTS=(
 )
 
 CONCEPT="${CONCEPTS[${SLURM_ARRAY_TASK_ID:-0}]}"
-ALPHA_CONCEPT=1.0  # concept alpha
-ALPHA_STYLE=1.0    # style alpha
+ALPHA_CONCEPT=0.4  # concept alpha
+ALPHA_STYLE=0.6    # style alpha
 echo "[pipe_fisher] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
 
 python "${REPO_ROOT}/src/diffusion/pipe_gradients.py" \
@@ -42,8 +42,10 @@ python "${REPO_ROOT}/src/diffusion/pipe_gradients.py" \
   --concept_name="${CONCEPT}" \
   --merge_mode=diagonal_fisher \
   --alphas "${ALPHA_CONCEPT}" "${ALPHA_STYLE}" \
-  --num_images_per_medium_prompt=20 \
+  --num_images_per_medium_prompt=10 \
   --diagonal_fisher_correction_mu=4 \
-  --replace_inference_output \
-  --fisher_min=1e-14 \
-  --fisher_rescale=1e10
+  --replace_inference_output
+  
+  
+# --fisher_min=1e-14  
+# --fisher_rescale=1e10

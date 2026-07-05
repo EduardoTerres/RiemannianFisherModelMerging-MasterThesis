@@ -46,9 +46,10 @@ PAIR="${PAIRS[${SLURM_ARRAY_TASK_ID:-0}]}"
 echo "[correction] array_task=${SLURM_ARRAY_TASK_ID:-0} pair=${PAIR}"
 
 python "${REPO_ROOT}/src/diffusion/correction_hyperparam_search.py" \
-  --fisher_min 1e-14 \
-  --fisher_rescale 1e10 \
   --num_images_per_medium_prompt 1 \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
   --output_dir="${REPO_ROOT}/outputs/diffusion" \
   --samples "${PAIR}"
+
+  # --fisher_min 1e-14 \  
+  # --fisher_rescale 1e10 \

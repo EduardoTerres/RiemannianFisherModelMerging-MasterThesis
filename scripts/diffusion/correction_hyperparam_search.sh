@@ -4,7 +4,7 @@
 #SBATCH --job-name=correction_search
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=08:00:00
+#SBATCH --time=02:00:00
 #SBATCH --array=0-2
 #SBATCH --output=outputs/diffusion/slurms/correction_hyperparam_search_%A_%a.out
 

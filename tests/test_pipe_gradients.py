@@ -61,6 +61,7 @@ def make_args(**overrides):
         "style_fisher_path": None,
         "fisher_min": None,
         "fisher_rescale": None,
+        "fisher_backend": "diagonal",
         "diagonal_fisher_correction_mu": None,
     }
     defaults.update(overrides)
@@ -87,6 +88,27 @@ def generator_to_coords(merger, generator):
 
 def coords_to_generator(merger, coords, dtype=torch.float32):
     return merger.oft_params_to_skew_matrix(coords, son_dimension=3).to(dtype=dtype)
+
+
+def test_apply_pair_uses_kfac_paths_when_requested():
+    pair = {
+        "name": "cat__style",
+        "concept": {
+            "adapter_path": "/tmp/concept_adapter.safetensors",
+            "fim_path": "/tmp/cat_oft_lie_fim.safetensors",
+            "class_name": "cat",
+            "placeholder_token": "<cat>",
+        },
+        "style": {
+            "adapter_path": "/tmp/style_adapter.safetensors",
+            "fim_path": "/tmp/style_oft_lie_fim.safetensors",
+            "placeholder_token": "<style>",
+        },
+    }
+    args = pipe_gradients.apply_pair(make_args(fisher_backend="kfac"), pair)
+
+    assert args.concept_fisher_path == "/tmp/cat_oft_lie_kfac.safetensors"
+    assert args.style_fisher_path == "/tmp/style_oft_lie_kfac.safetensors"
 
 
 def test_without_fishers_matches_standard_gradients_merge():

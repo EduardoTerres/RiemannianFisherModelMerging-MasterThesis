@@ -197,6 +197,37 @@ def _coords_to_skew(coords, n):
     return skew - skew.transpose(-1, -2)
 
 
+def _kfac_to_matrix(fisher, ref_coords):
+    row = fisher["row"].to(device=ref_coords.device, dtype=torch.float32).reshape(
+        -1, fisher["row"].shape[-1], fisher["row"].shape[-1]
+    )
+    col = fisher["col"].to(device=ref_coords.device, dtype=torch.float32).reshape(
+        -1, fisher["col"].shape[-1], fisher["col"].shape[-1]
+    )
+    scale = fisher["scale"].to(device=ref_coords.device, dtype=torch.float32).reshape(-1)
+    n = row.shape[-1]
+    d = ref_coords.shape[-1]
+    p, q = torch.triu_indices(n, n, offset=1, device=ref_coords.device)
+    left_p = p[:, None]
+    left_q = q[:, None]
+    right_p = p[None, :]
+    right_q = q[None, :]
+    matrix = (
+        row[:, left_p, right_p] * col[:, left_q, right_q]
+        - row[:, left_p, right_q] * col[:, left_q, right_p]
+        - row[:, left_q, right_p] * col[:, left_p, right_q]
+        + row[:, left_q, right_q] * col[:, left_p, right_p]
+    )
+    matrix = scale[:, None, None] * matrix
+    matrix = 0.5 * (matrix + matrix.transpose(-1, -2))
+    diag_floor = fisher.get("diag_floor")
+    if diag_floor is not None:
+        floor = torch.as_tensor(diag_floor, device=ref_coords.device, dtype=torch.float32)
+        eye = torch.eye(d, dtype=torch.float32, device=ref_coords.device).expand_as(matrix)
+        matrix = matrix + floor * eye
+    return matrix.reshape(*ref_coords.shape[:-1], d, d)
+
+
 def _transport_matrix(skew_matrix):
     block_size = skew_matrix.shape[-1]
     idx = torch.triu_indices(block_size, block_size, offset=1, device=skew_matrix.device)
@@ -206,6 +237,8 @@ def _transport_matrix(skew_matrix):
 
 
 def _fisher_to_matrix(fisher, ref_coords):
+    if isinstance(fisher, dict):
+        return _kfac_to_matrix(fisher, ref_coords)
     fisher = fisher.to(device=ref_coords.device, dtype=torch.float32)
     if fisher.dim() == 3 and fisher.shape[-1] == fisher.shape[-2]:
         if fisher.shape[-1] == ref_coords.shape[-1]:
@@ -216,12 +249,17 @@ def _fisher_to_matrix(fisher, ref_coords):
     raise ValueError(f"Unsupported Fisher shape {tuple(fisher.shape)} for {tuple(ref_coords.shape)}")
 
 
+def _normalize_fisher_matrix(matrix):
+    return matrix / torch.linalg.vector_norm(matrix).clamp_min(1e-8)
+
+
 def _cayley_fisher_tangent(tangent, fishers, beta):
     log_coords = _upper_coords(tangent)
-    h1 = _fisher_to_matrix(fishers[0], log_coords)
+    h1 = _normalize_fisher_matrix(_fisher_to_matrix(fishers[0], log_coords))
     h2 = _fisher_to_matrix(fishers[1], log_coords)
     pt = _transport_matrix(tangent).to(dtype=torch.float32)
     h2 = pt @ h2 @ pt.transpose(-1, -2)
+    h2 = _normalize_fisher_matrix(h2)
 
     d = log_coords.shape[-1]
     eye = torch.eye(d, dtype=torch.float32, device=log_coords.device).expand(
@@ -270,6 +308,7 @@ def _gradients_merge_with_merging_py(
     merger=None,
     alphas=None,
     geodesic_backend="cayley",
+    fisher_backend="diagonal",
 ):
     if mode == "geodesic":
         if geodesic_backend == "cayley":
@@ -278,17 +317,26 @@ def _gradients_merge_with_merging_py(
 
     if merger is None:
         merger_cls = _load_root_oft_merging_class()
-        merger = merger_cls(device=str(device))
+        merger = merger_cls(device=str(device), fisher_backend=fisher_backend)
     coords = [
         _full_generator_to_oft_coords(merger, tensor).to(device=device)
         for tensor in tensors
     ]
     fisher_list = None
     if fishers is not None:
-        fisher_list = [
-            fisher.to(device=device, dtype=coords[0].dtype)
-            for fisher in fishers
-        ]
+        fisher_list = []
+        for fisher in fishers:
+            if isinstance(fisher, dict):
+                fisher_list.append({
+                    name: (
+                        value.to(device=device, dtype=torch.float32)
+                        if torch.is_tensor(value)
+                        else value
+                    )
+                    for name, value in fisher.items()
+                })
+            else:
+                fisher_list.append(fisher.to(device=device, dtype=coords[0].dtype))
     merged_coords = merger.merge_formula(
         coords,
         fisher_list=fisher_list,
@@ -325,6 +373,50 @@ def _adapter_key_to_fisher_key(adapter_key, processor_keys):
         if adapter_key.startswith(prefix):
             return f"layers.{layer_idx}." + adapter_key[len(prefix):]
     return adapter_key
+
+
+def _kfac_path(path):
+    if path.endswith("_oft_lie_fim.safetensors"):
+        return path.replace("_oft_lie_fim.safetensors", "_oft_lie_kfac.safetensors")
+    if path.endswith("_fim.safetensors"):
+        return path.replace("_fim.safetensors", "_kfac.safetensors")
+    return path
+
+
+def _fisher_layer(fisher, key, backend):
+    if backend == "diagonal":
+        return fisher[key]
+
+    required = {
+        "row": f"{key}.row",
+        "col": f"{key}.col",
+        "scale": f"{key}.scale",
+    }
+    missing = [name for name in required.values() if name not in fisher]
+    if missing:
+        raise KeyError(f"Missing KFAC tensors for {key}: {missing}")
+    out = {name: fisher[path] for name, path in required.items()}
+    trace_key = f"{key}.trace"
+    if trace_key in fisher:
+        out["trace"] = fisher[trace_key]
+    return out
+
+
+def _prepare_fisher_layer(fisher, fisher_min=None, fisher_rescale=None):
+    if isinstance(fisher, dict):
+        out = dict(fisher)
+        if fisher_rescale is not None:
+            out["scale"] = out["scale"] * fisher_rescale
+        if fisher_min is not None:
+            floor = float(fisher_min) * (float(fisher_rescale) if fisher_rescale is not None else 1.0)
+            out["diag_floor"] = torch.tensor(floor, device=out["scale"].device)
+        return out
+
+    if fisher_min is not None:
+        fisher = fisher.clamp_min(fisher_min)
+    if fisher_rescale is not None:
+        fisher = fisher * fisher_rescale
+    return fisher
 
 
 def get_seed(prompt, i, seed):
@@ -615,6 +707,9 @@ class GradientsMergeInferencer(MOFTInferencer):
             backend_suffix = f"_{getattr(self.args, 'geodesic_backend', 'cayley')}"
             if getattr(self.args, "geodesic_use_fishers", False):
                 backend_suffix += "_fisher"
+        fisher_backend = getattr(self.args, "fisher_backend", "diagonal")
+        if fisher_backend != "diagonal" and "fisher" in mode:
+            backend_suffix += f"_{fisher_backend}"
         if getattr(self.args, "diagonal_fisher_correction_mu", None) is not None:
             backend_suffix += f"_mu{self.args.diagonal_fisher_correction_mu:g}"
         pair_name = getattr(self.args, "dataset_pair_name", None)
@@ -637,6 +732,9 @@ class GradientsMergeInferencer(MOFTInferencer):
             return None
         if concept_fisher_path is None or style_fisher_path is None:
             raise ValueError("Both concept_fisher_path and style_fisher_path are required.")
+        if getattr(self.args, "fisher_backend", "diagonal") == "kfac":
+            concept_fisher_path = _kfac_path(concept_fisher_path)
+            style_fisher_path = _kfac_path(style_fisher_path)
         return concept_fisher_path, style_fisher_path
 
     def _merge_mode(self):
@@ -737,6 +835,7 @@ class GradientsMergeInferencer(MOFTInferencer):
             example_fisher_key = _adapter_key_to_fisher_key(example_adapter_key, processor_keys)
             _log_merge(f"Fisher key naming: adapter={example_adapter_key}")
             _log_merge(f"Fisher key naming: fisher ={example_fisher_key}")
+            _log_merge(f"Fisher backend={getattr(self.args, 'fisher_backend', 'diagonal')}")
             if getattr(self.args, "fisher_min", None) is not None:
                 _log_merge(f"clipping Fisher values below {self.args.fisher_min:g}")
             if getattr(self.args, "fisher_rescale", None) is not None:
@@ -773,6 +872,7 @@ class GradientsMergeInferencer(MOFTInferencer):
         _log_merge(f"summary: tensor shapes={shape_summary}")
         merged_state = {}
         geodesic_backend = getattr(self.args, "geodesic_backend", "cayley")
+        fisher_backend = getattr(self.args, "fisher_backend", "diagonal")
         if merge_mode == "geodesic" and geodesic_backend == "cayley":
             merge_engine = None
             _log_merge("using fast Cayley geodesic merge for this adapter merge")
@@ -782,7 +882,10 @@ class GradientsMergeInferencer(MOFTInferencer):
                 if merge_mode == "geodesic"
                 else _load_root_oft_merging_class()
             )
-            merge_engine = merger_cls(device=str(self.device))
+            if merge_mode == "geodesic":
+                merge_engine = merger_cls(device=str(self.device))
+            else:
+                merge_engine = merger_cls(device=str(self.device), fisher_backend=fisher_backend)
             _log_merge(f"initialized {merger_cls.__name__} engine once for this adapter merge")
         merge_start = time.time()
         merged_count = 0
@@ -795,13 +898,18 @@ class GradientsMergeInferencer(MOFTInferencer):
                 fishers = None
                 if concept_fisher is not None:
                     fisher_key = _adapter_key_to_fisher_key(key, processor_keys)
-                    fishers = [concept_fisher[fisher_key], style_fisher[fisher_key]]
-                    fisher_min = getattr(self.args, "fisher_min", None)
-                    if fisher_min is not None:
-                        fishers = [fisher.clamp_min(fisher_min) for fisher in fishers]
-                    fisher_rescale = getattr(self.args, "fisher_rescale", None)
-                    if fisher_rescale is not None:
-                        fishers = [fisher * fisher_rescale for fisher in fishers]
+                    fishers = [
+                        _fisher_layer(concept_fisher, fisher_key, fisher_backend),
+                        _fisher_layer(style_fisher, fisher_key, fisher_backend),
+                    ]
+                    fishers = [
+                        _prepare_fisher_layer(
+                            fisher,
+                            fisher_min=getattr(self.args, "fisher_min", None),
+                            fisher_rescale=getattr(self.args, "fisher_rescale", None),
+                        )
+                        for fisher in fishers
+                    ]
                 tensor_start = time.time()
                 merged = _gradients_merge_with_merging_py(
                     [concept_tensor, style_tensor],
@@ -811,6 +919,7 @@ class GradientsMergeInferencer(MOFTInferencer):
                     merger=merge_engine,
                     alphas=merge_alphas,
                     geodesic_backend=geodesic_backend,
+                    fisher_backend=fisher_backend,
                 )
                 merged_state[key] = _diagonal_fisher_correction(
                     merged,

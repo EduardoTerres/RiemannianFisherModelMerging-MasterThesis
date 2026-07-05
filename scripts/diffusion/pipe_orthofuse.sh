@@ -11,6 +11,8 @@
 set -e
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
+METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/orthofuse"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -34,7 +36,7 @@ echo "[pipe_orthofuse] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
 # curve over id
 python "${REPO_ROOT}/src/diffusion/pipe_orthofuse.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
-  --output_dir="${REPO_ROOT}/outputs/diffusion" \
+  --output_dir="${METHOD_OUTPUT_DIR}" \
   --concept_name="${CONCEPT}" \
   --t=0.6 \
   --postprocessing_method=curve_over_id \
@@ -44,7 +46,7 @@ python "${REPO_ROOT}/src/diffusion/pipe_orthofuse.py" \
 # eigenvalue rotation
 python "${REPO_ROOT}/src/diffusion/pipe_orthofuse.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
-  --output_dir="${REPO_ROOT}/outputs/diffusion" \
+  --output_dir="${METHOD_OUTPUT_DIR}" \
   --concept_name="${CONCEPT}" \
   --t=0.6 \
   --postprocessing_method=rotation \

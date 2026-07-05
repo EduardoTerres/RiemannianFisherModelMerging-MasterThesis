@@ -33,6 +33,7 @@ MergeMode = Literal[
     "diagonal_fisher_kl_rescaled",
     "fisher",
 ]
+FisherBackend = Literal["diagonal", "kfac"]
 
 class RiemannianMerging(ABC):
     """
@@ -112,10 +113,14 @@ class OFTMerging(RiemannianMerging):
         lam: float = 0.0,
         alphas: Optional[List[float]] = None,
         device: str = "cpu",
+        fisher_backend: FisherBackend = "diagonal",
     ):
         super().__init__(manifold=SOnManifold(), lam=lam, alphas=alphas)
         self.manifold: SOnManifold
         self.device = device
+        if fisher_backend not in {"diagonal", "kfac"}:
+            raise ValueError(f"Unsupported fisher_backend: {fisher_backend!r}")
+        self.fisher_backend = fisher_backend
 
     def oft_params_to_skew_matrix(
             self, oft_params: torch.Tensor, son_dimension: int,
@@ -206,6 +211,24 @@ class OFTMerging(RiemannianMerging):
                         fisher[new_key] = fisher.pop(key)
         return all_fishers
 
+    def _layer_fisher(self, fisher: Dict[str, Tensor], key: str) -> Tensor | Dict[str, Tensor]:
+        if self.fisher_backend == "diagonal":
+            return fisher[key]
+
+        required = {
+            "row": f"{key}.row",
+            "col": f"{key}.col",
+            "scale": f"{key}.scale",
+        }
+        missing = [name for name in required.values() if name not in fisher]
+        if missing:
+            raise KeyError(f"Missing KFAC tensors for {key}: {missing}")
+        out: Dict[str, Tensor] = {name: fisher[path] for name, path in required.items()}
+        trace_key = f"{key}.trace"
+        if trace_key in fisher:
+            out["trace"] = fisher[trace_key]
+        return out
+
     def merge_formula(
         self,
         weights_list: List[Tensor],
@@ -244,12 +267,16 @@ class OFTMerging(RiemannianMerging):
         if mode == "diagonal_fisher":
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
+            if self.fisher_backend == "kfac":
+                return self._fisher_merging(weights_list, fisher_list, alphas)
             return self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
 
         if mode == "diagonal_fisher_avg":
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
             avg_alphas = torch.full_like(alphas, 1.0 / len(weights_list))
+            if self.fisher_backend == "kfac":
+                return self._fisher_merging(weights_list, fisher_list, avg_alphas)
             return self._diagonal_fisher_merging(
                 weights_list,
                 fisher_list,
@@ -259,12 +286,18 @@ class OFTMerging(RiemannianMerging):
         if mode == "diagonal_fisher_rescaled":
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
+            if self.fisher_backend == "kfac":
+                merged = self._fisher_merging(weights_list, fisher_list, alphas)
+                return self._full_fisher_norm_rescale(weights_list, fisher_list, merged, alphas)
             merged = self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
             return self._fisher_norm_rescale(weights_list, fisher_list, merged, alphas)
 
         if mode == "diagonal_fisher_max_rescaled":
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
+            if self.fisher_backend == "kfac":
+                merged = self._fisher_merging(weights_list, fisher_list, alphas)
+                return self._full_fisher_norm_max_rescale(weights_list, fisher_list, merged, alphas)
             merged = self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
             return self._fisher_norm_max_rescale(weights_list, fisher_list, merged, alphas)
 
@@ -277,6 +310,8 @@ class OFTMerging(RiemannianMerging):
         if mode == "diagonal_fisher_kl_rescaled":
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
+            if self.fisher_backend == "kfac":
+                raise ValueError("diagonal_fisher_kl_rescaled is only implemented for diagonal Fisher.")
             return self._diagonal_fisher_merging_kl_rescaled(
                 weights_list=weights_list,
                 fisher_list=fisher_list,
@@ -774,10 +809,137 @@ class OFTMerging(RiemannianMerging):
 
         return omega.to(dtype=ref.dtype)
 
+    def _kfac_to_fisher_matrix(self, fisher: Dict[str, Tensor], ref: Tensor) -> Tensor:
+        """Reconstruct saved row/column KFAC factors in the compact so(n) basis."""
+        row = fisher["row"].to(device=ref.device, dtype=torch.float32)
+        col = fisher["col"].to(device=ref.device, dtype=torch.float32)
+        scale = fisher["scale"].to(device=ref.device, dtype=torch.float32)
+
+        n = row.shape[-1]
+        d = ref.shape[-1]
+        expected_d = n * (n - 1) // 2
+        if d != expected_d:
+            raise ValueError(f"KFAC block size {n} implies d={expected_d}, got {d}.")
+
+        row = row.reshape(-1, n, n)
+        col = col.reshape(-1, n, n)
+        scale = scale.reshape(-1)
+        if row.shape[0] != ref.reshape(-1, d).shape[0]:
+            raise ValueError(
+                f"KFAC blocks {row.shape[0]} do not match weight blocks "
+                f"{ref.reshape(-1, d).shape[0]}."
+            )
+
+        p, q = torch.triu_indices(n, n, offset=1, device=ref.device)
+        left_p = p[:, None]
+        left_q = q[:, None]
+        right_p = p[None, :]
+        right_q = q[None, :]
+        matrix = (
+            row[:, left_p, right_p] * col[:, left_q, right_q]
+            - row[:, left_p, right_q] * col[:, left_q, right_p]
+            - row[:, left_q, right_p] * col[:, left_p, right_q]
+            + row[:, left_q, right_q] * col[:, left_p, right_p]
+        )
+        matrix = scale[:, None, None] * matrix
+        matrix = 0.5 * (matrix + matrix.transpose(-1, -2))
+
+        diag_floor = fisher.get("diag_floor")
+        if diag_floor is not None:
+            floor = torch.as_tensor(diag_floor, device=ref.device, dtype=torch.float32)
+            eye = torch.eye(d, dtype=torch.float32, device=ref.device).expand_as(matrix)
+            matrix = matrix + floor * eye
+
+        return matrix.reshape(*ref.shape[:-1], d, d)
+
+    def _fisher_to_matrix(self, fisher: Tensor | Dict[str, Tensor], ref: Tensor) -> Tensor:
+        if isinstance(fisher, dict):
+            return self._kfac_to_fisher_matrix(fisher, ref)
+
+        fisher = fisher.to(device=ref.device, dtype=torch.float32)
+        if fisher.shape == ref.shape:
+            return torch.diag_embed(fisher.clamp(min=0.0))
+        if fisher.shape == (*ref.shape, ref.shape[-1]):
+            matrix = fisher
+            return 0.5 * (matrix + matrix.transpose(-1, -2))
+        raise ValueError(f"Unsupported Fisher shape {tuple(fisher.shape)} for {tuple(ref.shape)}.")
+
+    def _fisher_matrices(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: List[Tensor | Dict[str, Tensor]],
+    ) -> List[Tensor]:
+        ref = weights_list[0]
+        return [self._fisher_to_matrix(fisher, ref) for fisher in fisher_list]
+
+    def _full_fisher_norm_rescale(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: List[Tensor | Dict[str, Tensor]],
+        merged: Tensor,
+        alphas,
+    ) -> Tensor:
+        weights = [w.to(device=merged.device, dtype=torch.float32) for w in weights_list]
+        fishers = self._fisher_matrices(weights_list, fisher_list)
+
+        if isinstance(alphas, torch.Tensor):
+            a = alphas.to(dtype=torch.float32, device=merged.device)
+        else:
+            a = torch.tensor(alphas, dtype=torch.float32, device=merged.device)
+
+        individual_norms = []
+        for omega_t, fisher_t in zip(weights, fishers):
+            energy = (omega_t.unsqueeze(-2) @ fisher_t @ omega_t.unsqueeze(-1)).sum()
+            individual_norms.append(torch.sqrt(energy.clamp(min=0.0)))
+        sum_of_norms = (a.abs() * torch.stack(individual_norms)).sum()
+
+        fisher_sum = torch.zeros_like(fishers[0])
+        for alpha_t, fisher_t in zip(a.abs(), fishers):
+            fisher_sum = fisher_sum + alpha_t * fisher_t
+
+        merged_f = merged.to(device=merged.device, dtype=torch.float32)
+        norm_of_merged = torch.sqrt(
+            (merged_f.unsqueeze(-2) @ fisher_sum @ merged_f.unsqueeze(-1)).sum().clamp(min=0.0)
+        )
+        correction = sum_of_norms / norm_of_merged.clamp(min=1e-8)
+        print(
+            "[full_fisher_norm_rescale] "
+            f"sum_of_norms={sum_of_norms.item():.6g}, "
+            f"norm_of_sum={norm_of_merged.item():.6g}, "
+            f"correction={correction.item():.6g}"
+        )
+        return (correction * merged).to(dtype=weights_list[0].dtype)
+
+    def _full_fisher_norm_max_rescale(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: List[Tensor | Dict[str, Tensor]],
+        merged: Tensor,
+        alphas,
+    ) -> Tensor:
+        weights = [w.to(device=merged.device, dtype=torch.float32) for w in weights_list]
+        fishers = self._fisher_matrices(weights_list, fisher_list)
+
+        if isinstance(alphas, torch.Tensor):
+            a = alphas.to(dtype=torch.float32, device=merged.device).abs()
+        else:
+            a = torch.tensor(alphas, dtype=torch.float32, device=merged.device).abs()
+
+        merged_f = merged.to(device=merged.device, dtype=torch.float32)
+        ratios = []
+        for alpha_t, omega_t, fisher_t in zip(a, weights, fishers):
+            target = alpha_t * (omega_t.unsqueeze(-2) @ fisher_t @ omega_t.unsqueeze(-1)).sum()
+            actual = (merged_f.unsqueeze(-2) @ fisher_t @ merged_f.unsqueeze(-1)).sum()
+            ratios.append(target / actual.clamp(min=1e-8))
+
+        correction = torch.sqrt(torch.stack(ratios).clamp(min=0.0)).max()
+        print("[full_fisher_norm_max_rescale] " f"correction={correction.item():.6g}")
+        return (correction * merged).to(dtype=weights_list[0].dtype)
+
     def _fisher_merging(
         self,
         weights_list: List[Tensor],
-        fisher_list: List[Tensor],
+        fisher_list: List[Tensor | Dict[str, Tensor]],
         alphas: List[float],
     ) -> Tensor:
         """Merge OFT adapters using full Fisher information matrices as per-parameter weights.
@@ -790,28 +952,29 @@ class OFTMerging(RiemannianMerging):
         Returns:
             Merged parameters of shape (num_blocks, d).
         """
-        raise NotImplementedError("Full Fisher merging is not implemented yet.")
-        num_blocks, son_dimension = weights_list[0].shape
-        dtype, device = weights_list[0].dtype, weights_list[0].device
-        block_size = int((1 + (1 + 8 * son_dimension) ** 0.5) / 2)
+        ref = weights_list[0]
+        dtype, device = ref.dtype, ref.device
+        d = ref.shape[-1]
+        weights = [w.to(device=device, dtype=torch.float32) for w in weights_list]
+        fishers = self._fisher_matrices(weights_list, fisher_list)
 
-        Id = torch.eye(son_dimension, dtype=dtype, device=device).unsqueeze(0)
+        if isinstance(alphas, torch.Tensor):
+            alpha_tensors = alphas.to(device=device, dtype=torch.float32)
+        else:
+            alpha_tensors = torch.tensor(alphas, dtype=torch.float32, device=device)
 
-        A = self.lam * Id.expand(num_blocks, -1, -1).clone()
-        b = torch.zeros(num_blocks, son_dimension, dtype=dtype, device=device)
+        eye = torch.eye(d, dtype=torch.float32, device=device).expand(*ref.shape[:-1], d, d)
+        A = self.lam * eye.clone()
+        b = torch.zeros_like(ref, dtype=torch.float32, device=device)
 
-        for alpha_t, oft_params_t, fisher_t in zip(alphas, weights_list, fisher_list):
-            # Reconstruct skew-symmetric matrices
-            skew_matrix = self.oft_params_to_skew_matrix(oft_params_t, son_dimension)  # (num_blocks, n, n)
-            Pt = self.manifold.compute_Pt(skew_matrix, block_size)  # (num_blocks, d, d)
+        for alpha_t, omega_t, fisher_t in zip(alpha_tensors, weights, fishers):
+            norm = torch.linalg.vector_norm(fisher_t).clamp(min=1e-8)
+            ft = fisher_t / norm
+            A = A + alpha_t * ft
+            b = b + alpha_t * ((self.lam * eye + ft) @ omega_t.unsqueeze(-1)).squeeze(-1)
 
-            F_tilde = Pt @ fisher_t @ Pt.transpose(-2, -1)
-
-            A += alpha_t * F_tilde
-            rhs = (self.lam * Id.squeeze(0) + F_tilde) @ oft_params_t.unsqueeze(-1)
-            b += alpha_t * rhs.squeeze(-1)
-
-        return torch.linalg.solve(A, b.unsqueeze(-1)).squeeze(-1)
+        system = A + 1e-8 * eye
+        return torch.linalg.solve(system, b.unsqueeze(-1)).squeeze(-1).to(dtype)
 
     def fisher_full_task_vectors(
         self,
@@ -947,7 +1110,7 @@ class OFTMerging(RiemannianMerging):
 
                 fishers_layer = None
                 if all_fishers:
-                    fishers_layer = [fisher[key] for fisher in all_fishers]
+                    fishers_layer = [self._layer_fisher(fisher, key) for fisher in all_fishers]
 
                 avg_weight = self.merge_formula(
                     weights_list=weights_layer,

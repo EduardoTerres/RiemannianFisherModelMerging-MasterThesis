@@ -8,7 +8,7 @@ from safetensors.torch import load_file
 from torch import Tensor
 
 from src.geometry import SOnManifold
-from src.merging import MergeMode, RiemannianMerging
+from src.merging import FisherBackend, MergeMode, RiemannianMerging
 
 
 class OFTGeodesicMerging(RiemannianMerging):
@@ -26,10 +26,14 @@ class OFTGeodesicMerging(RiemannianMerging):
         lam: float = 0.0,
         alphas: Optional[List[float]] = None,
         device: str = "cpu",
+        fisher_backend: FisherBackend = "diagonal",
     ):
         super().__init__(manifold=SOnManifold(), lam=lam, alphas=alphas)
         self.manifold: SOnManifold
         self.device = device
+        if fisher_backend not in {"diagonal", "kfac"}:
+            raise ValueError(f"Unsupported fisher_backend: {fisher_backend!r}")
+        self.fisher_backend = fisher_backend
 
     def _ensure_two(self, items: List, name: str) -> None:
         if len(items) != 2:
@@ -117,7 +121,71 @@ class OFTGeodesicMerging(RiemannianMerging):
         rows, cols = indices[0], indices[1]
         return skew[:, rows, cols]
 
-    def _fisher_matrix(self, fisher: Tensor, ref: Tensor) -> Tensor:
+    def _layer_fisher(self, fisher: Dict[str, Tensor], key: str) -> Tensor | Dict[str, Tensor]:
+        if self.fisher_backend == "diagonal":
+            return fisher[key]
+
+        required = {
+            "row": f"{key}.row",
+            "col": f"{key}.col",
+            "scale": f"{key}.scale",
+        }
+        missing = [name for name in required.values() if name not in fisher]
+        if missing:
+            raise KeyError(f"Missing KFAC tensors for {key}: {missing}")
+        out: Dict[str, Tensor] = {name: fisher[path] for name, path in required.items()}
+        trace_key = f"{key}.trace"
+        if trace_key in fisher:
+            out["trace"] = fisher[trace_key]
+        return out
+
+    def _kfac_to_fisher_matrix(self, fisher: Dict[str, Tensor], ref: Tensor) -> Tensor:
+        """Reconstruct saved row/column KFAC factors in compact so(n) coordinates."""
+        row = fisher["row"].to(device=ref.device, dtype=torch.float32)
+        col = fisher["col"].to(device=ref.device, dtype=torch.float32)
+        scale = fisher["scale"].to(device=ref.device, dtype=torch.float32)
+
+        n = row.shape[-1]
+        d = ref.shape[-1]
+        expected_d = n * (n - 1) // 2
+        if d != expected_d:
+            raise ValueError(f"KFAC block size {n} implies d={expected_d}, got {d}.")
+
+        row = row.reshape(-1, n, n)
+        col = col.reshape(-1, n, n)
+        scale = scale.reshape(-1)
+        num_blocks = ref.reshape(-1, d).shape[0]
+        if row.shape[0] != num_blocks:
+            raise ValueError(
+                f"KFAC blocks {row.shape[0]} do not match weight blocks {num_blocks}."
+            )
+
+        p, q = torch.triu_indices(n, n, offset=1, device=ref.device)
+        left_p = p[:, None]
+        left_q = q[:, None]
+        right_p = p[None, :]
+        right_q = q[None, :]
+        matrix = (
+            row[:, left_p, right_p] * col[:, left_q, right_q]
+            - row[:, left_p, right_q] * col[:, left_q, right_p]
+            - row[:, left_q, right_p] * col[:, left_p, right_q]
+            + row[:, left_q, right_q] * col[:, left_p, right_p]
+        )
+        matrix = scale[:, None, None] * matrix
+        matrix = 0.5 * (matrix + matrix.transpose(-1, -2))
+
+        diag_floor = fisher.get("diag_floor")
+        if diag_floor is not None:
+            floor = torch.as_tensor(diag_floor, device=ref.device, dtype=torch.float32)
+            eye = torch.eye(d, dtype=torch.float32, device=ref.device).expand_as(matrix)
+            matrix = matrix + floor * eye
+
+        return matrix.reshape(*ref.shape[:-1], d, d)
+
+    def _fisher_matrix(self, fisher: Tensor | Dict[str, Tensor], ref: Tensor) -> Tensor:
+        if isinstance(fisher, dict):
+            return self._kfac_to_fisher_matrix(fisher, ref)
+
         fisher = fisher.to(device=ref.device, dtype=torch.float32)
         if fisher.dim() == ref.dim():
             return torch.diag_embed(fisher.clamp(min=0.0))
@@ -132,7 +200,7 @@ class OFTGeodesicMerging(RiemannianMerging):
         self,
         log_coords: Tensor,
         relative_omega: Tensor,
-        fisher_list: List[Tensor],
+        fisher_list: List[Tensor | Dict[str, Tensor]],
         beta: Tensor,
     ) -> Tensor:
         """Compute the Fisher-weighted tangent step at ``theta_1``.
@@ -141,15 +209,14 @@ class OFTGeodesicMerging(RiemannianMerging):
 
             Exp_{theta_1}[
                 (lambda I + (1-beta) H_1 + beta H_2)^-1
-                beta (lambda I + H_2) Log_{theta_1}(theta_2)
+                beta H_2 Log_{theta_1}(theta_2)
             ].
 
         ``log_coords`` is ``Log_{theta_1}(theta_2)`` expressed in the OFT
         upper-triangular Lie-algebra basis, shape ``(num_blocks, d)``.
-        Fishers may be diagonal ``(num_blocks, d)`` or full
-        ``(num_blocks, d, d)``. The second Fisher is transported into the
-        tangent space at ``theta_1`` before solving the blockwise linear
-        systems.
+        Fishers may be diagonal ``(num_blocks, d)``, full ``(num_blocks, d, d)``,
+        or KFAC factor dicts. The second Fisher is transported into the tangent
+        space at ``theta_1`` before solving the blockwise linear systems.
         """
         self._ensure_two(fisher_list, "Fisher tensors")
 
@@ -172,8 +239,7 @@ class OFTGeodesicMerging(RiemannianMerging):
         beta = beta.to(device=device, dtype=torch.float32)
 
         system = self.lam * eye + (1.0 - beta) * h1 + beta * h2
-        rhs_matrix = self.lam * eye + h2
-        rhs = beta * (rhs_matrix @ log_coords.float().unsqueeze(-1)).squeeze(-1)
+        rhs = beta * (h2 @ log_coords.float().unsqueeze(-1)).squeeze(-1)
 
         try:
             return torch.linalg.solve(system, rhs.unsqueeze(-1)).squeeze(-1).to(dtype)
@@ -231,7 +297,7 @@ class OFTGeodesicMerging(RiemannianMerging):
     def merge_formula(
         self,
         weights_list: List[Tensor],
-        fisher_list: Optional[List[Dict[str, Tensor]]] = None,
+        fisher_list: Optional[List[Tensor | Dict[str, Tensor]]] = None,
         mode: MergeMode = "standard",
         alphas: Optional[Tensor] = None,
     ) -> Tensor:
@@ -314,7 +380,11 @@ class OFTGeodesicMerging(RiemannianMerging):
             if "oft_r" in key or ("oft_" in key.lower() and "classifier" not in key.lower()):
                 print(f"  Processing key: {key}")
                 weights_layer = [weights[key] for weights in all_weights]
-                fishers_layer = [fisher[key] for fisher in all_fishers] if all_fishers else None
+                fishers_layer = (
+                    [self._layer_fisher(fisher, key) for fisher in all_fishers]
+                    if all_fishers
+                    else None
+                )
                 merged_weights[key] = self.merge_formula(
                     weights_list=weights_layer,
                     fisher_list=fishers_layer,

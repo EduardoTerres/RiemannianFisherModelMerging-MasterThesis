@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--pairs", nargs="+", default=["all_dataset_pairs"])
     parser.add_argument("--output_dir", type=Path, default=REPO_ROOT / "outputs/diffusion")
     parser.add_argument("--samples_dir", type=Path, default=None)
+    parser.add_argument("--method_samples_root", type=Path, default=None)
     parser.add_argument("--eval_root", type=Path, default=None)
     parser.add_argument("--tables_dir", type=Path, default=None)
     parser.add_argument("--checkpoint_idx", type=int, default=0)
@@ -82,13 +83,80 @@ def class_name_for(concept):
     return concept
 
 
-def sample_name(args, method, pair_name):
-    prefix = f"ns{args.num_inference_steps}_gs{args.guidance_scale}"
+def parse_mu(value, method):
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid mu value in method {method!r}: {value!r}") from exc
+
+
+def method_spec(method, args):
     if method == "orthofuse":
+        return {"kind": "orthofuse", "display": f"orthofuse_{args.orthofuse_postprocessing}_t{args.orthofuse_t}"}
+
+    mu_prefixes = (
+        ("diagonal_fisher_mu_", "diagonal_fisher", "diagonal", "diagonal_fisher"),
+        ("diagonal_fisher_mu", "diagonal_fisher", "diagonal", "diagonal_fisher"),
+        ("kfac_mu_", "diagonal_fisher", "kfac", "kfac"),
+        ("kfac_mu", "diagonal_fisher", "kfac", "kfac"),
+    )
+    for prefix, mode, backend, display_prefix in mu_prefixes:
+        if method.startswith(prefix):
+            mu = parse_mu(method[len(prefix) :], method)
+            return {
+                "kind": "gradients",
+                "mode": mode,
+                "backend": backend,
+                "mu": mu,
+                "display": f"{display_prefix}_mu{mu:g}",
+            }
+
+    if method == "kfac":
+        return {
+            "kind": "gradients",
+            "mode": "diagonal_fisher",
+            "backend": "kfac",
+            "mu": None,
+            "display": method,
+        }
+
+    mu = args.diagonal_fisher_mu if method == "diagonal_fisher" else None
+    display = f"diagonal_fisher_mu{mu:g}" if mu is not None else method
+    return {
+        "kind": "gradients",
+        "mode": method,
+        "backend": "diagonal",
+        "mu": mu,
+        "display": display,
+    }
+
+
+def sample_name(args, method, pair_name):
+    spec = method_spec(method, args)
+    prefix = f"ns{args.num_inference_steps}_gs{args.guidance_scale}"
+    if spec["kind"] == "orthofuse":
         return f"{prefix}_orthofuse_t{args.orthofuse_t}_method_{args.orthofuse_postprocessing}_{pair_name}"
-    if method == "diagonal_fisher" and args.diagonal_fisher_mu is not None:
-        return f"{prefix}_gradients_{method}_mu{args.diagonal_fisher_mu:g}_{pair_name}"
-    return f"{prefix}_gradients_{method}_{pair_name}"
+
+    backend_suffix = f"_{spec['backend']}" if spec["backend"] != "diagonal" and "fisher" in spec["mode"] else ""
+    mu_suffix = f"_mu{spec['mu']:g}" if spec["mu"] is not None else ""
+    return f"{prefix}_gradients_{spec['mode']}{backend_suffix}{mu_suffix}_{pair_name}"
+
+
+def sample_roots(args, method):
+    roots = []
+    if args.method_samples_root is not None:
+        roots.append(args.method_samples_root / method / "samples")
+    roots.append(args.samples_dir or args.output_dir / "samples")
+    return roots
+
+
+def find_sample_path(args, method, pair_name):
+    folder = sample_name(args, method, pair_name)
+    for root in sample_roots(args, method):
+        src = root / folder
+        if (src / f"version_{args.version}").is_dir():
+            return src
+    return None
 
 
 def write_hparams(path, exp_name, exp_dir, train_data_dir, concept, class_name):
@@ -119,7 +187,6 @@ def link_samples(src, dst):
 
 def stage_runs(args):
     eval_root = args.eval_root or args.output_dir / "eval_runs"
-    samples_dir = args.samples_dir or args.output_dir / "samples"
     eval_root.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "slurms").mkdir(parents=True, exist_ok=True)
 
@@ -130,9 +197,13 @@ def stage_runs(args):
         for pair in selected_pairs(args.pairs):
             pair_name = pair["name"]
             concept = pair["concept"]["name"]
-            src = samples_dir / sample_name(args, method, pair_name)
-            if not (src / f"version_{args.version}").is_dir():
-                print(f"[skip] missing samples: {src}/version_{args.version}", file=sys.stderr)
+            src = find_sample_path(args, method, pair_name)
+            if src is None:
+                tried = [
+                    root / sample_name(args, method, pair_name) / f"version_{args.version}"
+                    for root in sample_roots(args, method)
+                ]
+                print(f"[skip] missing samples: {', '.join(map(str, tried))}", file=sys.stderr)
                 continue
 
             train_data_dir = args.output_dir / "d1_images" / concept
@@ -310,11 +381,7 @@ def method_from_exp_name(exp_name):
 
 
 def display_method_name(method, args):
-    if method == "diagonal_fisher" and args.diagonal_fisher_mu is not None:
-        return f"diagonal_fisher_mu{args.diagonal_fisher_mu:g}"
-    if method == "orthofuse":
-        return f"orthofuse_{args.orthofuse_postprocessing}_t{args.orthofuse_t}"
-    return method
+    return method_spec(method, args)["display"]
 
 
 def display_prompt(prompt, record):

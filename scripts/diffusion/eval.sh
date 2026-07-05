@@ -4,7 +4,7 @@
 #SBATCH --job-name=eval
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=02:00:00
+#SBATCH --time=00:10:00
 #SBATCH --output=outputs/diffusion/slurms/eval_%A.out
 
 set -e
@@ -12,11 +12,13 @@ set -e
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
 SAMPLES_DIR="${OUTPUT_DIR}/samples"
+METHOD_SAMPLES_ROOT="${OUTPUT_DIR}/samples"
 EVAL_ROOT="${OUTPUT_DIR}/eval_runs"
 TABLES_DIR="${OUTPUT_DIR}/tables"
 
 METHODS=(
-  diagonal_fisher
+  diagonal_fisher_mu_3
+  kfac_mu_2
   orthofuse
   standard_rescaled
 )
@@ -27,18 +29,12 @@ conda activate orthofuse_env
 export HF_HOME=/scratch-shared/eterres/huggingface-cache
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export TORCH_HOME="${HF_HOME}/torch"
-export EVAL_OFFLINE="${EVAL_OFFLINE:-0}"
-export HF_HUB_OFFLINE="${EVAL_OFFLINE}"
-export TRANSFORMERS_OFFLINE="${EVAL_OFFLINE}"
-export DIFFUSERS_OFFLINE="${EVAL_OFFLINE}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/matplotlib-${USER}}"
-export PYTHONPATH="${REPO_ROOT}/OrthoFuse:${REPO_ROOT}:${PYTHONPATH:-}"
+export HF_HUB_OFFLINE="${EVAL_OFFLINE:-0}"
 
 python -m src.diffusion.eval.table \
   --output_dir "${OUTPUT_DIR}" \
   --samples_dir "${SAMPLES_DIR}" \
+  --method_samples_root "${METHOD_SAMPLES_ROOT}" \
   --eval_root "${EVAL_ROOT}" \
   --tables_dir "${TABLES_DIR}" \
-  --diagonal_fisher_mu 3 \
   --methods "${METHODS[@]}"

@@ -33,6 +33,9 @@ def gradients_inference_folder_name(args):
         backend_suffix = f"_{getattr(args, 'geodesic_backend', 'cayley')}"
         if getattr(args, "geodesic_use_fishers", False):
             backend_suffix += "_fisher"
+    fisher_backend = getattr(args, "fisher_backend", "diagonal")
+    if fisher_backend != "diagonal" and "fisher" in mode:
+        backend_suffix += f"_{fisher_backend}"
     if getattr(args, "diagonal_fisher_correction_mu", None) is not None:
         backend_suffix += f"_mu{args.diagonal_fisher_correction_mu:g}"
 

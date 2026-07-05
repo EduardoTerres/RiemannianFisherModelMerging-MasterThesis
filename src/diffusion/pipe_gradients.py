@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument("--style_fisher_path", type=str, default=None)
     parser.add_argument("--fisher_min", type=float, default=None)
     parser.add_argument("--fisher_rescale", type=float, default=None)
+    parser.add_argument("--fisher_backend", choices=["diagonal", "kfac"], default="diagonal")
     parser.add_argument("--alphas", type=float, nargs=2, default=None, metavar=("CONCEPT", "STYLE"))
     parser.add_argument("--merge_mode", type=str, default=None)
     parser.add_argument("--diagonal_fisher_correction_mu", type=float, default=None)
@@ -86,11 +87,22 @@ def prepare_merge_args(args):
     return args
 
 
+def fisher_path_for_backend(path, backend):
+    if backend != "kfac":
+        return path
+    if path.endswith("_oft_lie_fim.safetensors"):
+        return path.replace("_oft_lie_fim.safetensors", "_oft_lie_kfac.safetensors")
+    if path.endswith("_fim.safetensors"):
+        return path.replace("_fim.safetensors", "_kfac.safetensors")
+    return path
+
+
 def apply_pair(args, pair):
     args.moft_layers_concept_path = pair["concept"]["adapter_path"]
     args.moft_layers_style_path = pair["style"]["adapter_path"]
-    args.concept_fisher_path = pair["concept"]["fim_path"]
-    args.style_fisher_path = pair["style"]["fim_path"]
+    backend = getattr(args, "fisher_backend", "diagonal")
+    args.concept_fisher_path = fisher_path_for_backend(pair["concept"]["fim_path"], backend)
+    args.style_fisher_path = fisher_path_for_backend(pair["style"]["fim_path"], backend)
     args.dataset_pair_name = pair["name"]
     args.concept_class_name = pair["concept"]["class_name"]
     args.placeholder_token_concept = pair["concept"]["placeholder_token"]

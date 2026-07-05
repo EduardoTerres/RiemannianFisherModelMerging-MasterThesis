@@ -11,6 +11,8 @@
 set -e
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
+METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/standard_rescaled"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -38,7 +40,7 @@ echo "[pipe_orthomerge] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
 
 python "${REPO_ROOT}/src/diffusion/pipe_gradients.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
-  --output_dir="${REPO_ROOT}/outputs/diffusion" \
+  --output_dir="${METHOD_OUTPUT_DIR}" \
   --concept_name="${CONCEPT}" \
   --merge_mode=standard_rescaled \
   --alphas "${ALPHA_CONCEPT}" "${ALPHA_STYLE}" \

@@ -141,6 +141,12 @@ def parse_args():
         help="Per-task weights (must match number of adapters). Defaults to uniform.",
     )
     parser.add_argument(
+        "--fisher_backend",
+        choices=["diagonal", "kfac"],
+        default="diagonal",
+        help="Fisher approximation to use for Fisher merge modes.",
+    )
+    parser.add_argument(
         "--output_dir", type=str, default="outputs/merged",
         help="Directory where the merged adapter and optionally the full model are saved.",
     )
@@ -169,6 +175,14 @@ def main():
     model_family = MODEL_FAMILIES[args.model_family]
     base_model_path = model_family.base_model_path
     adapter_paths = model_family.adapter_paths
+    fisher_paths = model_family.fisher_paths
+    if args.fisher_backend == "kfac":
+        fisher_paths = [
+            path.replace("_oft_lie_fim.safetensors", "_oft_lie_kfac.safetensors")
+            if path.endswith("_oft_lie_fim.safetensors")
+            else path.replace("_fim.safetensors", "_kfac.safetensors")
+            for path in fisher_paths
+        ]
 
     use_wandb = not (
         args.merge_method == "gradients"
@@ -191,7 +205,12 @@ def main():
         merged_weights = _build_adamerging(model_family=model_family, device=args.device)
     else:
         if args.merge_method == "gradients":
-            merging = OFTMerging(lam=args.lam, alphas=args.alphas, device=args.device)
+            merging = OFTMerging(
+                lam=args.lam,
+                alphas=args.alphas,
+                device=args.device,
+                fisher_backend=args.fisher_backend,
+            )
         elif args.merge_method == "wudi":
             merging = WudiOFTMerging(device=args.device)
         elif args.merge_method == "karcher":
@@ -201,7 +220,7 @@ def main():
 
         merge_kwargs: dict = dict(
             adapter_paths=adapter_paths,
-            fisher_paths=model_family.fisher_paths if "fisher" in args.merge_mode else None,
+            fisher_paths=fisher_paths if "fisher" in args.merge_mode else None,
             mode=args.merge_mode,
             optimize_alphas=args.optimize_alphas,
         )

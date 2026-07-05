@@ -20,8 +20,8 @@ METHODS = (
     "standard_geodesic",
     "fisher_geodesic",
     "standard_rescaled",
-    "diagonal_fisher",
-    "diagonal_fisher_rescaled",
+    "fisher",
+    "fisher_rescaled",
     "orthofuse_geodesic",
     "orthofuse_geodesic_curve_over_id",
     "orthofuse_geodesic_rotation",
@@ -37,8 +37,8 @@ GRADIENT_FOLDERS = {
     "standard_geodesic": "gradients_geodesic_{backend}",
     "fisher_geodesic": "gradients_geodesic_{backend}_fisher",
     "standard_rescaled": "gradients_standard_rescaled",
-    "diagonal_fisher": "gradients_diagonal_fisher",
-    "diagonal_fisher_rescaled": "gradients_diagonal_fisher_rescaled",
+    "fisher": "gradients_fisher",
+    "fisher_rescaled": "gradients_fisher_rescaled",
 }
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}

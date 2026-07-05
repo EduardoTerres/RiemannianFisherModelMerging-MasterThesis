@@ -34,8 +34,8 @@ METHODS=(
   standard_geodesic
   fisher_geodesic
   standard_rescaled
-  diagonal_fisher
-  diagonal_fisher_rescaled
+  fisher
+  fisher_rescaled
   orthofuse_geodesic
   orthofuse_geodesic_curve_over_id
   orthofuse_geodesic_rotation

@@ -10,11 +10,11 @@
 
 set -e
 
-MU=3  # diagonal fisher correction mu
+MU=3  # Fisher correction mu
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/diagonal_fisher_mu_${MU}"
+METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/fisher_kfac_mu_${MU}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -44,10 +44,10 @@ python "${REPO_ROOT}/src/diffusion/pipe_gradients.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
   --output_dir="${METHOD_OUTPUT_DIR}" \
   --concept_name="${CONCEPT}" \
-  --merge_mode=diagonal_fisher \
+  --merge_mode=fisher \
   --alphas "${ALPHA_CONCEPT}" "${ALPHA_STYLE}" \
   --num_images_per_medium_prompt=10 \
-  --diagonal_fisher_correction_mu=${MU} \
+  --fisher_correction_mu=${MU} \
   --replace_inference_output \
   --fisher_backend kfac
   

@@ -63,7 +63,7 @@ def root(args):
 def folder(args, pair_name):
     return (
         f"ns{args.num_inference_steps}_gs{args.guidance_scale}"
-        f"_gradients_diagonal_fisher_mu{args.mu:g}_{pair_name}"
+        f"_gradients_fisher_mu{args.mu:g}_{pair_name}"
     )
 
 
@@ -145,8 +145,8 @@ def run_generation(args, pair, alphas):
             fisher_min=args.fisher_min,
             fisher_rescale=args.fisher_rescale,
             alphas=list(alpha),
-            merge_mode="diagonal_fisher",
-            diagonal_fisher_correction_mu=args.mu,
+            merge_mode="fisher",
+            fisher_correction_mu=args.mu,
             parameter=None,
             postprocessing_method="no_modification",
             samples=None,
@@ -193,7 +193,7 @@ def make_montage(args, pair, alphas, prompt_name, template):
         label = f"{alpha[0]:.2f}/{alpha[1]:.2f}"
         bbox = draw.textbbox((0, 0), label, font=font)
         draw.text((x + (width - bbox[2]) / 2, height + 14), label, fill="black", font=font)
-    save_path = root(args) / "collage" / f"{pair['name']}_{prompt_name}_diagonal_fisher_mu{args.mu:g}.png"
+    save_path = root(args) / "collage" / f"{pair['name']}_{prompt_name}_fisher_mu{args.mu:g}.png"
     save_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(save_path)
     print(f"[interpolation-search] montage saved to {save_path}", flush=True)

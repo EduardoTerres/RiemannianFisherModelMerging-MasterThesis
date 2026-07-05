@@ -196,6 +196,9 @@ class OFTGeodesicMerging(RiemannianMerging):
             f"{tuple(ref.shape) + (ref.shape[-1],)}; got {tuple(fisher.shape)}"
         )
 
+    def _normalize_fisher_matrix(self, matrix: Tensor) -> Tensor:
+        return matrix / torch.linalg.vector_norm(matrix).clamp_min(1e-8)
+
     def _fisher_geodesic_tangent(
         self,
         log_coords: Tensor,
@@ -224,7 +227,7 @@ class OFTGeodesicMerging(RiemannianMerging):
         block_size = relative_omega.shape[-1]
         dtype, device = log_coords.dtype, log_coords.device
 
-        h1 = self._fisher_matrix(fisher_list[0], log_coords)
+        h1 = self._normalize_fisher_matrix(self._fisher_matrix(fisher_list[0], log_coords))
         h2 = self._fisher_matrix(fisher_list[1], log_coords)
 
         if h2.dim() == 3:
@@ -233,6 +236,7 @@ class OFTGeodesicMerging(RiemannianMerging):
                 dtype=torch.float32,
             )
             h2 = transport @ h2 @ transport.transpose(-1, -2)
+        h2 = self._normalize_fisher_matrix(h2)
 
         eye = torch.eye(son_dimension, device=device, dtype=torch.float32)
         eye = eye.unsqueeze(0).expand(num_blocks, -1, -1)

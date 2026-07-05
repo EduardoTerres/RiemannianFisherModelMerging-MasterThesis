@@ -28,7 +28,7 @@ from src.diffusion.analysis.rescaling_curve import (  # noqa: E402
 )
 from src.diffusion.analysis.sdxl_merge_stats import (  # noqa: E402
     build_fisher_map,
-    diagonal_fisher,
+    fisher,
     fisher_key,
     is_oft_key,
     selected_pairs,
@@ -89,13 +89,13 @@ def analyze_pair(pair, args):
                 style_fisher[fisher_key(key, processor_to_fisher)].clamp_min(args.fisher_min)
                 * args.fisher_rescale,
             ]
-            fisher_base[key] = coords_to_skew(diagonal_fisher(weights, fishers, alphas))
+            fisher_base[key] = coords_to_skew(fisher(weights, fishers, alphas))
 
         for mu in mu_values:
             rows.append(
                 {
                     "pair": pair["name"],
-                    "method_pair": f"diagonal_fisher_mu{mu:g}",
+                    "method_pair": f"fisher_mu{mu:g}",
                     "alpha_concept": alphas[0],
                     "alpha_style": alphas[1],
                     **norm_ratio_rows(fisher_base, corrected(fisher_base, mu, alphas)),

@@ -14,8 +14,8 @@ OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
 CONFIG_PATH="${REPO_ROOT}/src/diffusion/config/config.yaml"
 
 METHODS=(
-  "diagonal_fisher_rescaled"
-  "diagonal_fisher"
+  "fisher_rescaled"
+  "fisher"
   "standard_rescaled"
   "orthofuse"
 )
@@ -59,7 +59,7 @@ for pair in "${PAIRS[@]}"; do
         --t=0.6 \
         --num_images_per_medium_prompt=10 \
         --replace_inference_output
-    elif [[ "${method}" == diagonal_fisher* ]]; then
+    elif [[ "${method}" == fisher* ]]; then
       python "${REPO_ROOT}/src/diffusion/pipe_gradients.py" \
         --config_path="${CONFIG_PATH}" \
         --output_dir="${OUTPUT_DIR}" \

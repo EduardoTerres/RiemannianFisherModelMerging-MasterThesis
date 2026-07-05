@@ -23,8 +23,8 @@ FISHER_MIN="1e-14"
 FISHER_RESCALE="1e10"
 METHODS=(
   "orthofuse__curve_over_id"
-  "diagonal_fisher__rescaled"
-  "diagonal_fisher__std_rescaled"
+  "fisher__rescaled"
+  "fisher__std_rescaled"
   "standard__rescaled"
 )
 

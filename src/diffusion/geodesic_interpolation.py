@@ -26,8 +26,8 @@ METHODS = (
     "standard_geodesic",
     "fisher_geodesic",
     "standard_rescaled",
-    "diagonal_fisher",
-    "diagonal_fisher_rescaled",
+    "fisher",
+    "fisher_rescaled",
     *ORTHOFUSE_METHODS.keys(),
 )
 
@@ -272,7 +272,7 @@ def main():
                 use_fishers=False,
                 backend=args.geodesic_backend,
             )
-        for method in ("diagonal_fisher", "diagonal_fisher_rescaled"):
+        for method in ("fisher", "fisher_rescaled"):
             if method in args.methods:
                 method_paths[method] = run_gradient_method(
                     args,

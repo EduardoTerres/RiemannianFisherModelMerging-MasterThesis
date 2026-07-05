@@ -14,8 +14,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.diffusion.dataset_1 import DIFFUSION_MERGE_PAIRS, get_pair
 
 DEFAULT_METHODS = (
-    "diagonal_fisher_rescaled",
-    "diagonal_fisher",
+    "fisher_rescaled",
+    "fisher",
     "standard_rescaled",
     "orthofuse",
 )
@@ -46,6 +46,7 @@ def parse_args():
     parser.add_argument("--version", type=int, default=0)
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--processes", type=int, default=6)
+    parser.add_argument("--fisher_mu", type=float, default=None)
     parser.add_argument("--diagonal_fisher_mu", type=float, default=None)
     parser.add_argument("--orthofuse_t", type=str, default="0.6")
     parser.add_argument("--orthofuse_postprocessing", type=str, default="curve_over_id")
@@ -95,10 +96,14 @@ def method_spec(method, args):
         return {"kind": "orthofuse", "display": f"orthofuse_{args.orthofuse_postprocessing}_t{args.orthofuse_t}"}
 
     mu_prefixes = (
-        ("diagonal_fisher_mu_", "diagonal_fisher", "diagonal", "diagonal_fisher"),
-        ("diagonal_fisher_mu", "diagonal_fisher", "diagonal", "diagonal_fisher"),
-        ("kfac_mu_", "diagonal_fisher", "kfac", "kfac"),
-        ("kfac_mu", "diagonal_fisher", "kfac", "kfac"),
+        ("fisher_kfac_mu_", "fisher", "kfac", "fisher_kfac"),
+        ("fisher_kfac_mu", "fisher", "kfac", "fisher_kfac"),
+        ("fisher_mu_", "fisher", "diagonal", "fisher"),
+        ("fisher_mu", "fisher", "diagonal", "fisher"),
+        ("diagonal_fisher_mu_", "fisher", "diagonal", "fisher"),
+        ("diagonal_fisher_mu", "fisher", "diagonal", "fisher"),
+        ("kfac_mu_", "fisher", "kfac", "fisher_kfac"),
+        ("kfac_mu", "fisher", "kfac", "fisher_kfac"),
     )
     for prefix, mode, backend, display_prefix in mu_prefixes:
         if method.startswith(prefix):
@@ -114,17 +119,19 @@ def method_spec(method, args):
     if method == "kfac":
         return {
             "kind": "gradients",
-            "mode": "diagonal_fisher",
+            "mode": "fisher",
             "backend": "kfac",
             "mu": None,
             "display": method,
         }
 
-    mu = args.diagonal_fisher_mu if method == "diagonal_fisher" else None
-    display = f"diagonal_fisher_mu{mu:g}" if mu is not None else method
+    mode = "fisher" if method == "diagonal_fisher" else method
+    mode = "fisher_rescaled" if mode == "diagonal_fisher_rescaled" else mode
+    mu = (args.fisher_mu if args.fisher_mu is not None else args.diagonal_fisher_mu) if mode == "fisher" else None
+    display = f"fisher_mu{mu:g}" if mu is not None else mode
     return {
         "kind": "gradients",
-        "mode": method,
+        "mode": mode,
         "backend": "diagonal",
         "mu": mu,
         "display": display,

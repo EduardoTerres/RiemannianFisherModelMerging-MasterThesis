@@ -3,6 +3,14 @@ from pathlib import Path
 import yaml
 
 
+def canonical_gradients_mode(mode):
+    if mode == "diagonal_fisher":
+        return "fisher"
+    if mode == "diagonal_fisher_rescaled":
+        return "fisher_rescaled"
+    return mode
+
+
 def orthofuse_inference_folder_name(args):
     pair_name = getattr(args, "dataset_pair_name", None)
     pair_suffix = f"_{pair_name}" if pair_name else ""
@@ -15,7 +23,7 @@ def orthofuse_inference_folder_name(args):
 def gradients_merge_mode(args):
     explicit_mode = getattr(args, "merge_mode", None)
     if explicit_mode is not None:
-        return explicit_mode
+        return canonical_gradients_mode(explicit_mode)
 
     concept_fisher_path = getattr(args, "concept_fisher_path", None)
     style_fisher_path = getattr(args, "style_fisher_path", None)
@@ -23,21 +31,26 @@ def gradients_merge_mode(args):
         return "standard_rescaled" if getattr(args, "rescale", False) else "standard"
     if concept_fisher_path is None or style_fisher_path is None:
         raise ValueError("Both concept_fisher_path and style_fisher_path are required.")
-    return "diagonal_fisher_rescaled" if getattr(args, "rescale", False) else "diagonal_fisher"
+    return "fisher_rescaled" if getattr(args, "rescale", False) else "fisher"
 
 
 def gradients_inference_folder_name(args):
     mode = gradients_merge_mode(args)
     backend_suffix = ""
+    fisher_backend = getattr(args, "fisher_backend", "diagonal")
     if mode == "geodesic":
         backend_suffix = f"_{getattr(args, 'geodesic_backend', 'cayley')}"
         if getattr(args, "geodesic_use_fishers", False):
             backend_suffix += "_fisher"
-    fisher_backend = getattr(args, "fisher_backend", "diagonal")
-    if fisher_backend != "diagonal" and "fisher" in mode:
+            if fisher_backend != "diagonal":
+                backend_suffix += f"_{fisher_backend}"
+    elif fisher_backend != "diagonal" and "fisher" in mode:
         backend_suffix += f"_{fisher_backend}"
-    if getattr(args, "diagonal_fisher_correction_mu", None) is not None:
-        backend_suffix += f"_mu{args.diagonal_fisher_correction_mu:g}"
+    correction_mu = getattr(args, "fisher_correction_mu", None)
+    if correction_mu is None:
+        correction_mu = getattr(args, "diagonal_fisher_correction_mu", None)
+    if correction_mu is not None:
+        backend_suffix += f"_mu{correction_mu:g}"
 
     pair_name = getattr(args, "dataset_pair_name", None)
     pair_suffix = f"_{pair_name}" if pair_name else ""

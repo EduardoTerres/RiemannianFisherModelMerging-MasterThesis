@@ -310,6 +310,7 @@ def _gradients_merge_with_merging_py(
     geodesic_backend="cayley",
     fisher_backend="diagonal",
 ):
+    mode = _engine_merge_mode(mode)
     if mode == "geodesic":
         if geodesic_backend == "cayley":
             return _cayley_geodesic_merge_with_generators(tensors, device, alphas, fishers)
@@ -344,6 +345,29 @@ def _gradients_merge_with_merging_py(
         alphas=None if alphas is None else torch.tensor(alphas, dtype=torch.float32, device=device),
     )
     return _oft_coords_to_full_generator(merger, merged_coords, tensors[0].dtype)
+
+
+def _engine_merge_mode(mode):
+    if mode == "fisher":
+        return "diagonal_fisher"
+    if mode == "fisher_rescaled":
+        return "diagonal_fisher_rescaled"
+    return mode
+
+
+def _public_merge_mode(mode):
+    if mode == "diagonal_fisher":
+        return "fisher"
+    if mode == "diagonal_fisher_rescaled":
+        return "fisher_rescaled"
+    return mode
+
+
+def _fisher_correction_mu(args):
+    mu = getattr(args, "fisher_correction_mu", None)
+    if mu is not None:
+        return mu
+    return getattr(args, "diagonal_fisher_correction_mu", None)
 
 
 def _diagonal_fisher_correction(merged, alphas, mu):
@@ -701,17 +725,20 @@ class GradientsMergeInferencer(MOFTInferencer):
             raise RuntimeError("GradientsMerge requires CUDA, but no CUDA GPU is available.")
 
     def create_folder_name(self):
-        mode = self._merge_mode()
+        mode = _public_merge_mode(self._merge_mode())
         backend_suffix = ""
+        fisher_backend = getattr(self.args, "fisher_backend", "diagonal")
         if mode == "geodesic":
             backend_suffix = f"_{getattr(self.args, 'geodesic_backend', 'cayley')}"
             if getattr(self.args, "geodesic_use_fishers", False):
                 backend_suffix += "_fisher"
-        fisher_backend = getattr(self.args, "fisher_backend", "diagonal")
-        if fisher_backend != "diagonal" and "fisher" in mode:
+                if fisher_backend != "diagonal":
+                    backend_suffix += f"_{fisher_backend}"
+        elif fisher_backend != "diagonal" and "fisher" in mode:
             backend_suffix += f"_{fisher_backend}"
-        if getattr(self.args, "diagonal_fisher_correction_mu", None) is not None:
-            backend_suffix += f"_mu{self.args.diagonal_fisher_correction_mu:g}"
+        correction_mu = _fisher_correction_mu(self.args)
+        if correction_mu is not None:
+            backend_suffix += f"_mu{correction_mu:g}"
         pair_name = getattr(self.args, "dataset_pair_name", None)
         pair_suffix = f"_{pair_name}" if pair_name else ""
         self.inference_folder_name = (
@@ -720,7 +747,7 @@ class GradientsMergeInferencer(MOFTInferencer):
         )
 
     def _fisher_paths(self):
-        if getattr(self.args, "merge_mode", None) == "geodesic" and not getattr(
+        if _engine_merge_mode(getattr(self.args, "merge_mode", None)) == "geodesic" and not getattr(
             self.args,
             "geodesic_use_fishers",
             False,
@@ -740,7 +767,7 @@ class GradientsMergeInferencer(MOFTInferencer):
     def _merge_mode(self):
         explicit_mode = getattr(self.args, "merge_mode", None)
         if explicit_mode is not None:
-            return explicit_mode
+            return _engine_merge_mode(explicit_mode)
         if self._fisher_paths() is not None:
             return "diagonal_fisher_rescaled" if getattr(self.args, "rescale", False) else "diagonal_fisher"
         return "standard_rescaled" if getattr(self.args, "rescale", False) else "standard"
@@ -846,7 +873,7 @@ class GradientsMergeInferencer(MOFTInferencer):
         )
         merge_alphas = getattr(self.args, "alphas", None)
         _log_merge(f"alphas concept/style={merge_alphas if merge_alphas is not None else [1.0, 1.0]}")
-        correction_mu = getattr(self.args, "diagonal_fisher_correction_mu", None)
+        correction_mu = _fisher_correction_mu(self.args)
         if correction_mu is not None:
             _log_merge(f"post-merge correction mu={correction_mu:g}")
         shape_counts = Counter(tuple(concept_state[key].shape) for key in merge_keys)

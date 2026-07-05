@@ -21,6 +21,21 @@ from src.diffusion.pipeline_outputs import (
 warnings.filterwarnings("ignore")
 
 
+def canonical_merge_mode(mode):
+    if mode == "diagonal_fisher":
+        return "fisher"
+    if mode == "diagonal_fisher_rescaled":
+        return "fisher_rescaled"
+    return mode
+
+
+def correction_mu(args):
+    mu = getattr(args, "fisher_correction_mu", None)
+    if mu is not None:
+        return mu
+    return getattr(args, "diagonal_fisher_correction_mu", None)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, required=True)
@@ -35,6 +50,7 @@ def parse_args():
     parser.add_argument("--fisher_backend", choices=["diagonal", "kfac"], default="diagonal")
     parser.add_argument("--alphas", type=float, nargs=2, default=None, metavar=("CONCEPT", "STYLE"))
     parser.add_argument("--merge_mode", type=str, default=None)
+    parser.add_argument("--fisher_correction_mu", type=float, default=None)
     parser.add_argument("--diagonal_fisher_correction_mu", type=float, default=None)
     parser.add_argument("--geodesic_backend", choices=["cayley"], default="cayley")
     parser.add_argument("--geodesic_use_fishers", action="store_true")
@@ -75,15 +91,18 @@ def has_fisher_inputs(args):
 
 def prepare_merge_args(args):
     if getattr(args, "merge_mode", None) is not None:
+        args.merge_mode = canonical_merge_mode(args.merge_mode)
+        args.diagonal_fisher_correction_mu = correction_mu(args)
         return args
     if has_fisher_inputs(args):
-        args.merge_mode = "diagonal_fisher_rescaled" if getattr(args, "rescale", False) else "diagonal_fisher"
+        args.merge_mode = "fisher_rescaled" if getattr(args, "rescale", False) else "fisher"
         if getattr(args, "fisher_min", None) is None:
             args.fisher_min = 1e-8
         if getattr(args, "fisher_rescale", None) is None:
             args.fisher_rescale = 1e10
     else:
         args.merge_mode = "standard_rescaled" if getattr(args, "rescale", False) else "standard"
+    args.diagonal_fisher_correction_mu = correction_mu(args)
     return args
 
 

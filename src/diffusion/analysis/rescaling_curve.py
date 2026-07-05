@@ -23,7 +23,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.diffusion.analysis.sdxl_merge_stats import (
     build_fisher_map,
     block_size_from_coords,
-    diagonal_fisher,
+    fisher,
     fisher_key,
     is_oft_key,
     norm_rescale,
@@ -35,8 +35,8 @@ from src.diffusion.analysis.sdxl_merge_stats import (
 
 METHODS = (
     "orthofuse__curve_over_id",
-    "diagonal_fisher__rescaled",
-    "diagonal_fisher__std_rescaled",
+    "fisher__rescaled",
+    "fisher__std_rescaled",
     "standard__rescaled",
 )
 
@@ -179,20 +179,20 @@ def analyze_pair(pair, args):
                 standard_base[key] = coords_to_skew(merged_standard)
                 standard_rescaled[key] = coords_to_skew(norm_rescale(weights, merged_standard, alphas))
             if (
-                "diagonal_fisher__rescaled" in args.methods
-                or "diagonal_fisher__std_rescaled" in args.methods
+                "fisher__rescaled" in args.methods
+                or "fisher__std_rescaled" in args.methods
             ):
-                merged_fisher = diagonal_fisher(weights, fishers, alphas)
+                merged_fisher = fisher(weights, fishers, alphas)
                 fisher_base[key] = coords_to_skew(merged_fisher)
-                if "diagonal_fisher__rescaled" in args.methods:
+                if "fisher__rescaled" in args.methods:
                     fisher_rescaled[key] = coords_to_skew(fisher_norm_rescale(weights, fishers, merged_fisher, alphas))
-                if "diagonal_fisher__std_rescaled" in args.methods:
+                if "fisher__std_rescaled" in args.methods:
                     fisher_std_rescaled[key] = coords_to_skew(standard_norm_rescale(weights, merged_fisher, alphas))
 
         comparisons = {
             "orthofuse__curve_over_id": (ortho_base, ortho_curve),
-            "diagonal_fisher__rescaled": (fisher_base, fisher_rescaled),
-            "diagonal_fisher__std_rescaled": (fisher_base, fisher_std_rescaled),
+            "fisher__rescaled": (fisher_base, fisher_rescaled),
+            "fisher__std_rescaled": (fisher_base, fisher_std_rescaled),
             "standard__rescaled": (standard_base, standard_rescaled),
         }
         for method in args.methods:

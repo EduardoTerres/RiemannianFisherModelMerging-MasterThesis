@@ -60,7 +60,7 @@ def prepare_fisher_geodesic_args(args):
     args.geodesic_use_fishers = True
     args.alphas = [1.0 - args.t, args.t]
     args.rescale = False
-    args.diagonal_fisher_correction_mu = None
+    args.fisher_correction_mu = None
     return args
 
 

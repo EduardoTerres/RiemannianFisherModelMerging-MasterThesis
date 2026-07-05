@@ -22,10 +22,10 @@ from src.diffusion.dataset_1 import DIFFUSION_MERGE_PAIRS, get_pair
 METHODS = (
     "orthofuse",
     "orthomerge",
-    "diagonal_fisher",
+    "fisher",
     "standard",
     "standard_rescaled",
-    "diagonal_fisher_rescaled",
+    "fisher_rescaled",
 )
 PROJECTIONS = ("to_q_moft", "to_k_moft", "to_v_moft", "to_out_moft")
 
@@ -153,7 +153,7 @@ def norm_rescale(weights, merged, alphas):
     return merged * target / source.clamp_min(1e-8)
 
 
-def diagonal_fisher(weights, fishers, alphas):
+def fisher(weights, fishers, alphas):
     ref = weights[0]
     a = torch.tensor(alphas, dtype=torch.float32, device=ref.device)
     numer = torch.zeros_like(ref, dtype=torch.float32)
@@ -186,8 +186,11 @@ def merge(method, concept, style, concept_fisher, style_fisher, args):
         concept_fisher.clamp_min(args.fisher_min) * args.fisher_rescale,
         style_fisher.clamp_min(args.fisher_min) * args.fisher_rescale,
     ]
-    merged = diagonal_fisher(weights, fishers, args.alphas)
-    return standard_norm_rescale(weights, merged, args.alphas) if method == "diagonal_fisher_rescaled" else merged
+    merged = fisher(weights, fishers, args.alphas)
+    return standard_norm_rescale(weights, merged, args.alphas) if method == "fisher_rescaled" else merged
+
+
+diagonal_fisher = fisher
 
 
 def selected_pairs(args):

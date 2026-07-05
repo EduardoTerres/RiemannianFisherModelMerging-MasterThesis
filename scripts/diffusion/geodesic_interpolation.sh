@@ -37,8 +37,8 @@ METHODS=(
 
 # METHODS=(
 #   standard_rescaled
-#   diagonal_fisher
-#   diagonal_fisher_rescaled
+#   fisher
+#   fisher_rescaled
 #   standard_geodesic
 #   fisher_geodesic
 #   standard_rescaled

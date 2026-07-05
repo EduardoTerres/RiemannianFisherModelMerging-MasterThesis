@@ -62,6 +62,7 @@ def make_args(**overrides):
         "fisher_min": None,
         "fisher_rescale": None,
         "fisher_backend": "diagonal",
+        "fisher_correction_mu": None,
         "diagonal_fisher_correction_mu": None,
     }
     defaults.update(overrides)
@@ -136,11 +137,11 @@ def test_without_fishers_matches_standard_gradients_merge():
     assert torch.allclose(actual, coords_to_generator(merger, expected_coords), atol=1e-6)
 
 
-def test_without_fishers_allows_mu_correction_on_standard_merge():
+def test_without_fishers_allows_fisher_mu_correction_on_standard_merge():
     merger = make_merger()
     tensors = make_generators(merger)
     alphas = [0.25, 0.75]
-    args = pipe_gradients.prepare_merge_args(make_args(diagonal_fisher_correction_mu=4.0))
+    args = pipe_gradients.prepare_merge_args(make_args(fisher_correction_mu=4.0))
 
     merged = _gradients_merge_with_merging_py(
         tensors,
@@ -160,7 +161,7 @@ def test_without_fishers_allows_mu_correction_on_standard_merge():
     assert torch.allclose(corrected, merged * 1.75, atol=1e-6)
 
 
-def test_with_fishers_matches_diagonal_fisher_merge():
+def test_with_fishers_matches_fisher_merge():
     merger = make_merger()
     tensors = make_generators(merger)
     fishers = [
@@ -192,11 +193,11 @@ def test_with_fishers_matches_diagonal_fisher_merge():
         alphas=torch.tensor(alphas),
     )
 
-    assert args.merge_mode == "diagonal_fisher"
+    assert args.merge_mode == "fisher"
     assert torch.allclose(actual, coords_to_generator(merger, expected_coords), atol=1e-6)
 
 
-def test_with_fishers_and_rescale_matches_diagonal_fisher_rescaled_merge():
+def test_with_fishers_and_rescale_matches_fisher_rescaled_merge():
     merger = make_merger()
     tensors = make_generators(merger)
     fishers = [
@@ -229,5 +230,5 @@ def test_with_fishers_and_rescale_matches_diagonal_fisher_rescaled_merge():
         alphas=torch.tensor(alphas),
     )
 
-    assert args.merge_mode == "diagonal_fisher_rescaled"
+    assert args.merge_mode == "fisher_rescaled"
     assert torch.allclose(actual, coords_to_generator(merger, expected_coords), atol=1e-6)

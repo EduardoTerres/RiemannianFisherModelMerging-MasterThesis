@@ -97,19 +97,21 @@ def test_apply_pair_uses_kfac_paths_when_requested():
         "concept": {
             "adapter_path": "/tmp/concept_adapter.safetensors",
             "fim_path": "/tmp/cat_oft_lie_fim.safetensors",
+            "kfac_path": "/explicit/cat_kfac.safetensors",
             "class_name": "cat",
             "placeholder_token": "<cat>",
         },
         "style": {
             "adapter_path": "/tmp/style_adapter.safetensors",
             "fim_path": "/tmp/style_oft_lie_fim.safetensors",
+            "kfac_path": "/explicit/style_kfac.safetensors",
             "placeholder_token": "<style>",
         },
     }
     args = pipe_gradients.apply_pair(make_args(fisher_backend="kfac"), pair)
 
-    assert args.concept_fisher_path == "/tmp/cat_oft_lie_kfac.safetensors"
-    assert args.style_fisher_path == "/tmp/style_oft_lie_kfac.safetensors"
+    assert args.concept_fisher_path == "/explicit/cat_kfac.safetensors"
+    assert args.style_fisher_path == "/explicit/style_kfac.safetensors"
 
 
 def test_without_fishers_matches_standard_gradients_merge():

@@ -27,6 +27,7 @@ def parse_args():
     parser.add_argument("--fisher_min", type=float, default=None)
     parser.add_argument("--fisher_rescale", type=float, default=None)
     parser.add_argument("--fisher_backend", choices=["diagonal", "kfac"], default="kfac")
+    parser.add_argument("--fisher_correction_mu", type=float, default=None)
     parser.add_argument("--t", type=float, default=0.6)
     parser.add_argument("--geodesic_backend", choices=["cayley"], default="cayley")
     parser.add_argument(
@@ -60,7 +61,6 @@ def prepare_fisher_geodesic_args(args):
     args.geodesic_use_fishers = True
     args.alphas = [1.0 - args.t, args.t]
     args.rescale = False
-    args.fisher_correction_mu = None
     return args
 
 

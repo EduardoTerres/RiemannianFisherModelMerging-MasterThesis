@@ -106,22 +106,19 @@ def prepare_merge_args(args):
     return args
 
 
-def fisher_path_for_backend(path, backend):
-    if backend != "kfac":
-        return path
-    if path.endswith("_oft_lie_fim.safetensors"):
-        return path.replace("_oft_lie_fim.safetensors", "_oft_lie_kfac.safetensors")
-    if path.endswith("_fim.safetensors"):
-        return path.replace("_fim.safetensors", "_kfac.safetensors")
-    return path
+def fisher_path_from_entry(entry, backend):
+    key = "kfac_path" if backend == "kfac" else "fim_path"
+    if key not in entry:
+        raise KeyError(f"Missing {key!r} for {entry.get('type', 'entry')} {entry.get('name')!r}")
+    return entry[key]
 
 
 def apply_pair(args, pair):
     args.moft_layers_concept_path = pair["concept"]["adapter_path"]
     args.moft_layers_style_path = pair["style"]["adapter_path"]
     backend = getattr(args, "fisher_backend", "diagonal")
-    args.concept_fisher_path = fisher_path_for_backend(pair["concept"]["fim_path"], backend)
-    args.style_fisher_path = fisher_path_for_backend(pair["style"]["fim_path"], backend)
+    args.concept_fisher_path = fisher_path_from_entry(pair["concept"], backend)
+    args.style_fisher_path = fisher_path_from_entry(pair["style"], backend)
     args.dataset_pair_name = pair["name"]
     args.concept_class_name = pair["concept"]["class_name"]
     args.placeholder_token_concept = pair["concept"]["placeholder_token"]

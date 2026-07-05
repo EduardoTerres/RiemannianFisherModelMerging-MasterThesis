@@ -12,6 +12,7 @@ def _concept(name, class_name):
         "adapter_path": f"/scratch-shared/eterres/SDXL/concepts/adapters/pytorch_lora_weights_{name}.safetensors",
         "dataset_path": f"/scratch-shared/eterres/SDXL/concepts/datasets/{name}",
         "fim_path": f"{FISHER_ROOT}/{name}_oft_lie_fim.safetensors",
+        "kfac_path": f"{FISHER_ROOT}/{name}_oft_lie_kfac.safetensors",
         "type": "concept",
     }
 
@@ -24,6 +25,7 @@ def _style(name, image):
         "adapter_path": f"/scratch-shared/eterres/SDXL/styles/adapters/pytorch_lora_weights_{name}.safetensors",
         "dataset_path": f"/scratch-shared/eterres/SDXL/styles/datasets/{image}",
         "fim_path": f"{FISHER_ROOT}/{name}_oft_lie_fim.safetensors",
+        "kfac_path": f"{FISHER_ROOT}/{name}_oft_lie_kfac.safetensors",
         "type": "style",
     }
 

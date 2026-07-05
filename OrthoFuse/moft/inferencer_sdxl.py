@@ -310,7 +310,6 @@ def _gradients_merge_with_merging_py(
     geodesic_backend="cayley",
     fisher_backend="diagonal",
 ):
-    mode = _engine_merge_mode(mode)
     if mode == "geodesic":
         if geodesic_backend == "cayley":
             return _cayley_geodesic_merge_with_generators(tensors, device, alphas, fishers)
@@ -347,22 +346,6 @@ def _gradients_merge_with_merging_py(
     return _oft_coords_to_full_generator(merger, merged_coords, tensors[0].dtype)
 
 
-def _engine_merge_mode(mode):
-    if mode == "fisher":
-        return "diagonal_fisher"
-    if mode == "fisher_rescaled":
-        return "diagonal_fisher_rescaled"
-    return mode
-
-
-def _public_merge_mode(mode):
-    if mode == "diagonal_fisher":
-        return "fisher"
-    if mode == "diagonal_fisher_rescaled":
-        return "fisher_rescaled"
-    return mode
-
-
 def _fisher_correction_mu(args):
     mu = getattr(args, "fisher_correction_mu", None)
     if mu is not None:
@@ -397,14 +380,6 @@ def _adapter_key_to_fisher_key(adapter_key, processor_keys):
         if adapter_key.startswith(prefix):
             return f"layers.{layer_idx}." + adapter_key[len(prefix):]
     return adapter_key
-
-
-def _kfac_path(path):
-    if path.endswith("_oft_lie_fim.safetensors"):
-        return path.replace("_oft_lie_fim.safetensors", "_oft_lie_kfac.safetensors")
-    if path.endswith("_fim.safetensors"):
-        return path.replace("_fim.safetensors", "_kfac.safetensors")
-    return path
 
 
 def _fisher_layer(fisher, key, backend):
@@ -725,7 +700,7 @@ class GradientsMergeInferencer(MOFTInferencer):
             raise RuntimeError("GradientsMerge requires CUDA, but no CUDA GPU is available.")
 
     def create_folder_name(self):
-        mode = _public_merge_mode(self._merge_mode())
+        mode = self._merge_mode()
         backend_suffix = ""
         fisher_backend = getattr(self.args, "fisher_backend", "diagonal")
         if mode == "geodesic":
@@ -747,7 +722,7 @@ class GradientsMergeInferencer(MOFTInferencer):
         )
 
     def _fisher_paths(self):
-        if _engine_merge_mode(getattr(self.args, "merge_mode", None)) == "geodesic" and not getattr(
+        if getattr(self.args, "merge_mode", None) == "geodesic" and not getattr(
             self.args,
             "geodesic_use_fishers",
             False,
@@ -759,17 +734,14 @@ class GradientsMergeInferencer(MOFTInferencer):
             return None
         if concept_fisher_path is None or style_fisher_path is None:
             raise ValueError("Both concept_fisher_path and style_fisher_path are required.")
-        if getattr(self.args, "fisher_backend", "diagonal") == "kfac":
-            concept_fisher_path = _kfac_path(concept_fisher_path)
-            style_fisher_path = _kfac_path(style_fisher_path)
         return concept_fisher_path, style_fisher_path
 
     def _merge_mode(self):
         explicit_mode = getattr(self.args, "merge_mode", None)
         if explicit_mode is not None:
-            return _engine_merge_mode(explicit_mode)
+            return explicit_mode
         if self._fisher_paths() is not None:
-            return "diagonal_fisher_rescaled" if getattr(self.args, "rescale", False) else "diagonal_fisher"
+            return "fisher_rescaled" if getattr(self.args, "rescale", False) else "fisher"
         return "standard_rescaled" if getattr(self.args, "rescale", False) else "standard"
 
     def setup_model(self):

@@ -32,6 +32,10 @@ MergeMode = Literal[
     "diagonal_fisher_std_rescaled",
     "diagonal_fisher_kl_rescaled",
     "fisher",
+    "fisher_rescaled",
+    "fisher_max_rescaled",
+    "fisher_std_rescaled",
+    "full_fisher",
 ]
 FisherBackend = Literal["diagonal", "kfac"]
 
@@ -240,10 +244,8 @@ class OFTMerging(RiemannianMerging):
 
         Args:
             weights_list: T tensors of shape (num_blocks, d), skew-symmetric so(n) parameters per task.
-            fisher_list: Per-task Fisher info — diagonal (num_blocks, d) for ``"diagonal_fisher"``,
-                full (num_blocks, d, d) for ``"fisher"``. Unused in ``"standard"`` mode.
-            mode: ``"standard"`` (alpha-weighted avg), ``"diagonal_fisher"``, or ``"fisher"``
-                (both Fisher modes transport to a common tangent space and solve a linear system).
+            fisher_list: Per-task Fisher info. ``"fisher"`` accepts diagonal, full, or KFAC
+                factors and uses ``self.fisher_backend`` plus tensor shape to choose the solve.
             alphas: Optional (T,) tensor overriding self.alphas. Kept differentiable when provided.
 
         Returns:
@@ -264,10 +266,10 @@ class OFTMerging(RiemannianMerging):
             merged = self._standard_merging(weights_list, alphas)
             return self._orthomerge_rescale(weights_list, merged, alphas)
 
-        if mode == "diagonal_fisher":
+        if mode in {"fisher", "diagonal_fisher"}:
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
-            if self.fisher_backend == "kfac":
+            if self._uses_full_fisher(weights_list, fisher_list):
                 return self._fisher_merging(weights_list, fisher_list, alphas)
             return self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
 
@@ -283,28 +285,31 @@ class OFTMerging(RiemannianMerging):
                 avg_alphas,
             )
 
-        if mode == "diagonal_fisher_rescaled":
+        if mode in {"fisher_rescaled", "diagonal_fisher_rescaled"}:
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
-            if self.fisher_backend == "kfac":
+            if self._uses_full_fisher(weights_list, fisher_list):
                 merged = self._fisher_merging(weights_list, fisher_list, alphas)
                 return self._full_fisher_norm_rescale(weights_list, fisher_list, merged, alphas)
             merged = self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
             return self._fisher_norm_rescale(weights_list, fisher_list, merged, alphas)
 
-        if mode == "diagonal_fisher_max_rescaled":
+        if mode in {"fisher_max_rescaled", "diagonal_fisher_max_rescaled"}:
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
-            if self.fisher_backend == "kfac":
+            if self._uses_full_fisher(weights_list, fisher_list):
                 merged = self._fisher_merging(weights_list, fisher_list, alphas)
                 return self._full_fisher_norm_max_rescale(weights_list, fisher_list, merged, alphas)
             merged = self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
             return self._fisher_norm_max_rescale(weights_list, fisher_list, merged, alphas)
 
-        if mode == "diagonal_fisher_std_rescaled":
+        if mode in {"fisher_std_rescaled", "diagonal_fisher_std_rescaled"}:
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
-            merged = self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
+            if self._uses_full_fisher(weights_list, fisher_list):
+                merged = self._fisher_merging(weights_list, fisher_list, alphas)
+            else:
+                merged = self._diagonal_fisher_merging(weights_list, fisher_list, alphas)
             return self._standard_norm_rescale(weights_list, merged, alphas)
 
         if mode == "diagonal_fisher_kl_rescaled":
@@ -318,7 +323,7 @@ class OFTMerging(RiemannianMerging):
                 alphas=alphas,
             )
 
-        if mode == "fisher":
+        if mode == "full_fisher":
             if fisher_list is None:
                 raise ValueError(f"Fisher data is required for mode {mode!r}")
             return self._fisher_merging(weights_list, fisher_list, alphas)
@@ -871,6 +876,23 @@ class OFTMerging(RiemannianMerging):
     ) -> List[Tensor]:
         ref = weights_list[0]
         return [self._fisher_to_matrix(fisher, ref) for fisher in fisher_list]
+
+    def _uses_full_fisher(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: List[Tensor | Dict[str, Tensor]],
+    ) -> bool:
+        if self.fisher_backend == "kfac":
+            return True
+        ref = weights_list[0]
+        return any(
+            isinstance(fisher, dict)
+            or (
+                torch.is_tensor(fisher)
+                and fisher.shape == (*ref.shape, ref.shape[-1])
+            )
+            for fisher in fisher_list
+        )
 
     def _full_fisher_norm_rescale(
         self,

@@ -10,9 +10,12 @@
 
 set -e
 
+MU=4  # correction
+FISHER_BACKEND="kfac"
+
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/fisher_geodesic"
+METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/fisher_geodesic_${FISHER_BACKEND}_mu_${MU}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -37,6 +40,7 @@ CONCEPTS=(
 CONCEPT="${CONCEPTS[${SLURM_ARRAY_TASK_ID:-0}]}"
 
 echo "[pipe_fisher_geodesic] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
+echo "[pipe_fisher_geodesic] fisher_backend=${FISHER_BACKEND} output_dir=${METHOD_OUTPUT_DIR}"
 
 python "${REPO_ROOT}/src/diffusion/pipe_fisher_geodesic.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
@@ -44,9 +48,10 @@ python "${REPO_ROOT}/src/diffusion/pipe_fisher_geodesic.py" \
   --concept_name="${CONCEPT}" \
   --t=0.6 \
   --geodesic_backend=cayley \
-  --fisher_backend=kfac \
+  --fisher_backend="${FISHER_BACKEND}" \
   --num_images_per_medium_prompt=10 \
-  --replace_inference_output
+  --replace_inference_output \
+  --fisher_correction_mu=${MU}
 
   # --fisher_min=1e-14 \
   # --fisher_rescale=1e10 \

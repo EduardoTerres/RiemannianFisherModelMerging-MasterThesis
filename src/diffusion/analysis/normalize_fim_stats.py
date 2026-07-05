@@ -36,7 +36,7 @@ MAX_HIST_POINTS = 200_000
 
 
 def kfac_path(entry):
-    return entry["fim_path"].replace("_oft_lie_fim.safetensors", "_oft_lie_kfac.safetensors")
+    return entry["kfac_path"]
 
 
 def pair_with_kfac():

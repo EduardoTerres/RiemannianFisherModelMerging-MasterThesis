@@ -95,15 +95,42 @@ def method_spec(method, args):
     if method == "orthofuse":
         return {"kind": "orthofuse", "display": f"orthofuse_{args.orthofuse_postprocessing}_t{args.orthofuse_t}"}
 
+    geodesic_prefixes = (
+        ("fisher_geodesic_kfac_mu_", "fisher", "kfac", "geodesic_cayley_fisher_kfac"),
+        ("fisher_geodesic_kfac_mu", "fisher", "kfac", "geodesic_cayley_fisher_kfac"),
+        ("fisher_geodesic_mu_", "fisher", "diagonal", "geodesic_cayley_fisher"),
+        ("fisher_geodesic_mu", "fisher", "diagonal", "geodesic_cayley_fisher"),
+    )
+    for prefix, mode, backend, display_prefix in geodesic_prefixes:
+        if method.startswith(prefix):
+            mu = parse_mu(method[len(prefix) :], method)
+            return {
+                "kind": "gradients",
+                "mode": mode,
+                "backend": backend,
+                "mu": mu,
+                "geodesic": True,
+                "display": f"{display_prefix}_mu{mu:g}",
+            }
+    if method == "fisher_geodesic":
+        return {
+            "kind": "gradients",
+            "mode": "fisher",
+            "backend": "diagonal",
+            "mu": None,
+            "geodesic": True,
+            "display": "geodesic_cayley_fisher",
+        }
+
     mu_prefixes = (
-        ("fisher_kfac_mu_", "fisher", "kfac", "fisher_kfac"),
-        ("fisher_kfac_mu", "fisher", "kfac", "fisher_kfac"),
-        ("fisher_mu_", "fisher", "diagonal", "fisher"),
-        ("fisher_mu", "fisher", "diagonal", "fisher"),
-        ("diagonal_fisher_mu_", "fisher", "diagonal", "fisher"),
-        ("diagonal_fisher_mu", "fisher", "diagonal", "fisher"),
-        ("kfac_mu_", "fisher", "kfac", "fisher_kfac"),
-        ("kfac_mu", "fisher", "kfac", "fisher_kfac"),
+        ("fisher_kfac_mu_", "diagonal_fisher", "kfac", "diagonal_fisher_kfac"),
+        ("fisher_kfac_mu", "diagonal_fisher", "kfac", "diagonal_fisher_kfac"),
+        ("fisher_mu_", "diagonal_fisher", "diagonal", "diagonal_fisher"),
+        ("fisher_mu", "diagonal_fisher", "diagonal", "diagonal_fisher"),
+        ("diagonal_fisher_mu_", "diagonal_fisher", "diagonal", "diagonal_fisher"),
+        ("diagonal_fisher_mu", "diagonal_fisher", "diagonal", "diagonal_fisher"),
+        ("kfac_mu_", "diagonal_fisher", "kfac", "diagonal_fisher_kfac"),
+        ("kfac_mu", "diagonal_fisher", "kfac", "diagonal_fisher_kfac"),
     )
     for prefix, mode, backend, display_prefix in mu_prefixes:
         if method.startswith(prefix):
@@ -113,6 +140,7 @@ def method_spec(method, args):
                 "mode": mode,
                 "backend": backend,
                 "mu": mu,
+                "geodesic": False,
                 "display": f"{display_prefix}_mu{mu:g}",
             }
 
@@ -122,6 +150,7 @@ def method_spec(method, args):
             "mode": "fisher",
             "backend": "kfac",
             "mu": None,
+            "geodesic": False,
             "display": method,
         }
 
@@ -134,6 +163,7 @@ def method_spec(method, args):
         "mode": mode,
         "backend": "diagonal",
         "mu": mu,
+        "geodesic": False,
         "display": display,
     }
 
@@ -144,6 +174,13 @@ def sample_name(args, method, pair_name):
     if spec["kind"] == "orthofuse":
         return f"{prefix}_orthofuse_t{args.orthofuse_t}_method_{args.orthofuse_postprocessing}_{pair_name}"
 
+    if spec.get("geodesic"):
+        backend_suffix = "_cayley_fisher"
+        if spec["backend"] != "diagonal":
+            backend_suffix += f"_{spec['backend']}"
+        mu_suffix = f"_mu{spec['mu']:g}" if spec["mu"] is not None else ""
+        return f"{prefix}_gradients_geodesic{backend_suffix}{mu_suffix}_{pair_name}"
+
     backend_suffix = f"_{spec['backend']}" if spec["backend"] != "diagonal" and "fisher" in spec["mode"] else ""
     mu_suffix = f"_mu{spec['mu']:g}" if spec["mu"] is not None else ""
     return f"{prefix}_gradients_{spec['mode']}{backend_suffix}{mu_suffix}_{pair_name}"
@@ -153,6 +190,7 @@ def sample_roots(args, method):
     roots = []
     if args.method_samples_root is not None:
         roots.append(args.method_samples_root / method / "samples")
+        roots.append(args.method_samples_root / method)
     roots.append(args.samples_dir or args.output_dir / "samples")
     return roots
 

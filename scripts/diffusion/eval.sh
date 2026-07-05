@@ -17,9 +17,12 @@ EVAL_ROOT="${OUTPUT_DIR}/eval_runs"
 TABLES_DIR="${OUTPUT_DIR}/tables"
 
 METHODS=(
-  fisher_kfac_mu_3
+  diagonal_fisher_mu_3
+  fisher_kfac_mu_2
   orthofuse
   standard_rescaled
+  fisher_geodesic_kfac_mu_4
+  fisher_geodesic_kfac_mu_3
 )
 
 source "$(conda info --base)/etc/profile.d/conda.sh"

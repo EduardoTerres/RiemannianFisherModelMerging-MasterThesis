@@ -161,16 +161,7 @@ class OFTGeodesicMerging(RiemannianMerging):
             )
 
         p, q = torch.triu_indices(n, n, offset=1, device=ref.device)
-        left_p = p[:, None]
-        left_q = q[:, None]
-        right_p = p[None, :]
-        right_q = q[None, :]
-        matrix = (
-            row[:, left_p, right_p] * col[:, left_q, right_q]
-            - row[:, left_p, right_q] * col[:, left_q, right_p]
-            - row[:, left_q, right_p] * col[:, left_p, right_q]
-            + row[:, left_q, right_q] * col[:, left_p, right_p]
-        )
+        matrix = row[:, p[:, None], p[None, :]] * col[:, q[:, None], q[None, :]]
         matrix = scale[:, None, None] * matrix
         matrix = 0.5 * (matrix + matrix.transpose(-1, -2))
 
@@ -199,10 +190,27 @@ class OFTGeodesicMerging(RiemannianMerging):
     def _normalize_fisher_matrix(self, matrix: Tensor) -> Tensor:
         return matrix / torch.linalg.vector_norm(matrix).clamp_min(1e-8)
 
+    def _transport_saved_fisher_to_concept_tangent(
+        self,
+        fisher_matrix: Tensor,
+        concept_omega: Tensor,
+        block_size: int,
+    ) -> Tensor:
+        concept_to_saved = self.manifold.compute_Pt(
+            concept_omega.to(device=fisher_matrix.device, dtype=torch.float32),
+            block_size,
+        ).to(device=fisher_matrix.device, dtype=torch.float32)
+        return (
+            concept_to_saved.transpose(-1, -2)
+            @ fisher_matrix
+            @ concept_to_saved
+        )
+
     def _fisher_geodesic_tangent(
         self,
         log_coords: Tensor,
         relative_omega: Tensor,
+        concept_omega: Tensor,
         fisher_list: List[Tensor | Dict[str, Tensor]],
         beta: Tensor,
     ) -> Tensor:
@@ -218,8 +226,9 @@ class OFTGeodesicMerging(RiemannianMerging):
         ``log_coords`` is ``Log_{theta_1}(theta_2)`` expressed in the OFT
         upper-triangular Lie-algebra basis, shape ``(num_blocks, d)``.
         Fishers may be diagonal ``(num_blocks, d)``, full ``(num_blocks, d, d)``,
-        or KFAC factor dicts. The second Fisher is transported into the tangent
-        space at ``theta_1`` before solving the blockwise linear systems.
+        or KFAC factor dicts. Both Fisher matrices are transported into
+        ``theta_1`` -- the concept/start tangent space -- before solving the
+        blockwise linear systems.
         """
         self._ensure_two(fisher_list, "Fisher tensors")
 
@@ -227,15 +236,11 @@ class OFTGeodesicMerging(RiemannianMerging):
         block_size = relative_omega.shape[-1]
         dtype, device = log_coords.dtype, log_coords.device
 
-        h1 = self._normalize_fisher_matrix(self._fisher_matrix(fisher_list[0], log_coords))
+        h1 = self._fisher_matrix(fisher_list[0], log_coords)
+        h1 = self._transport_saved_fisher_to_concept_tangent(h1, concept_omega, block_size)
+        h1 = self._normalize_fisher_matrix(h1)
         h2 = self._fisher_matrix(fisher_list[1], log_coords)
-
-        if h2.dim() == 3:
-            transport = self.manifold.compute_Pt(relative_omega, block_size).to(
-                device=device,
-                dtype=torch.float32,
-            )
-            h2 = transport @ h2 @ transport.transpose(-1, -2)
+        h2 = self._transport_saved_fisher_to_concept_tangent(h2, concept_omega, block_size)
         h2 = self._normalize_fisher_matrix(h2)
 
         eye = torch.eye(son_dimension, device=device, dtype=torch.float32)
@@ -339,6 +344,7 @@ class OFTGeodesicMerging(RiemannianMerging):
             merged_coords = self._fisher_geodesic_tangent(
                 log_coords=log_coords,
                 relative_omega=relative_omega,
+                concept_omega=start_skew,
                 fisher_list=fisher_list,
                 beta=s,
             )

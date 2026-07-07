@@ -6,8 +6,9 @@ For each transported skew gradient G, it accumulates row/column factors:
     A = E[G G^T], B = E[G^T G]
 
 plus a per-block scale that matches the empirical Fisher trace when using
-``scale * kron(B, A)``. This is a gradient-space KFAC approximation for the
-OFT Lie coordinates, not activation/backprop KFAC for ordinary Linear layers.
+``scale * A[p, r] * B[q, s]`` for upper-triangle coordinates ``(p, q)``
+and ``(r, s)``. This is a gradient-space KFAC approximation for the OFT Lie
+coordinates, not activation/backprop KFAC for ordinary Linear layers.
 """
 
 import argparse
@@ -231,7 +232,7 @@ def compute_one(args, config, base):
         metadata={
             "approximation": "transported_oft_lie_gradient_kfac",
             "num_samples": str(count),
-            "reconstruct": "scale * kron(col, row)",
+            "reconstruct": "compact upper coords: scale * row[p,r] * col[q,s]",
         },
     )
     fim.log_stage(f"DONE save KFAC in {time.time() - start:.1f}s")

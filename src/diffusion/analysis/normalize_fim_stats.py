@@ -75,8 +75,14 @@ def kfac_quad(fim, key, delta):
     total = torch.tensor(0.0, device=delta.device)
     deltas = delta.reshape(-1, delta.shape[-2], delta.shape[-1])
     for (r, c, s), d_block in zip(kfac_factors(fim, key, delta.device), deltas):
-        f_block = s * torch.kron(c, r)
-        vec = d_block.transpose(-1, -2).reshape(-1)
+        row, col = torch.triu_indices(
+            d_block.shape[-1],
+            d_block.shape[-1],
+            offset=1,
+            device=delta.device,
+        )
+        f_block = s * r[row[:, None], row[None, :]] * c[col[:, None], col[None, :]]
+        vec = d_block[row, col]
         total += vec @ f_block @ vec
     return total
 

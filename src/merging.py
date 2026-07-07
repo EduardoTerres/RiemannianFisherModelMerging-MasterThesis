@@ -836,16 +836,7 @@ class OFTMerging(RiemannianMerging):
             )
 
         p, q = torch.triu_indices(n, n, offset=1, device=ref.device)
-        left_p = p[:, None]
-        left_q = q[:, None]
-        right_p = p[None, :]
-        right_q = q[None, :]
-        matrix = (
-            row[:, left_p, right_p] * col[:, left_q, right_q]
-            - row[:, left_p, right_q] * col[:, left_q, right_p]
-            - row[:, left_q, right_p] * col[:, left_p, right_q]
-            + row[:, left_q, right_q] * col[:, left_p, right_p]
-        )
+        matrix = row[:, p[:, None], p[None, :]] * col[:, q[:, None], q[None, :]]
         matrix = scale[:, None, None] * matrix
         matrix = 0.5 * (matrix + matrix.transpose(-1, -2))
 

@@ -208,16 +208,7 @@ def _kfac_to_matrix(fisher, ref_coords):
     n = row.shape[-1]
     d = ref_coords.shape[-1]
     p, q = torch.triu_indices(n, n, offset=1, device=ref_coords.device)
-    left_p = p[:, None]
-    left_q = q[:, None]
-    right_p = p[None, :]
-    right_q = q[None, :]
-    matrix = (
-        row[:, left_p, right_p] * col[:, left_q, right_q]
-        - row[:, left_p, right_q] * col[:, left_q, right_p]
-        - row[:, left_q, right_p] * col[:, left_p, right_q]
-        + row[:, left_q, right_q] * col[:, left_p, right_p]
-    )
+    matrix = row[:, p[:, None], p[None, :]] * col[:, q[:, None], q[None, :]]
     matrix = scale[:, None, None] * matrix
     matrix = 0.5 * (matrix + matrix.transpose(-1, -2))
     diag_floor = fisher.get("diag_floor")
@@ -253,12 +244,20 @@ def _normalize_fisher_matrix(matrix):
     return matrix / torch.linalg.vector_norm(matrix).clamp_min(1e-8)
 
 
-def _cayley_fisher_tangent(tangent, fishers, beta):
+def _transport_saved_fisher_to_concept_tangent(fisher_matrix, concept_skew):
+    concept_to_saved = _transport_matrix(
+        _skew(concept_skew).to(device=fisher_matrix.device, dtype=torch.float32)
+    ).to(dtype=torch.float32)
+    return concept_to_saved.transpose(-1, -2) @ fisher_matrix @ concept_to_saved
+
+
+def _cayley_fisher_tangent(tangent, fishers, beta, concept_skew):
     log_coords = _upper_coords(tangent)
-    h1 = _normalize_fisher_matrix(_fisher_to_matrix(fishers[0], log_coords))
+    h1 = _fisher_to_matrix(fishers[0], log_coords)
+    h1 = _transport_saved_fisher_to_concept_tangent(h1, concept_skew)
+    h1 = _normalize_fisher_matrix(h1)
     h2 = _fisher_to_matrix(fishers[1], log_coords)
-    pt = _transport_matrix(tangent).to(dtype=torch.float32)
-    h2 = pt @ h2 @ pt.transpose(-1, -2)
+    h2 = _transport_saved_fisher_to_concept_tangent(h2, concept_skew)
     h2 = _normalize_fisher_matrix(h2)
 
     d = log_coords.shape[-1]
@@ -287,12 +286,13 @@ def _cayley_geodesic_merge_with_generators(tensors, device, alphas=None, fishers
     if t >= 1.0 - 1e-8:
         return _skew(tensors[1]).to(dtype=tensors[0].dtype)
 
-    q0 = _cayley(tensors[0].to(device=device, dtype=torch.float32))
+    concept_skew = tensors[0]
+    q0 = _cayley(concept_skew.to(device=device, dtype=torch.float32))
     q1 = _cayley(tensors[1].to(device=device, dtype=torch.float32))
     relative = q0.transpose(-1, -2) @ q1
     tangent = _inverse_cayley(relative)
     tangent_step = (
-        _cayley_fisher_tangent(tangent, fishers, t)
+        _cayley_fisher_tangent(tangent, fishers, t, concept_skew)
         if fishers is not None
         else t * tangent
     )

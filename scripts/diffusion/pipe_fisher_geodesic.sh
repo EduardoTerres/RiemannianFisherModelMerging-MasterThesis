@@ -11,7 +11,7 @@
 set -e
 
 MU=4  # correction
-FISHER_BACKEND="kfac"
+FISHER_BACKEND="diagonal"  # "diagonal" or "kfac"
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"

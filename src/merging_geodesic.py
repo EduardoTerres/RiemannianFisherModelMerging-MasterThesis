@@ -161,7 +161,12 @@ class OFTGeodesicMerging(RiemannianMerging):
             )
 
         p, q = torch.triu_indices(n, n, offset=1, device=ref.device)
-        matrix = row[:, p[:, None], p[None, :]] * col[:, q[:, None], q[None, :]]
+        matrix = (
+            row[:, p[:, None], p[None, :]] * col[:, q[:, None], q[None, :]]
+            - row[:, p[:, None], q[None, :]] * col[:, q[:, None], p[None, :]]
+            - row[:, q[:, None], p[None, :]] * col[:, p[:, None], q[None, :]]
+            + row[:, q[:, None], q[None, :]] * col[:, p[:, None], p[None, :]]
+        )
         matrix = scale[:, None, None] * matrix
         matrix = 0.5 * (matrix + matrix.transpose(-1, -2))
 
@@ -188,7 +193,8 @@ class OFTGeodesicMerging(RiemannianMerging):
         )
 
     def _normalize_fisher_matrix(self, matrix: Tensor) -> Tensor:
-        return matrix / torch.linalg.vector_norm(matrix).clamp_min(1e-8)
+        trace = matrix.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+        return matrix / trace.clamp_min(1e-8).unsqueeze(-1).unsqueeze(-1)
 
     def _transport_saved_fisher_to_concept_tangent(
         self,

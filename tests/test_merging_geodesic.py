@@ -35,6 +35,18 @@ def test_geodesic_kfac_reconstructs_compact_skew_metric():
     assert torch.allclose(matrix, expected, atol=1e-6)
 
 
+def test_geodesic_fisher_normalization_divides_by_trace():
+    merger = OFTGeodesicMerging(device="cpu")
+    fisher = torch.tensor([[2.0, 3.0, 5.0]], dtype=torch.float32)
+    matrix = merger._fisher_matrix(fisher, make_oft_params([0.1, 0.2, -0.1]))
+
+    actual = merger._normalize_fisher_matrix(matrix)
+    expected = torch.diag_embed(fisher / fisher.sum(dim=-1, keepdim=True))
+
+    assert torch.allclose(actual, expected, atol=1e-6)
+    assert torch.allclose(actual.diagonal(dim1=-2, dim2=-1).sum(dim=-1), torch.ones(NUM_BLOCKS))
+
+
 def test_geodesic_kfac_merge_matches_equivalent_full_fisher():
     weights = [
         make_oft_params([0.1, 0.2, -0.1]),

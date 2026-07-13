@@ -13,6 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "OrthoFuse"))
 from moft.inferencer_sdxl import inferencers
 from nb_utils.eval_sets import merge_base_set, merge_test_set
 from src.diffusion.dataset_1 import DIFFUSION_MERGE_PAIRS, get_pair
+from src.diffusion.pipeline_outputs import (
+    existing_output_path,
+    orthofuse_inference_folder_name,
+)
 
 
 warnings.filterwarnings("ignore")
@@ -27,6 +31,15 @@ def parse_args():
     parser.add_argument("--moft_layers_style_path", type=str, default=None)
     parser.add_argument("--all_dataset", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--samples",
+        type=str,
+        default=None,
+        help=(
+            "Dataset pair selector: all_dataset_pairs, <concept>:<style>, "
+            "concept:<concept>, or style:<style>."
+        ),
+    )
     parser.add_argument("--concept_name", type=str, default=None)
     parser.add_argument("--style_name", type=str, default=None)
     parser.add_argument("--dataset_pair_name", type=str, default=None)
@@ -48,20 +61,73 @@ def parse_args():
 def selected_pairs(args):
     if args.debug:
         return [get_pair(DIFFUSION_MERGE_PAIRS[0]["concept"]["name"], "01_08")]
-    if args.all_dataset:
+    if args.all_dataset or args.samples == "all_dataset_pairs":
         return DIFFUSION_MERGE_PAIRS
+    if args.samples is not None:
+        if ":" not in args.samples:
+            raise ValueError(
+                "samples must be 'all_dataset_pairs', '<concept_name>:<style_name>', "
+                "'concept:<concept_name>', or 'style:<style_name>'."
+            )
+        left, right = args.samples.split(":", 1)
+        if left == "concept":
+            pairs = [pair for pair in DIFFUSION_MERGE_PAIRS if pair["concept"]["name"] == right]
+            if not pairs:
+                raise KeyError(f"Unknown concept: {right}")
+            return pairs
+        if left == "style":
+            pairs = [pair for pair in DIFFUSION_MERGE_PAIRS if pair["style"]["name"] == right]
+            if not pairs:
+                raise KeyError(f"Unknown style: {right}")
+            return pairs
+        return [get_pair(left, right)]
     if args.concept_name is not None or args.style_name is not None:
-        if args.concept_name is None or args.style_name is None:
-            raise ValueError("Both concept_name and style_name are required.")
+        if args.concept_name is None:
+            pairs = [
+                pair for pair in DIFFUSION_MERGE_PAIRS if pair["style"]["name"] == args.style_name
+            ]
+            if not pairs:
+                raise KeyError(f"Unknown style: {args.style_name}")
+            return pairs
+        if args.style_name is None:
+            pairs = [
+                pair for pair in DIFFUSION_MERGE_PAIRS if pair["concept"]["name"] == args.concept_name
+            ]
+            if not pairs:
+                raise KeyError(f"Unknown concept: {args.concept_name}")
+            return pairs
         return [get_pair(args.concept_name, args.style_name)]
     return [None]
+
+
+def print_selected_pairs(pairs):
+    print("=" * 40, flush=True)
+    print("Pairs to compute:", flush=True)
+    if pairs == [None]:
+        print("  custom adapter paths", flush=True)
+    else:
+        for pair in pairs:
+            print(f"  {pair['name']}", flush=True)
+    print("=" * 40, flush=True)
 
 
 def apply_pair(args, pair):
     args.moft_layers_concept_path = pair["concept"]["adapter_path"]
     args.moft_layers_style_path = pair["style"]["adapter_path"]
     args.dataset_pair_name = pair["name"]
+    args.concept_class_name = pair["concept"]["class_name"]
+    args.placeholder_token_concept = pair["concept"]["placeholder_token"]
+    args.placeholder_token_style = pair["style"]["placeholder_token"]
     return args
+
+
+def apply_pair_config(config, args):
+    if getattr(args, "concept_class_name", None) is None:
+        return config
+    config["class_name"] = args.concept_class_name
+    config["placeholder_token_concept"] = args.placeholder_token_concept
+    config["placeholder_token_style"] = args.placeholder_token_style
+    return config
 
 
 def run_pipe(args):
@@ -72,6 +138,7 @@ def run_pipe(args):
 
     with open(args.config_path, "r", encoding="utf-8") as config_file:
         config = yaml.safe_load(config_file)
+    config = apply_pair_config(config, args)
     if args.output_dir is not None:
         config["output_dir"] = args.output_dir
 
@@ -89,9 +156,14 @@ def run_pipe(args):
 if __name__ == "__main__":
     args = parse_args()
     pairs = selected_pairs(args)
+    print_selected_pairs(pairs)
     for pair in tqdm(pairs, desc="Running OrthoFuse pipeline", unit="pair"):
         run_args = argparse.Namespace(**vars(args))
         if pair is not None:
             tqdm.write(f"Running pair: {pair['name']}")
             apply_pair(run_args, pair)
+        existing_path = existing_output_path(run_args, orthofuse_inference_folder_name)
+        if existing_path is not None:
+            tqdm.write(f"Skipping existing OrthoFuse output: {existing_path}")
+            continue
         run_pipe(run_args)

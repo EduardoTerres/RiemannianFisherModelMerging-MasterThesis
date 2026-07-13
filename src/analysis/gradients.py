@@ -22,11 +22,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
 from src.merging import OFTMerging
-from src.paths import MODEL_FAMILIES
-from src.dataset.dataset_1 import DATASET_1_TRAIN, build_loader
+from src.paths import MODEL_FAMILIES, ROOTDIR
+from src.dataset.dataset_3 import DATASET_3_TRAIN, build_loader
 from src.analysis.plot_utils import plot_gradient_analysis
 
-TASK_NAMES = ["socialiqa", "commonsense", "numinamath", "magicoder", "scienceqa"]
+TASK_NAMES = [tag for tag, *_ in DATASET_3_TRAIN]
 
 
 def task_of(p: str) -> str:
@@ -128,6 +128,13 @@ def main() -> None:
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--save_path", default="outputs/gradient_analysis")
+    parser.add_argument(
+        "--dataset-cache-dir",
+        "--dataset_cache_dir",
+        dest="dataset_cache_dir",
+        type=Path,
+        default=ROOTDIR / "data" / "hf_cache",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.save_path) / args.family_name
@@ -146,7 +153,7 @@ def main() -> None:
     results: dict[str, dict] = {}
 
     for (tag, ds_path, ds_name, split, doc_fn), adapter_path in zip(
-        DATASET_1_TRAIN, family.adapter_paths
+        DATASET_3_TRAIN, family.adapter_paths
     ):
         print(f"\n{'='*60}\nTask: {tag}  |  {os.path.basename(adapter_path)}\n{'='*60}")
 
@@ -166,6 +173,8 @@ def main() -> None:
         loader = build_loader(
             ds_path, ds_name, split, doc_fn,
             tokenizer, args.num_samples, args.batch_size, args.max_length,
+            task=tag,
+            cache_dir=str(args.dataset_cache_dir) if args.dataset_cache_dir else None,
         )
         grads = compute_mean_gradient(model, loader, device, args.num_samples)
         oft_grads = {n: g for n, g in grads.items() if "oft" in n.lower()}

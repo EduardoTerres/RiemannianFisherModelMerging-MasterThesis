@@ -51,6 +51,15 @@ def make_fishers() -> list[torch.Tensor]:
     ]
 
 
+def make_identity_kfac(scale: float = 1.0) -> dict[str, torch.Tensor]:
+    eye = torch.eye(BLOCK_SIZE, dtype=torch.float32).unsqueeze(0)
+    return {
+        "row": eye,
+        "col": eye,
+        "scale": torch.full((NUM_BLOCKS,), scale, dtype=torch.float32),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 1. oft_params <-> skew-matrix round-trip
 # ---------------------------------------------------------------------------
@@ -279,3 +288,45 @@ class TestDiagonalFisherMerge:
 
         cosine = (plain * fisher).sum() / (plain.norm() * fisher.norm())
         assert cosine.item() > 0.999, f"Cosine similarity too low: {cosine.item():.4f}"
+
+
+class TestKFACFisherMerge:
+    def test_identity_kfac_reconstructs_compact_skew_metric(self):
+        merger = OFTMerging(lam=1.0, alphas=[0.25] * NUM_TASKS, device="cpu", fisher_backend="kfac")
+        matrix = merger._fisher_to_matrix(make_identity_kfac(), make_task_vectors()[0])
+        expected = 2.0 * torch.eye(SON_DIM).unsqueeze(0)
+
+        assert matrix.shape == (NUM_BLOCKS, SON_DIM, SON_DIM)
+        assert torch.allclose(matrix, expected, atol=1e-6)
+
+    def test_kfac_reconstruction_matches_explicit_kron(self):
+        merger = OFTMerging(lam=1.0, alphas=[0.25] * NUM_TASKS, device="cpu", fisher_backend="kfac")
+        row = torch.tensor([[[2.0, 0.1, 0.2], [0.1, 1.5, 0.3], [0.2, 0.3, 1.2]]])
+        col = torch.tensor([[[1.1, 0.2, 0.0], [0.2, 1.4, 0.1], [0.0, 0.1, 1.3]]])
+        fisher = {"row": row, "col": col, "scale": torch.ones(1)}
+
+        actual = merger._fisher_to_matrix(fisher, make_task_vectors()[0])[0]
+        idx = torch.triu_indices(BLOCK_SIZE, BLOCK_SIZE, offset=1)
+        basis = []
+        for i, j in zip(idx[0], idx[1]):
+            value = torch.zeros(BLOCK_SIZE, BLOCK_SIZE)
+            value[i, j] = 1.0
+            value[j, i] = -1.0
+            basis.append(value.transpose(-1, -2).reshape(-1))
+        basis = torch.stack(basis, dim=1)
+        expected = basis.T @ torch.kron(col[0], row[0]) @ basis
+
+        assert torch.allclose(actual, expected, atol=1e-6)
+
+    def test_kfac_merge_matches_equivalent_full_fisher(self):
+        tvecs = make_task_vectors()
+        kfac_merger = OFTMerging(lam=1.0, alphas=[0.25] * NUM_TASKS, device="cpu", fisher_backend="kfac")
+        full_merger = OFTMerging(lam=1.0, alphas=[0.25] * NUM_TASKS, device="cpu")
+
+        kfac_fishers = [make_identity_kfac() for _ in range(NUM_TASKS)]
+        full_fishers = [2.0 * torch.eye(SON_DIM).unsqueeze(0) for _ in range(NUM_TASKS)]
+
+        actual = kfac_merger.merge_formula(tvecs, fisher_list=kfac_fishers, mode="diagonal_fisher")
+        expected = full_merger.merge_formula(tvecs, fisher_list=full_fishers, mode="fisher")
+
+        assert torch.allclose(actual, expected, atol=1e-6)

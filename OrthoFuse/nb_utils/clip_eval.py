@@ -21,10 +21,35 @@ from .eval_sets import evaluation_sets
 from .images_viewer import MultifolderViewer
 
 
+def _load_clip_model(clip_model: str, device, pretrained: str = "openai"):
+    if hasattr(clip, "load"):
+        model, preprocess = clip.load(clip_model, device=device)
+        return model, preprocess, clip.tokenize
+
+    try:
+        import open_clip
+    except ImportError as ex:
+        raise ImportError(
+            "The installed `clip` package does not provide `clip.load`, and "
+            "`open_clip` is not installed. Install OpenAI CLIP or open-clip-torch."
+        ) from ex
+
+    model_name = clip_model.replace("/", "-")
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        model_name,
+        pretrained=pretrained,
+        device=device,
+    )
+    tokenizer = open_clip.get_tokenizer(model_name)
+    return model, preprocess, tokenizer
+
+
 class CLIPEvaluator(object):
-    def __init__(self, device, clip_model='ViT-B/32') -> None:
+    def __init__(self, device, clip_model='ViT-B/32', clip_pretrained='openai') -> None:
         self.device = device
-        self.model, clip_preprocess = clip.load(clip_model, device=self.device)
+        self.model, clip_preprocess, self.clip_tokenize = _load_clip_model(
+            clip_model, self.device, pretrained=clip_pretrained
+        )
 
         self.clip_preprocess = clip_preprocess
 
@@ -42,7 +67,7 @@ class CLIPEvaluator(object):
                 transform.antialias = False
 
     def tokenize(self, strings: list):
-        return clip.tokenize(strings).to(self.device)
+        return self.clip_tokenize(strings).to(self.device)
 
     @torch.no_grad()
     def encode_text(self, tokens: torch.Tensor) -> torch.Tensor:
@@ -55,7 +80,7 @@ class CLIPEvaluator(object):
 
     def get_text_features(self, text: str, norm: bool = True) -> torch.Tensor:
 
-        tokens = clip.tokenize(text).to(self.device)
+        tokens = self.clip_tokenize(text).to(self.device)
 
         text_features = self.encode_text(tokens).detach()
 
@@ -88,10 +113,13 @@ class CLIPEvaluator(object):
 
 
 class DINOEvaluator(CLIPEvaluator):
-    def __init__(self, device, clip_model='ViT-B/32', dino_model='dinov2_vits14') -> None:
-        super().__init__(device, clip_model=clip_model)
+    def __init__(
+            self, device, clip_model='ViT-B/32', clip_pretrained='openai',
+            dino_model='dinov2_vits14', dino_repo='facebookresearch/dinov2', dino_source='github',
+    ) -> None:
+        super().__init__(device, clip_model=clip_model, clip_pretrained=clip_pretrained)
 
-        self.dino_model = torch.hub.load('facebookresearch/dinov2', dino_model).to(self.device)
+        self.dino_model = torch.hub.load(dino_repo, dino_model, source=dino_source).to(self.device)
 
         self.dino_preprocess = transforms.Compose([
             transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True),
@@ -116,9 +144,19 @@ class DINOEvaluator(CLIPEvaluator):
 
 
 class ExpEvaluator:
-    def __init__(self, device):
+    def __init__(
+            self, device, clip_model='ViT-B/32', clip_pretrained='openai',
+            dino_model='dinov2_vits14', dino_repo='facebookresearch/dinov2', dino_source='github',
+    ):
         self.device = device
-        self.evaluator = DINOEvaluator(device=device)
+        self.evaluator = DINOEvaluator(
+            device=device,
+            clip_model=clip_model,
+            clip_pretrained=clip_pretrained,
+            dino_model=dino_model,
+            dino_repo=dino_repo,
+            dino_source=dino_source,
+        )
 
     @staticmethod
     def _images_to_tensor(images):

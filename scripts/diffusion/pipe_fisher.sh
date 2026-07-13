@@ -1,18 +1,20 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=pipe_orthomerge
+#SBATCH --job-name=pipe_fisher
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=02:00:00
 #SBATCH --array=0-5
-#SBATCH --output=outputs/diffusion/slurms/pipe_orthomerge_%A_%a.out
+#SBATCH --output=outputs/diffusion/slurms/pipe_fisher_%A_%a.out
 
 set -e
 
+MU=3  # Fisher correction mu
+
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/standard_rescaled"
+METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/fisher_kfac_mu_${MU}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -34,15 +36,21 @@ CONCEPTS=(
 )
 
 CONCEPT="${CONCEPTS[${SLURM_ARRAY_TASK_ID:-0}]}"
-ALPHA_CONCEPT=0.4  # concept alpha
-ALPHA_STYLE=0.6    # style alpha
-echo "[pipe_orthomerge] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
+ALPHA_CONCEPT=0.25  # concept alpha
+ALPHA_STYLE=0.75    # style alpha
+echo "[pipe_fisher] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
 
 python "${REPO_ROOT}/src/diffusion/pipe_gradients.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
   --output_dir="${METHOD_OUTPUT_DIR}" \
   --concept_name="${CONCEPT}" \
-  --merge_mode=standard_rescaled \
+  --merge_mode=fisher \
   --alphas "${ALPHA_CONCEPT}" "${ALPHA_STYLE}" \
   --num_images_per_medium_prompt=10 \
-  --replace_inference_output
+  --fisher_correction_mu=${MU} \
+  --replace_inference_output \
+  --fisher_backend kfac
+  
+  
+# --fisher_min=1e-14  
+# --fisher_rescale=1e10

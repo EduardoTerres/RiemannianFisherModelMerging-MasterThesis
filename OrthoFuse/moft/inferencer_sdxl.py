@@ -15,7 +15,7 @@ from diffusers import (
     StableDiffusionPipeline, AutoencoderKL, DDIMScheduler, UNet2DConditionModel, StableDiffusionXLPipeline
 )
 from diffusers.loaders import AttnProcsLayers
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
 from safetensors.torch import load_file
 from peft import  LoraConfig, get_peft_model
 from .model.moft import MOFTCrossAttnProcessor, DoubleMOFTCrossAttnProcessor, MOFTDoubleCrossAttnProcessor
@@ -27,6 +27,54 @@ from .utils.fixed_rank_batch import FixedRankBatch
 from diffusers import EulerDiscreteScheduler
 import time
 import json 
+
+
+HF_HUB_CACHE_ENV = "HF_HUB_CACHE"
+HF_HOME_ENV = "HF_HOME"
+HF_HUB_SUBDIR = "hub"
+
+
+def _truthy_env(name, default="1"):
+    value = os.environ.get(name, default)
+    return value.lower() not in {"0", "false", "no", "off"}
+
+
+def _hf_cache_dir():
+    return os.environ.get(HF_HUB_CACHE_ENV) or (
+        os.path.join(os.environ[HF_HOME_ENV], HF_HUB_SUBDIR) if os.environ.get(HF_HOME_ENV) else None
+    )
+
+
+def _hf_load_kwargs():
+    return {
+        "cache_dir": _hf_cache_dir(),
+        "local_files_only": _truthy_env("ORTHOFUSE_LOCAL_FILES_ONLY"),
+    }
+
+
+def _load_pretrained(component_name, loader_cls, model_name_or_path, **kwargs):
+    load_kwargs = _hf_load_kwargs()
+    load_kwargs.update(kwargs)
+    cache_dir = load_kwargs.get("cache_dir") or "<default>"
+    print(
+        f"loading {component_name} from {model_name_or_path} "
+        f"(cache_dir={cache_dir}, local_files_only={load_kwargs.get('local_files_only')})...",
+        flush=True,
+    )
+    component = loader_cls.from_pretrained(model_name_or_path, **load_kwargs)
+    print(f"loaded {component_name}", flush=True)
+    return component
+
+
+def _load_pretrained_on_device(component_name, loader_cls, model_name_or_path, device, **kwargs):
+    load_kwargs = dict(kwargs)
+    if str(device).startswith("cuda"):
+        load_kwargs.setdefault("device_map", {"": device})
+        load_kwargs.setdefault("low_cpu_mem_usage", True)
+    component = _load_pretrained(component_name, loader_cls, model_name_or_path, **load_kwargs)
+    if not str(device).startswith("cuda"):
+        component = component.to(device)
+    return component
 
 
 def _load_orthofuse_adapter_info():
@@ -48,6 +96,7 @@ print_unet_oft_summary = _adapter_info.print_unet_oft_summary
 inferencers = ClassRegistry()
 
 _ROOT_OFT_MERGING_CLASS = None
+_ROOT_OFT_GEODESIC_MERGING_CLASS = None
 
 
 def _load_root_oft_merging_class():
@@ -86,6 +135,28 @@ def _load_root_oft_merging_class():
     return _ROOT_OFT_MERGING_CLASS
 
 
+def _load_root_oft_geodesic_merging_class():
+    """Load top-level src/merging_geodesic.py without import-package ambiguity."""
+    global _ROOT_OFT_GEODESIC_MERGING_CLASS
+    if _ROOT_OFT_GEODESIC_MERGING_CLASS is not None:
+        return _ROOT_OFT_GEODESIC_MERGING_CLASS
+
+    repo_root = Path(__file__).resolve().parents[2]
+    geodesic_path = repo_root / "src" / "merging_geodesic.py"
+
+    if "src.geometry" not in sys.modules:
+        _load_root_oft_merging_class()
+
+    geodesic_spec = importlib.util.spec_from_file_location(
+        "_root_oft_geodesic_merging",
+        geodesic_path,
+    )
+    geodesic_module = importlib.util.module_from_spec(geodesic_spec)
+    geodesic_spec.loader.exec_module(geodesic_module)
+    _ROOT_OFT_GEODESIC_MERGING_CLASS = geodesic_module.OFTGeodesicMerging
+    return _ROOT_OFT_GEODESIC_MERGING_CLASS
+
+
 def _full_generator_to_oft_coords(merger, tensor):
     skew = 0.5 * (tensor - tensor.transpose(-1, -2))
     return merger.skew_matrix_to_oft_params(skew)
@@ -95,6 +166,140 @@ def _oft_coords_to_full_generator(merger, coords, dtype):
     return merger.oft_params_to_skew_matrix(coords, coords.shape[-1]).to(dtype=dtype)
 
 
+def _skew(data):
+    return 0.5 * (data - data.transpose(-1, -2))
+
+
+def _cayley(data):
+    skew = _skew(data)
+    n = skew.shape[-1]
+    eye = torch.eye(n, dtype=skew.dtype, device=skew.device).expand_as(skew)
+    return torch.linalg.solve(eye - skew, eye + skew, left=False)
+
+
+def _inverse_cayley(q):
+    n = q.shape[-1]
+    eye = torch.eye(n, dtype=q.dtype, device=q.device).expand_as(q)
+    generator = torch.linalg.solve(q + eye, q - eye, left=False)
+    return _skew(generator)
+
+
+def _upper_coords(tensor):
+    n = tensor.shape[-1]
+    idx = torch.triu_indices(n, n, offset=1, device=tensor.device)
+    return tensor[:, idx[0], idx[1]]
+
+
+def _coords_to_skew(coords, n):
+    idx = torch.triu_indices(n, n, offset=1, device=coords.device)
+    skew = torch.zeros(coords.shape[0], n, n, dtype=coords.dtype, device=coords.device)
+    skew[:, idx[0], idx[1]] = coords
+    return skew - skew.transpose(-1, -2)
+
+
+def _kfac_to_matrix(fisher, ref_coords):
+    row = fisher["row"].to(device=ref_coords.device, dtype=torch.float32).reshape(
+        -1, fisher["row"].shape[-1], fisher["row"].shape[-1]
+    )
+    col = fisher["col"].to(device=ref_coords.device, dtype=torch.float32).reshape(
+        -1, fisher["col"].shape[-1], fisher["col"].shape[-1]
+    )
+    scale = fisher["scale"].to(device=ref_coords.device, dtype=torch.float32).reshape(-1)
+    n = row.shape[-1]
+    d = ref_coords.shape[-1]
+    p, q = torch.triu_indices(n, n, offset=1, device=ref_coords.device)
+    matrix = row[:, p[:, None], p[None, :]] * col[:, q[:, None], q[None, :]]
+    matrix = scale[:, None, None] * matrix
+    matrix = 0.5 * (matrix + matrix.transpose(-1, -2))
+    diag_floor = fisher.get("diag_floor")
+    if diag_floor is not None:
+        floor = torch.as_tensor(diag_floor, device=ref_coords.device, dtype=torch.float32)
+        eye = torch.eye(d, dtype=torch.float32, device=ref_coords.device).expand_as(matrix)
+        matrix = matrix + floor * eye
+    return matrix.reshape(*ref_coords.shape[:-1], d, d)
+
+
+def _transport_matrix(skew_matrix):
+    block_size = skew_matrix.shape[-1]
+    idx = torch.triu_indices(block_size, block_size, offset=1, device=skew_matrix.device)
+    r = torch.matrix_exp(skew_matrix / 2)
+    i, j = idx[0], idx[1]
+    return r[:, i][:, :, i] * r[:, j][:, :, j] - r[:, i][:, :, j] * r[:, j][:, :, i]
+
+
+def _fisher_to_matrix(fisher, ref_coords):
+    if isinstance(fisher, dict):
+        return _kfac_to_matrix(fisher, ref_coords)
+    fisher = fisher.to(device=ref_coords.device, dtype=torch.float32)
+    if fisher.dim() == 3 and fisher.shape[-1] == fisher.shape[-2]:
+        if fisher.shape[-1] == ref_coords.shape[-1]:
+            return fisher
+        fisher = _upper_coords(fisher)
+    if fisher.shape == ref_coords.shape:
+        return torch.diag_embed(fisher.clamp(min=0.0))
+    raise ValueError(f"Unsupported Fisher shape {tuple(fisher.shape)} for {tuple(ref_coords.shape)}")
+
+
+def _normalize_fisher_matrix(matrix):
+    return matrix / torch.linalg.vector_norm(matrix).clamp_min(1e-8)
+
+
+def _transport_saved_fisher_to_concept_tangent(fisher_matrix, concept_skew):
+    concept_to_saved = _transport_matrix(
+        _skew(concept_skew).to(device=fisher_matrix.device, dtype=torch.float32)
+    ).to(dtype=torch.float32)
+    return concept_to_saved.transpose(-1, -2) @ fisher_matrix @ concept_to_saved
+
+
+def _cayley_fisher_tangent(tangent, fishers, beta, concept_skew):
+    log_coords = _upper_coords(tangent)
+    h1 = _fisher_to_matrix(fishers[0], log_coords)
+    h1 = _transport_saved_fisher_to_concept_tangent(h1, concept_skew)
+    h1 = _normalize_fisher_matrix(h1)
+    h2 = _fisher_to_matrix(fishers[1], log_coords)
+    h2 = _transport_saved_fisher_to_concept_tangent(h2, concept_skew)
+    h2 = _normalize_fisher_matrix(h2)
+
+    d = log_coords.shape[-1]
+    eye = torch.eye(d, dtype=torch.float32, device=log_coords.device).expand(
+        log_coords.shape[0], d, d
+    )
+    system = (1.0 - beta) * h1 + beta * h2
+    rhs = beta * (h2 @ log_coords.float().unsqueeze(-1)).squeeze(-1)
+    coords = torch.linalg.solve(system + 1e-8 * eye, rhs.unsqueeze(-1)).squeeze(-1)
+    return _coords_to_skew(coords, tangent.shape[-1])
+
+
+def _cayley_geodesic_merge_with_generators(tensors, device, alphas=None, fishers=None):
+    if len(tensors) != 2:
+        raise ValueError(f"Geodesic interpolation requires exactly 2 tensors; got {len(tensors)}")
+    if alphas is None:
+        t = torch.tensor(0.5, dtype=torch.float32, device=device)
+    else:
+        alpha_tensor = torch.tensor(alphas, dtype=torch.float32, device=device).flatten()
+        if alpha_tensor.numel() != 2:
+            raise ValueError(f"Geodesic alphas must have length 2; got {alpha_tensor.numel()}")
+        t = alpha_tensor[1] / alpha_tensor.sum().clamp_min(1e-8)
+
+    if t <= 1e-8:
+        return _skew(tensors[0]).to(dtype=tensors[0].dtype)
+    if t >= 1.0 - 1e-8:
+        return _skew(tensors[1]).to(dtype=tensors[0].dtype)
+
+    concept_skew = tensors[0]
+    q0 = _cayley(concept_skew.to(device=device, dtype=torch.float32))
+    q1 = _cayley(tensors[1].to(device=device, dtype=torch.float32))
+    relative = q0.transpose(-1, -2) @ q1
+    tangent = _inverse_cayley(relative)
+    tangent_step = (
+        _cayley_fisher_tangent(tangent, fishers, t, concept_skew)
+        if fishers is not None
+        else t * tangent
+    )
+    qt = q0 @ _cayley(tangent_step)
+    return _inverse_cayley(qt).to(dtype=tensors[0].dtype)
+
+
 def _gradients_merge_with_merging_py(
     tensors,
     device,
@@ -102,28 +307,67 @@ def _gradients_merge_with_merging_py(
     fishers=None,
     merger=None,
     alphas=None,
+    geodesic_backend="cayley",
+    fisher_backend="diagonal",
 ):
+    if mode == "geodesic":
+        if geodesic_backend == "cayley":
+            return _cayley_geodesic_merge_with_generators(tensors, device, alphas, fishers)
+        raise ValueError(f"Unsupported geodesic_backend: {geodesic_backend!r}")
+
     if merger is None:
-        OFTMerging = _load_root_oft_merging_class()
-        merger = OFTMerging(device=str(device))
+        merger_cls = _load_root_oft_merging_class()
+        merger = merger_cls(device=str(device), fisher_backend=fisher_backend)
     coords = [
         _full_generator_to_oft_coords(merger, tensor).to(device=device)
         for tensor in tensors
     ]
     fisher_list = None
     if fishers is not None:
-        fisher_list = [
-            fisher.to(device=device, dtype=coords[0].dtype)
-            for fisher in fishers
-        ]
-    with contextlib.redirect_stdout(io.StringIO()):
-        merged_coords = merger.merge_formula(
-            coords,
-            fisher_list=fisher_list,
-            mode=mode,
-            alphas=None if alphas is None else torch.tensor(alphas, dtype=torch.float32, device=device),
-        )
+        fisher_list = []
+        for fisher in fishers:
+            if isinstance(fisher, dict):
+                fisher_list.append({
+                    name: (
+                        value.to(device=device, dtype=torch.float32)
+                        if torch.is_tensor(value)
+                        else value
+                    )
+                    for name, value in fisher.items()
+                })
+            else:
+                fisher_list.append(fisher.to(device=device, dtype=coords[0].dtype))
+    merged_coords = merger.merge_formula(
+        coords,
+        fisher_list=fisher_list,
+        mode=mode,
+        alphas=None if alphas is None else torch.tensor(alphas, dtype=torch.float32, device=device),
+    )
     return _oft_coords_to_full_generator(merger, merged_coords, tensors[0].dtype)
+
+
+def _fisher_correction_mu(args):
+    mu = getattr(args, "fisher_correction_mu", None)
+    if mu is not None:
+        return mu
+    return getattr(args, "diagonal_fisher_correction_mu", None)
+
+
+def _diagonal_fisher_correction(merged, alphas, mu):
+    if mu is None:
+        return merged
+    t = float(alphas[0]) if alphas is not None else 0.0
+    correction = 1.0 + float(mu) * t * (1.0 - t)
+    corrected = (correction * merged).to(dtype=merged.dtype)
+    base_norm = torch.linalg.vector_norm(merged.float())
+    corrected_norm = torch.linalg.vector_norm(corrected.float())
+    assert torch.isclose(
+        corrected_norm / base_norm.clamp_min(1e-8),
+        torch.tensor(correction, device=merged.device, dtype=torch.float32),
+        rtol=1e-5,
+        atol=1e-6,
+    ), "Post-merge correction sanity check failed."
+    return corrected
 
 
 def _log_merge(message):
@@ -136,6 +380,42 @@ def _adapter_key_to_fisher_key(adapter_key, processor_keys):
         if adapter_key.startswith(prefix):
             return f"layers.{layer_idx}." + adapter_key[len(prefix):]
     return adapter_key
+
+
+def _fisher_layer(fisher, key, backend):
+    if backend == "diagonal":
+        return fisher[key]
+
+    required = {
+        "row": f"{key}.row",
+        "col": f"{key}.col",
+        "scale": f"{key}.scale",
+    }
+    missing = [name for name in required.values() if name not in fisher]
+    if missing:
+        raise KeyError(f"Missing KFAC tensors for {key}: {missing}")
+    out = {name: fisher[path] for name, path in required.items()}
+    trace_key = f"{key}.trace"
+    if trace_key in fisher:
+        out["trace"] = fisher[trace_key]
+    return out
+
+
+def _prepare_fisher_layer(fisher, fisher_min=None, fisher_rescale=None):
+    if isinstance(fisher, dict):
+        out = dict(fisher)
+        if fisher_rescale is not None:
+            out["scale"] = out["scale"] * fisher_rescale
+        if fisher_min is not None:
+            floor = float(fisher_min) * (float(fisher_rescale) if fisher_rescale is not None else 1.0)
+            out["diag_floor"] = torch.tensor(floor, device=out["scale"].device)
+        return out
+
+    if fisher_min is not None:
+        fisher = fisher.clamp_min(fisher_min)
+    if fisher_rescale is not None:
+        fisher = fisher * fisher_rescale
+    return fisher
 
 
 def get_seed(prompt, i, seed):
@@ -181,24 +461,42 @@ class BaseInferencer:
 
     def setup_base_model(self):
         # Here we create base models
-        # self.scheduler = DDIMScheduler.from_pretrained(
-        #     self.config['pretrained_model_name_or_path'], subfolder="scheduler"
-        # )
-
-        self.unet = UNet2DConditionModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="unet"
+        model_name_or_path = self.config['pretrained_model_name_or_path']
+        self.scheduler = _load_pretrained(
+            "scheduler", DDIMScheduler, model_name_or_path, subfolder="scheduler"
         )
-        self.vae = AutoencoderKL.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.unet = _load_pretrained_on_device(
+            "UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
+        )
+        self.vae = _load_pretrained(
+            "VAE",
+            AutoencoderKL,
+            model_name_or_path,
             subfolder="vae", revision=self.config['revision']
         )
-        self.tokenizer = CLIPTokenizer.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.tokenizer = _load_pretrained(
+            "tokenizer",
+            CLIPTokenizer,
+            model_name_or_path,
             subfolder="tokenizer", revision=self.config['revision']
         )
-        self.text_encoder = CLIPTextModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.tokenizer_2 = _load_pretrained(
+            "tokenizer_2",
+            CLIPTokenizer,
+            model_name_or_path,
+            subfolder="tokenizer_2", revision=self.config['revision']
+        )
+        self.text_encoder = _load_pretrained(
+            "text encoder",
+            CLIPTextModel,
+            model_name_or_path,
             subfolder="text_encoder", revision=self.config['revision']
+        )
+        self.text_encoder_2 = _load_pretrained(
+            "text encoder 2",
+            CLIPTextModelWithProjection,
+            model_name_or_path,
+            subfolder="text_encoder_2", revision=self.config['revision']
         )
 
     def setup_model(self):
@@ -207,19 +505,18 @@ class BaseInferencer:
         ))
 
     def setup_pipeline(self):
-        print("setup_pipeline for SDXL")
-        #self.pipe = StableDiffusionPipeline.from_pretrained(
-        self.pipe = StableDiffusionXLPipeline.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
-            # scheduler=self.scheduler,
-            # tokenizer=self.tokenizer,
+        print("setup_pipeline for SDXL", flush=True)
+        print("building SDXL pipeline from preloaded components...", flush=True)
+        self.pipe = StableDiffusionXLPipeline(
+            vae=self.vae,
+            text_encoder=self.text_encoder,
+            text_encoder_2=self.text_encoder_2,
+            tokenizer=self.tokenizer,
+            tokenizer_2=self.tokenizer_2,
             unet=self.unet,
-            # text_encoder=self.text_encoder,
-            revision=None,
-            requires_safety_checker=False,
-            torch_dtype=self.dtype,
-            # local_files_only=True
+            scheduler=self.scheduler,
         ).to(self.device)
+        print("built SDXL pipeline", flush=True)
         self.pipe.set_progress_bar_config(disable=True)
 
     def setup(self):
@@ -404,14 +701,33 @@ class GradientsMergeInferencer(MOFTInferencer):
 
     def create_folder_name(self):
         mode = self._merge_mode()
+        backend_suffix = ""
+        fisher_backend = getattr(self.args, "fisher_backend", "diagonal")
+        if mode == "geodesic":
+            backend_suffix = f"_{getattr(self.args, 'geodesic_backend', 'cayley')}"
+            if getattr(self.args, "geodesic_use_fishers", False):
+                backend_suffix += "_fisher"
+                if fisher_backend != "diagonal":
+                    backend_suffix += f"_{fisher_backend}"
+        elif fisher_backend != "diagonal" and "fisher" in mode:
+            backend_suffix += f"_{fisher_backend}"
+        correction_mu = _fisher_correction_mu(self.args)
+        if correction_mu is not None:
+            backend_suffix += f"_mu{correction_mu:g}"
         pair_name = getattr(self.args, "dataset_pair_name", None)
         pair_suffix = f"_{pair_name}" if pair_name else ""
         self.inference_folder_name = (
             f"ns{self.args.num_inference_steps}_gs{self.args.guidance_scale}"
-            f"_gradients_{mode}{pair_suffix}"
+            f"_gradients_{mode}{backend_suffix}{pair_suffix}"
         )
 
     def _fisher_paths(self):
+        if getattr(self.args, "merge_mode", None) == "geodesic" and not getattr(
+            self.args,
+            "geodesic_use_fishers",
+            False,
+        ):
+            return None
         concept_fisher_path = getattr(self.args, "concept_fisher_path", None)
         style_fisher_path = getattr(self.args, "style_fisher_path", None)
         if concept_fisher_path is None and style_fisher_path is None:
@@ -425,7 +741,7 @@ class GradientsMergeInferencer(MOFTInferencer):
         if explicit_mode is not None:
             return explicit_mode
         if self._fisher_paths() is not None:
-            return "diagonal_fisher_rescaled" if getattr(self.args, "rescale", False) else "diagonal_fisher"
+            return "fisher_rescaled" if getattr(self.args, "rescale", False) else "fisher"
         return "standard_rescaled" if getattr(self.args, "rescale", False) else "standard"
 
     def setup_model(self):
@@ -518,6 +834,7 @@ class GradientsMergeInferencer(MOFTInferencer):
             example_fisher_key = _adapter_key_to_fisher_key(example_adapter_key, processor_keys)
             _log_merge(f"Fisher key naming: adapter={example_adapter_key}")
             _log_merge(f"Fisher key naming: fisher ={example_fisher_key}")
+            _log_merge(f"Fisher backend={getattr(self.args, 'fisher_backend', 'diagonal')}")
             if getattr(self.args, "fisher_min", None) is not None:
                 _log_merge(f"clipping Fisher values below {self.args.fisher_min:g}")
             if getattr(self.args, "fisher_rescale", None) is not None:
@@ -528,6 +845,9 @@ class GradientsMergeInferencer(MOFTInferencer):
         )
         merge_alphas = getattr(self.args, "alphas", None)
         _log_merge(f"alphas concept/style={merge_alphas if merge_alphas is not None else [1.0, 1.0]}")
+        correction_mu = _fisher_correction_mu(self.args)
+        if correction_mu is not None:
+            _log_merge(f"post-merge correction mu={correction_mu:g}")
         shape_counts = Counter(tuple(concept_state[key].shape) for key in merge_keys)
         side_counts = Counter(key.rsplit(".", 1)[-1] for key in merge_keys)
         projection_counts = Counter(
@@ -550,9 +870,22 @@ class GradientsMergeInferencer(MOFTInferencer):
         )
         _log_merge(f"summary: tensor shapes={shape_summary}")
         merged_state = {}
-        OFTMerging = _load_root_oft_merging_class()
-        merge_engine = OFTMerging(device=str(self.device))
-        _log_merge("initialized OFTMerging engine once for this adapter merge")
+        geodesic_backend = getattr(self.args, "geodesic_backend", "cayley")
+        fisher_backend = getattr(self.args, "fisher_backend", "diagonal")
+        if merge_mode == "geodesic" and geodesic_backend == "cayley":
+            merge_engine = None
+            _log_merge("using fast Cayley geodesic merge for this adapter merge")
+        else:
+            merger_cls = (
+                _load_root_oft_geodesic_merging_class()
+                if merge_mode == "geodesic"
+                else _load_root_oft_merging_class()
+            )
+            if merge_mode == "geodesic":
+                merge_engine = merger_cls(device=str(self.device))
+            else:
+                merge_engine = merger_cls(device=str(self.device), fisher_backend=fisher_backend)
+            _log_merge(f"initialized {merger_cls.__name__} engine once for this adapter merge")
         merge_start = time.time()
         merged_count = 0
         slowest_key = None
@@ -564,21 +897,33 @@ class GradientsMergeInferencer(MOFTInferencer):
                 fishers = None
                 if concept_fisher is not None:
                     fisher_key = _adapter_key_to_fisher_key(key, processor_keys)
-                    fishers = [concept_fisher[fisher_key], style_fisher[fisher_key]]
-                    fisher_min = getattr(self.args, "fisher_min", None)
-                    if fisher_min is not None:
-                        fishers = [fisher.clamp_min(fisher_min) for fisher in fishers]
-                    fisher_rescale = getattr(self.args, "fisher_rescale", None)
-                    if fisher_rescale is not None:
-                        fishers = [fisher * fisher_rescale for fisher in fishers]
+                    fishers = [
+                        _fisher_layer(concept_fisher, fisher_key, fisher_backend),
+                        _fisher_layer(style_fisher, fisher_key, fisher_backend),
+                    ]
+                    fishers = [
+                        _prepare_fisher_layer(
+                            fisher,
+                            fisher_min=getattr(self.args, "fisher_min", None),
+                            fisher_rescale=getattr(self.args, "fisher_rescale", None),
+                        )
+                        for fisher in fishers
+                    ]
                 tensor_start = time.time()
-                merged_state[key] = _gradients_merge_with_merging_py(
+                merged = _gradients_merge_with_merging_py(
                     [concept_tensor, style_tensor],
                     device=concept_tensor.device,
                     mode=merge_mode,
                     fishers=fishers,
                     merger=merge_engine,
                     alphas=merge_alphas,
+                    geodesic_backend=geodesic_backend,
+                    fisher_backend=fisher_backend,
+                )
+                merged_state[key] = _diagonal_fisher_correction(
+                    merged,
+                    merge_alphas,
+                    correction_mu,
                 )
                 tensor_seconds = time.time() - tensor_start
                 merged_count += 1
@@ -727,27 +1072,46 @@ class MOFTMergeInferencer(BaseInferencer):
 
     def setup_base_model(self):
         # Here we create base models
-        print("setup_base_model SDXL ...")
-        self.scheduler = DDIMScheduler.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="scheduler"
+        print("setup_base_model SDXL ...", flush=True)
+        model_name_or_path = self.config['pretrained_model_name_or_path']
+        self.scheduler = _load_pretrained(
+            "scheduler", DDIMScheduler, model_name_or_path, subfolder="scheduler"
         )
-        self.unet = UNet2DConditionModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="unet"
-        ).to(self.device)
-        self.unet_style = UNet2DConditionModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="unet"
-        ).to(self.device)
-        self.vae = AutoencoderKL.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.unet = _load_pretrained_on_device(
+            "concept UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
+        )
+        self.unet_style = _load_pretrained_on_device(
+            "style UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
+        )
+        self.vae = _load_pretrained(
+            "VAE",
+            AutoencoderKL,
+            model_name_or_path,
             subfolder="vae", revision=self.config['revision']
         )
-        self.tokenizer = CLIPTokenizer.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.tokenizer = _load_pretrained(
+            "tokenizer",
+            CLIPTokenizer,
+            model_name_or_path,
             subfolder="tokenizer", revision=self.config['revision']
         )
-        self.text_encoder = CLIPTextModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.tokenizer_2 = _load_pretrained(
+            "tokenizer_2",
+            CLIPTokenizer,
+            model_name_or_path,
+            subfolder="tokenizer_2", revision=self.config['revision']
+        )
+        self.text_encoder = _load_pretrained(
+            "text encoder",
+            CLIPTextModel,
+            model_name_or_path,
             subfolder="text_encoder", revision=self.config['revision']
+        )
+        self.text_encoder_2 = _load_pretrained(
+            "text encoder 2",
+            CLIPTextModelWithProjection,
+            model_name_or_path,
+            subfolder="text_encoder_2", revision=self.config['revision']
         )
 
     def setup_model(self,):
@@ -1086,26 +1450,45 @@ class MOFTMergeFastInferencer(BaseInferencer):
     def setup_base_model(self):
         # Here we create base models
         print("setup_base_model SDXL ...")
-        self.scheduler = DDIMScheduler.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="scheduler"
+        model_name_or_path = self.config['pretrained_model_name_or_path']
+        self.scheduler = _load_pretrained(
+            "fast scheduler", DDIMScheduler, model_name_or_path, subfolder="scheduler"
         )
-        self.unet = UNet2DConditionModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="unet"
-        ).to(self.device)
-        self.unet_style = UNet2DConditionModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'], subfolder="unet"
-        ).to(self.device)
-        self.vae = AutoencoderKL.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.unet = _load_pretrained_on_device(
+            "fast concept UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
+        )
+        self.unet_style = _load_pretrained_on_device(
+            "fast style UNet", UNet2DConditionModel, model_name_or_path, self.device, subfolder="unet"
+        )
+        self.vae = _load_pretrained(
+            "fast VAE",
+            AutoencoderKL,
+            model_name_or_path,
             subfolder="vae", revision=self.config['revision']
         )
-        self.tokenizer = CLIPTokenizer.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.tokenizer = _load_pretrained(
+            "fast tokenizer",
+            CLIPTokenizer,
+            model_name_or_path,
             subfolder="tokenizer", revision=self.config['revision']
         )
-        self.text_encoder = CLIPTextModel.from_pretrained(
-            self.config['pretrained_model_name_or_path'],
+        self.tokenizer_2 = _load_pretrained(
+            "fast tokenizer_2",
+            CLIPTokenizer,
+            model_name_or_path,
+            subfolder="tokenizer_2", revision=self.config['revision']
+        )
+        self.text_encoder = _load_pretrained(
+            "fast text encoder",
+            CLIPTextModel,
+            model_name_or_path,
             subfolder="text_encoder", revision=self.config['revision']
+        )
+        self.text_encoder_2 = _load_pretrained(
+            "fast text encoder 2",
+            CLIPTextModelWithProjection,
+            model_name_or_path,
+            subfolder="text_encoder_2", revision=self.config['revision']
         )
 
     def setup_model(self,):

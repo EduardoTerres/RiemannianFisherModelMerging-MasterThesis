@@ -11,7 +11,7 @@ context/*
 data/*
 outputs/*
 _outputs_d2/*
-wandb/*
+**/wandb/*
 miniconda.sh
 OrthoMerge/models/*
 OrthoMerge/outputs/*

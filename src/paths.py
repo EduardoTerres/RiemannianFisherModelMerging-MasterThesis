@@ -27,7 +27,8 @@ class ModelFamily:
     def __str__(self):
         return self.name
 
-MODELS_DIR = ROOTDIR / "data" / "models"
+# MODELS_DIR = ROOTDIR / "data" / "models"
+MODELS_DIR = Path("/scratch-shared/eterres/models")
 FISHERS_DIR = Path("/scratch-shared/eterres/fishers")
 
 ADAPTER_TASK_NAMES = {

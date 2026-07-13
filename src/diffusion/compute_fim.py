@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,16 @@ from src.diffusion.dataset_1 import CONCEPT_ADAPTERS, STYLE_ADAPTERS, get_entry
 
 
 BASE_PROMPT = "a photo of {0}"
+VAE_MODEL_PATH = "madebyollin/sdxl-vae-fp16-fix"
+HF_HUB_CACHE_ENV = "HF_HUB_CACHE"
+HF_HOME_ENV = "HF_HOME"
+HF_HUB_SUBDIR = "hub"
+SCHEDULER_SUBFOLDER = "scheduler"
+UNET_SUBFOLDER = "unet"
+TOKENIZER_SUBFOLDER = "tokenizer"
+TOKENIZER_2_SUBFOLDER = "tokenizer_2"
+TEXT_ENCODER_SUBFOLDER = "text_encoder"
+TEXT_ENCODER_2_SUBFOLDER = "text_encoder_2"
 WANDB_PROJECT = "fim"
 WANDB_GROUP = "fim_diffusion"
 WANDB_ENTITY = None
@@ -32,12 +43,27 @@ WANDB_METRIC_MAX_ENTRIES = 200_000
 WANDB_LOG_EVERY = 1
 
 
+def log_stage(message):
+    print(f"[fim {time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+
+
+def weight_dtype(name):
+    return {
+        "float32": torch.float32,
+        "bf16": torch.bfloat16,
+        "fp16": torch.float16,
+    }[name]
+
+
 def maybe_init_wandb(args, config):
     try:
         import wandb
     except ImportError:
+        log_stage("wandb not installed; continuing without wandb")
         return None
     if wandb.run is None:
+        start = time.time()
+        log_stage("START wandb.init")
         wandb.init(
             project=WANDB_PROJECT,
             entity=WANDB_ENTITY,
@@ -58,6 +84,7 @@ def maybe_init_wandb(args, config):
         )
         wandb.define_metric("fim/step")
         wandb.define_metric("fim/*", step_metric="fim/step")
+        log_stage(f"DONE wandb.init in {time.time() - start:.1f}s")
     return wandb
 
 
@@ -120,14 +147,30 @@ def build_moft_processors(unet, config, device):
     return processors
 
 
-def lower_triangle_values(tensor):
-    row, col = torch.tril_indices(tensor.shape[-2], tensor.shape[-1], offset=-1, device=tensor.device)
+def upper_triangle_values(tensor):
+    row, col = torch.triu_indices(tensor.shape[-2], tensor.shape[-1], offset=1, device=tensor.device)
     return tensor[..., row, col]
+
+
+@torch.no_grad()
+def precompute_transport_rotations(named_params):
+    transport_rotations = {}
+    log_stage(f"START precompute blockwise transport rotations for {len(named_params)} tensors")
+    start = time.time()
+    for name, param in tqdm(named_params.items(), desc="Precomputing blockwise transport", unit="tensor"):
+        skew_matrix = 0.5 * (param.detach().float() - param.detach().float().transpose(-1, -2))
+        transport_rotations[name] = torch.matrix_exp(skew_matrix / 2).detach()
+    log_stage(f"DONE precompute blockwise transport rotations in {time.time() - start:.1f}s")
+    return transport_rotations
+
+
+def transport_skew_gradient(skew_grad, transport_rotation):
+    return transport_rotation @ skew_grad @ transport_rotation.transpose(-1, -2)
 
 
 def apply_entry_defaults(args):
     if args.dataset_name is None:
-        return args
+        raise ValueError("dataset_name must be set by iter_entries().")
     entry = get_entry(args.entry_type, args.dataset_name)
     args.adapter_path = entry["adapter_path"]
     args.train_data_dir = entry["dataset_path"]
@@ -138,11 +181,50 @@ def apply_entry_defaults(args):
 
 
 def iter_entries(args):
-    if args.all_dataset:
-        return STYLE_ADAPTERS
-    if args.dataset_name is not None:
+    if getattr(args, "entry_type", None) is not None or getattr(args, "dataset_name", None) is not None:
+        if args.entry_type is None or args.dataset_name is None:
+            raise ValueError("--entry_type and --dataset_name must be set together.")
         return [get_entry(args.entry_type, args.dataset_name)]
-    return [None]
+
+    entries = []
+    selected = set(args.datasets)
+    if "concepts" in selected:
+        entries += [get_entry("concept", "cat2")] if args.debug else CONCEPT_ADAPTERS
+    if "styles" in selected:
+        entries += [get_entry("style", "01_07")] if args.debug else STYLE_ADAPTERS
+    return entries
+
+
+def resolve_seed(args, config):
+    return args.seed if args.seed is not None else getattr(config, "seed", 8)
+
+
+def resolve_repo_path(path):
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    return REPO_ROOT / path
+
+
+def get_hf_cache_dir():
+    return os.environ.get(HF_HUB_CACHE_ENV) or (
+        os.path.join(os.environ[HF_HOME_ENV], HF_HUB_SUBDIR) if os.environ.get(HF_HOME_ENV) else None
+    )
+
+
+def pretrained_load_kwargs(args, config, *, revision=True):
+    kwargs = {
+        "cache_dir": get_hf_cache_dir(),
+    }
+    if revision:
+        kwargs["revision"] = config.revision
+    return kwargs
+
+
+def vae_load_kwargs(args):
+    return {
+        "cache_dir": get_hf_cache_dir(),
+    }
 
 
 def get_placeholder(config, args):
@@ -158,6 +240,8 @@ def get_class_name(config, args):
 
 
 def build_dataset_and_prompt(args, config, tokenizers):
+    log_stage(f"START build dataset entry_type={args.entry_type} train_data_dir={args.train_data_dir}")
+    start = time.time()
     placeholder = get_placeholder(config, args)
     class_name = get_class_name(config, args)
     if args.entry_type == "style":
@@ -176,113 +260,267 @@ def build_dataset_and_prompt(args, config, tokenizers):
             collate_fn=lambda examples: collate_fn(examples, False),
             num_workers=0,
         )
+        log_stage(f"DONE build style dataset len={len(dataset)} prompt={dataset.instance_prompt!r} in {time.time() - start:.1f}s")
         return dataset, loader, dataset.instance_prompt
 
     dataset = ImageDataset(args.train_data_dir, resolution=config.resolution, repeats=args.repeats)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     prompt = BASE_PROMPT.format(f"{placeholder} {class_name}")
+    log_stage(f"DONE build concept dataset len={len(dataset)} prompt={prompt!r} in {time.time() - start:.1f}s")
     return dataset, loader, prompt
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config_path", default="output/concept_style/sdxl_merge/example/logs/hparams.yml")
-    parser.add_argument("--adapter_path", default="/scratch-shared/eterres/SDXL/concepts/pytorch_lora_weights_cat.safetensors")
-    parser.add_argument("--train_data_dir", default="/scratch-shared/eterres/SDXL/concepts/datasets/cat")
-    parser.add_argument("--output_dir", default="/scratch-shared/eterres/fishers")
-    parser.add_argument("--output_name", default="cat_oft_lie_fim.safetensors")
-    parser.add_argument("--entry_type", choices=["concept", "style"], default="concept")
+    parser.add_argument("--config_path", default="src/diffusion/config/config.yaml")
+    parser.add_argument("--output_dir", default="/scratch-shared/eterres/fishers/sdxl")
+    parser.add_argument("--datasets", nargs="+", choices=["concepts", "styles"], default=["concepts", "styles"])
+    parser.add_argument("--entry_type", choices=["concept", "style"], default=None)
     parser.add_argument("--dataset_name", default=None)
-    parser.add_argument("--all_dataset", action="store_true")
+    parser.add_argument("--debug", action="store_true")
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--repeats", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--weight_dtype", choices=["float32", "bf16", "fp16"], default="float32")
     return parser.parse_args()
 
 
-def compute_one(args):
-    args = apply_entry_defaults(args)
+def load_base_components(args, config, device):
+    pretrained_model_path = config.pretrained_model_name_or_path
+    vae_model_path = VAE_MODEL_PATH
+    pretrained_kwargs = pretrained_load_kwargs(args, config)
+    vae_kwargs = vae_load_kwargs(args)
+    dtype = weight_dtype(args.weight_dtype)
+    log_stage(
+        f"Using device={device}; pretrained_model={config.pretrained_model_name_or_path}; "
+        f"revision={config.revision}; vae_model={vae_model_path}; cache_dir={pretrained_kwargs['cache_dir']}; "
+        f"local_files_only=False; weight_dtype={args.weight_dtype}"
+    )
 
-    if args.device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but unavailable.")
-
-    with open(args.config_path, "r", encoding="utf-8") as handle:
-        config = SimpleNamespace(**yaml.safe_load(handle))
-    wandb = maybe_init_wandb(args, config)
-
-    device = torch.device(args.device)
-    torch.manual_seed(getattr(config, "seed", 8))
-
+    log_stage(
+        "START load scheduler "
+        f"model={pretrained_model_path} subfolder={SCHEDULER_SUBFOLDER} revision={config.revision}"
+    )
+    start = time.time()
     scheduler = DDPMScheduler.from_pretrained(
-        config.pretrained_model_name_or_path,
-        subfolder="scheduler",
-        revision=config.revision,
+        pretrained_model_path,
+        subfolder=SCHEDULER_SUBFOLDER,
+        **pretrained_kwargs,
     )
-    unet = UNet2DConditionModel.from_pretrained(
-        config.pretrained_model_name_or_path,
-        subfolder="unet",
-        revision=config.revision,
-    ).to(device)
-    vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix").to(device)
-    tokenizer = CLIPTokenizer.from_pretrained(
-        config.pretrained_model_name_or_path,
-        subfolder="tokenizer",
-        revision=config.revision,
-    )
-    tokenizer_2 = CLIPTokenizer.from_pretrained(
-        config.pretrained_model_name_or_path,
-        subfolder="tokenizer_2",
-        revision=config.revision,
-    )
-    text_encoder = CLIPTextModel.from_pretrained(
-        config.pretrained_model_name_or_path,
-        subfolder="text_encoder",
-        revision=config.revision,
-    ).to(device)
-    text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
-        config.pretrained_model_name_or_path,
-        subfolder="text_encoder_2",
-        revision=config.revision,
-    ).to(device)
+    log_stage(f"DONE load scheduler in {time.time() - start:.1f}s")
 
+    log_stage(
+        "START load UNet "
+        f"model={pretrained_model_path} subfolder={UNET_SUBFOLDER} revision={config.revision}"
+    )
+    start = time.time()
+    unet = UNet2DConditionModel.from_pretrained(
+        pretrained_model_path,
+        subfolder=UNET_SUBFOLDER,
+        torch_dtype=dtype,
+        **pretrained_kwargs,
+    )
+    log_stage(f"DONE load UNet from_pretrained in {time.time() - start:.1f}s")
+    log_stage(f"START move UNet to {device}")
+    start = time.time()
+    unet = unet.to(device)
+    log_stage(f"DONE move UNet to {device} in {time.time() - start:.1f}s")
+
+    log_stage(f"START load VAE model={vae_model_path}")
+    start = time.time()
+    vae = AutoencoderKL.from_pretrained(
+        vae_model_path,
+        torch_dtype=dtype,
+        **vae_kwargs,
+    )
+    log_stage(f"DONE load VAE from_pretrained in {time.time() - start:.1f}s")
+    log_stage(f"START move VAE to {device}")
+    start = time.time()
+    vae = vae.to(device)
+    log_stage(f"DONE move VAE to {device} in {time.time() - start:.1f}s")
+
+    log_stage(
+        "START load tokenizer "
+        f"model={pretrained_model_path} subfolder={TOKENIZER_SUBFOLDER} revision={config.revision}"
+    )
+    start = time.time()
+    tokenizer = CLIPTokenizer.from_pretrained(
+        pretrained_model_path,
+        subfolder=TOKENIZER_SUBFOLDER,
+        **pretrained_kwargs,
+    )
+    log_stage(f"DONE load tokenizer in {time.time() - start:.1f}s")
+
+    log_stage(
+        "START load tokenizer_2 "
+        f"model={pretrained_model_path} subfolder={TOKENIZER_2_SUBFOLDER} revision={config.revision}"
+    )
+    start = time.time()
+    tokenizer_2 = CLIPTokenizer.from_pretrained(
+        pretrained_model_path,
+        subfolder=TOKENIZER_2_SUBFOLDER,
+        **pretrained_kwargs,
+    )
+    log_stage(f"DONE load tokenizer_2 in {time.time() - start:.1f}s")
+
+    log_stage(
+        "START load text_encoder "
+        f"model={pretrained_model_path} subfolder={TEXT_ENCODER_SUBFOLDER} revision={config.revision}"
+    )
+    start = time.time()
+    text_encoder = CLIPTextModel.from_pretrained(
+        pretrained_model_path,
+        subfolder=TEXT_ENCODER_SUBFOLDER,
+        torch_dtype=dtype,
+        **pretrained_kwargs,
+    )
+    log_stage(f"DONE load text_encoder from_pretrained in {time.time() - start:.1f}s")
+    log_stage(f"START move text_encoder to {device}")
+    start = time.time()
+    text_encoder = text_encoder.to(device)
+    log_stage(f"DONE move text_encoder to {device} in {time.time() - start:.1f}s")
+
+    log_stage(
+        "START load text_encoder_2 "
+        f"model={pretrained_model_path} subfolder={TEXT_ENCODER_2_SUBFOLDER} revision={config.revision}"
+    )
+    start = time.time()
+    text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+        pretrained_model_path,
+        subfolder=TEXT_ENCODER_2_SUBFOLDER,
+        torch_dtype=dtype,
+        **pretrained_kwargs,
+    )
+    log_stage(f"DONE load text_encoder_2 from_pretrained in {time.time() - start:.1f}s")
+    log_stage(f"START move text_encoder_2 to {device}")
+    start = time.time()
+    text_encoder_2 = text_encoder_2.to(device)
+    log_stage(f"DONE move text_encoder_2 to {device} in {time.time() - start:.1f}s")
+
+    log_stage("START freeze base model parameters")
     vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
     text_encoder_2.requires_grad_(False)
+    log_stage("DONE freeze base model parameters")
 
+    log_stage("START build MOFT attention processors")
+    start = time.time()
     unet.set_attn_processor(build_moft_processors(unet, config, device))
+    log_stage(f"DONE build/set MOFT attention processors in {time.time() - start:.1f}s")
+
+    log_stage("START wrap AttnProcsLayers")
+    start = time.time()
     moft_layers = AttnProcsLayers(unet.attn_processors)
-    moft_layers.load_state_dict(load_file(args.adapter_path, device=str(device)))
+    log_stage(f"DONE wrap AttnProcsLayers in {time.time() - start:.1f}s")
+
+    log_stage(f"START move MOFT layers to {device}")
+    start = time.time()
     moft_layers = moft_layers.to(device)
+    log_stage(f"DONE move MOFT layers to {device} in {time.time() - start:.1f}s")
+
+    log_stage("START set trainable MOFT parameters")
+    trainable_count = 0
     for name, param in moft_layers.named_parameters():
         param.requires_grad_(name.endswith((".L", ".R")))
+        if param.requires_grad:
+            trainable_count += 1
+    log_stage(f"DONE set trainable MOFT parameters trainable_tensors={trainable_count}")
+
+    return SimpleNamespace(
+        scheduler=scheduler,
+        unet=unet,
+        vae=vae,
+        tokenizer=tokenizer,
+        tokenizer_2=tokenizer_2,
+        text_encoder=text_encoder,
+        text_encoder_2=text_encoder_2,
+        moft_layers=moft_layers,
+    )
+
+
+def compute_one(args, config, base):
+    args = apply_entry_defaults(args)
+    log_stage(
+        f"START compute_one entry_type={args.entry_type} dataset_name={args.dataset_name} "
+        f"adapter_path={args.adapter_path} train_data_dir={args.train_data_dir} output_name={args.output_name}"
+    )
+
+    wandb = maybe_init_wandb(args, config)
+
+    device = torch.device(args.device)
+    seed = resolve_seed(args, config)
+    log_stage(f"Using seed={seed}")
+    torch.manual_seed(seed)
+    scheduler = base.scheduler
+    unet = base.unet
+    vae = base.vae
+    tokenizer = base.tokenizer
+    tokenizer_2 = base.tokenizer_2
+    text_encoder = base.text_encoder
+    text_encoder_2 = base.text_encoder_2
+    moft_layers = base.moft_layers
+
+    log_stage(f"START load adapter safetensors {args.adapter_path}")
+    start = time.time()
+    adapter_state = load_file(args.adapter_path, device=str(device))
+    log_stage(f"DONE load adapter safetensors tensors={len(adapter_state)} in {time.time() - start:.1f}s")
+
+    log_stage("START load adapter state into MOFT layers")
+    start = time.time()
+    moft_layers.load_state_dict(adapter_state)
+    log_stage(f"DONE load adapter state into MOFT layers in {time.time() - start:.1f}s")
 
     _, loader, prompt = build_dataset_and_prompt(args, config, (tokenizer, tokenizer_2))
+    log_stage(f"START tokenize prompt {prompt!r}")
+    start = time.time()
     input_ids_list = tokenize_prompt((tokenizer, tokenizer_2), prompt)
+    log_stage(f"DONE tokenize prompt in {time.time() - start:.1f}s")
 
+    log_stage("START collect named trainable parameters")
+    named_params = {
+        name: param
+        for name, param in moft_layers.named_parameters()
+        if param.requires_grad
+    }
+    log_stage(f"DONE collect named trainable parameters count={len(named_params)}")
+    transport_rotations = precompute_transport_rotations(named_params)
+
+    log_stage("START allocate Fisher tensors on CPU")
+    start = time.time()
     fisher = {
         name: torch.zeros(
             (*param.shape[:-2], param.shape[-1] * (param.shape[-1] - 1) // 2),
             dtype=torch.float32,
         )
-        for name, param in moft_layers.named_parameters()
-        if param.requires_grad
+        for name, param in named_params.items()
     }
+    log_stage(f"DONE allocate Fisher tensors count={len(fisher)} in {time.time() - start:.1f}s")
 
     count = 0
     previous_fisher = None
     unet.train()
-    for batch_idx, batch in enumerate(tqdm(loader, desc="Computing OFT Lie-basis FIM"), 1):
+    log_stage("START FIM dataloader loop")
+    for batch_idx, batch in enumerate(tqdm(loader, desc="Computing transported OFT Lie-basis FIM"), 1):
+        if batch_idx == 1:
+            log_stage("START first FIM batch")
         if args.num_samples is not None and count >= args.num_samples:
             break
 
+        if batch_idx == 1:
+            log_stage("START first batch tensor transfer/prep")
         images = batch["pixel_values"].to(device) if args.entry_type == "style" else batch["image"].to(device) * 2.0 - 1.0
         original_sizes = batch["original_sizes"].to(device)
         crop_top_lefts = batch["crop_top_lefts"].to(device)
         batch_size = images.shape[0]
+        if batch_idx == 1:
+            log_stage("DONE first batch tensor transfer/prep")
 
         with torch.no_grad():
+            if batch_idx == 1:
+                log_stage("START first batch VAE/noise/text conditioning")
             latents = vae.encode(images).latent_dist.sample() * vae.config.scaling_factor
             noise = torch.randn_like(latents)
             timesteps = torch.randint(
@@ -297,7 +535,11 @@ def compute_one(args):
             encoder_hidden_states = encoder_hidden_states.expand(batch_size, -1, -1)
             pooled = pooled.expand(batch_size, -1)
             add_time_ids = compute_time_ids(original_sizes, crop_top_lefts, config.resolution)
+            if batch_idx == 1:
+                log_stage("DONE first batch VAE/noise/text conditioning")
 
+        if batch_idx == 1:
+            log_stage("START first batch UNet forward/backward")
         unet.zero_grad(set_to_none=True)
         outputs = unet(
             noisy_latents,
@@ -307,17 +549,34 @@ def compute_one(args):
         ).sample
         loss = F.mse_loss(outputs.float(), target.float(), reduction="mean")
         loss.backward()
+        if batch_idx == 1:
+            log_stage("DONE first batch UNet forward/backward")
 
         with torch.no_grad():
-            for name, param in moft_layers.named_parameters():
-                if not param.requires_grad or param.grad is None:
+            if batch_idx == 1:
+                log_stage("START first batch gradient transport/accumulation")
+            param_iter = named_params.items()
+            if batch_idx == 1:
+                param_iter = tqdm(param_iter, desc="Transporting gradients for first batch", unit="tensor")
+            for name, param in param_iter:
+                if param.grad is None:
                     continue
                 skew_grad = 0.5 * (param.grad.detach().float() - param.grad.detach().float().transpose(-1, -2))
-                fisher[name] += lower_triangle_values(skew_grad).cpu().pow(2)
+                transported_skew_grad = transport_skew_gradient(skew_grad, transport_rotations[name])
+                transported_grad = upper_triangle_values(transported_skew_grad)
+                fisher[name] += transported_grad.pow(2).cpu()
+            if batch_idx == 1:
+                log_stage("DONE first batch gradient transport/accumulation")
 
         count += batch_size
+        if batch_idx == 1:
+            log_stage("DONE first FIM batch")
         if WANDB_LOG_EVERY > 0 and batch_idx % WANDB_LOG_EVERY == 0:
+            if batch_idx == 1:
+                log_stage("START first wandb Fisher metric log")
             previous_fisher = log_fisher_metrics(wandb, fisher, count, previous_fisher)
+            if batch_idx == 1:
+                log_stage("DONE first wandb Fisher metric log")
 
     if count == 0:
         raise RuntimeError("No samples processed.")
@@ -327,23 +586,41 @@ def compute_one(args):
 
     os.makedirs(args.output_dir, exist_ok=True)
     output_path = os.path.join(args.output_dir, args.output_name)
+    log_stage(f"START save Fisher to {output_path}")
+    start = time.time()
     save_file(fisher, output_path)
+    log_stage(f"DONE save Fisher in {time.time() - start:.1f}s")
     if wandb is not None and wandb.run is not None:
+        log_stage("START final wandb log/finish")
         wandb.log({"fim/saved": 1, "fim/num_tensors": len(fisher), "fim/final_samples": count})
         wandb.finish()
-    print(f"Saved OFT Lie-basis diagonal FIM to {output_path}")
+        log_stage("DONE final wandb log/finish")
+    print(f"Saved transported OFT Lie-basis diagonal FIM to {output_path}")
 
 
 def main():
     args = parse_args()
-    if args.all_dataset:
-        for entry in iter_entries(args):
-            run_args = argparse.Namespace(**vars(args))
-            run_args.entry_type = entry["type"]
-            run_args.dataset_name = entry["name"]
-            compute_one(run_args)
-    else:
-        compute_one(args)
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but unavailable.")
+
+    config_path = resolve_repo_path(args.config_path)
+    log_stage(f"START load config {config_path}")
+    start = time.time()
+    with open(config_path, "r", encoding="utf-8") as handle:
+        config = SimpleNamespace(**yaml.safe_load(handle))
+    log_stage(f"DONE load config in {time.time() - start:.1f}s")
+
+    device = torch.device(args.device)
+    seed = resolve_seed(args, config)
+    log_stage(f"Using seed={seed}")
+    torch.manual_seed(seed)
+    base = load_base_components(args, config, device)
+
+    for entry in iter_entries(args):
+        run_args = argparse.Namespace(**vars(args))
+        run_args.entry_type = entry["type"]
+        run_args.dataset_name = entry["name"]
+        compute_one(run_args, config, base)
 
 
 if __name__ == "__main__":

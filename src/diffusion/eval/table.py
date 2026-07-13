@@ -123,14 +123,14 @@ def method_spec(method, args):
         }
 
     mu_prefixes = (
-        ("fisher_kfac_mu_", "diagonal_fisher", "kfac", "diagonal_fisher_kfac"),
-        ("fisher_kfac_mu", "diagonal_fisher", "kfac", "diagonal_fisher_kfac"),
-        ("fisher_mu_", "diagonal_fisher", "diagonal", "diagonal_fisher"),
-        ("fisher_mu", "diagonal_fisher", "diagonal", "diagonal_fisher"),
-        ("diagonal_fisher_mu_", "diagonal_fisher", "diagonal", "diagonal_fisher"),
-        ("diagonal_fisher_mu", "diagonal_fisher", "diagonal", "diagonal_fisher"),
-        ("kfac_mu_", "diagonal_fisher", "kfac", "diagonal_fisher_kfac"),
-        ("kfac_mu", "diagonal_fisher", "kfac", "diagonal_fisher_kfac"),
+        ("fisher_kfac_mu_", "fisher", "kfac", "diagonal_fisher_kfac"),
+        ("fisher_kfac_mu", "fisher", "kfac", "diagonal_fisher_kfac"),
+        ("fisher_mu_", "fisher", "diagonal", "diagonal_fisher"),
+        ("fisher_mu", "fisher", "diagonal", "diagonal_fisher"),
+        ("diagonal_fisher_mu_", "fisher", "diagonal", "diagonal_fisher"),
+        ("diagonal_fisher_mu", "fisher", "diagonal", "diagonal_fisher"),
+        ("kfac_mu_", "fisher", "kfac", "diagonal_fisher_kfac"),
+        ("kfac_mu", "fisher", "kfac", "diagonal_fisher_kfac"),
     )
     for prefix, mode, backend, display_prefix in mu_prefixes:
         if method.startswith(prefix):

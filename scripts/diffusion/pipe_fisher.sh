@@ -10,11 +10,21 @@
 
 set -e
 
-MU=3  # Fisher correction mu
+MU=0  # Fisher correction mu
+FISHER_BACKEND="diagonal"  # diagonal or kfac
+
+if [[ "${FISHER_BACKEND}" == "diagonal" ]]; then
+  METHOD_NAME="diagonal_fisher_mu_${MU}"
+elif [[ "${FISHER_BACKEND}" == "kfac" ]]; then
+  METHOD_NAME="fisher_kfac_mu_${MU}"
+else
+  echo "Unsupported FISHER_BACKEND=${FISHER_BACKEND}" >&2
+  exit 1
+fi
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/fisher_kfac_mu_${MU}"
+METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/${METHOD_NAME}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -36,9 +46,9 @@ CONCEPTS=(
 )
 
 CONCEPT="${CONCEPTS[${SLURM_ARRAY_TASK_ID:-0}]}"
-ALPHA_CONCEPT=0.25  # concept alpha
-ALPHA_STYLE=0.75    # style alpha
-echo "[pipe_fisher] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
+ALPHA_CONCEPT=0.3  # concept alpha
+ALPHA_STYLE=0.7    # style alpha
+echo "[pipe_fisher] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT} method=${METHOD_NAME} backend=${FISHER_BACKEND}"
 
 python "${REPO_ROOT}/src/diffusion/pipe_gradients.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
@@ -49,7 +59,7 @@ python "${REPO_ROOT}/src/diffusion/pipe_gradients.py" \
   --num_images_per_medium_prompt=10 \
   --fisher_correction_mu=${MU} \
   --replace_inference_output \
-  --fisher_backend kfac
+  --fisher_backend "${FISHER_BACKEND}"
   
   
 # --fisher_min=1e-14  

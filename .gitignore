@@ -5,6 +5,9 @@
 *.pyc
 *.safetensors
 *.out
+*.svg
+*.tex
+*.mp4
 .cache/*
 .matplotlib
 

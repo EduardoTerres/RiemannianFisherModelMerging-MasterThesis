@@ -14,17 +14,27 @@ from torch import Tensor
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from src.merging import OFTMerging, WudiOFTMerging, OFTKarcherMerging, AdaMergingPP
+from src.merging import (
+    AdaMergingPP,
+    OFTKarcherMerging,
+    OFTMerging,
+    OrthoMergeCOFTMerging,
+    OrthoMergeCTIESOFTMerging,
+    OrthoMergeCTSVMOFTMerging,
+    WudiOFTMerging,
+)
 from src.utils import parse_device
 from src.paths import MODEL_FAMILIES_D3_FISHER_PRETRAINED as MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
 # from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
 from src.dataset.dataset_3 import DATASET_3_TEST, build_loader
 
 DATASET_TEST = DATASET_3_TEST
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _build_alpha_optimizer_inputs(
     model_family: ModelFamily,
     device: str,
+    dataset_cache_dir: str | None,
     num_samples: int = 128,
     batch_size: int = 4,
     max_length: int = 128,
@@ -44,6 +54,7 @@ def _build_alpha_optimizer_inputs(
             num_samples=num_samples,
             batch_size=batch_size,
             max_length=max_length,
+            cache_dir=dataset_cache_dir,
         )
         for _, ds_path, ds_name, split, doc_to_text in DATASET_TEST
     ]
@@ -62,6 +73,7 @@ def _build_alpha_optimizer_inputs(
 def _build_adamerging(
     model_family: ModelFamily,
     device: str,
+    dataset_cache_dir: str | None,
     num_samples: int = 256,
     batch_size: int = 16,
     max_length: int = 32,
@@ -81,6 +93,7 @@ def _build_adamerging(
             num_samples=num_samples,
             batch_size=batch_size,
             max_length=max_length,
+            cache_dir=dataset_cache_dir,
         )
         for _, ds_path, ds_name, split, doc_to_text in DATASET_TEST
     ]
@@ -113,8 +126,18 @@ def parse_args():
         "--model_family", type=str, choices=list(MODEL_FAMILIES), required=True,
     )
     parser.add_argument(
-        "--merge_method", type=str, choices=["gradients", "wudi", "karcher", "adamerging"],
-        help="Merging method: 'gradients', 'wudi', 'karcher' (Karcher mean on SO(n)), 'adamerging'.",  # noqa: E501
+        "--merge_method",
+        type=str,
+        choices=[
+            "gradients",
+            "wudi",
+            "karcher",
+            "adamerging",
+            "orthomerge_c",
+            "orthomerge_c_ties",
+            "orthomerge_c_tsvm",
+        ],
+        help="Merging method: gradients, wudi, karcher, adamerging, or OrthoMerge-C baselines.",  # noqa: E501
     )
     parser.add_argument(
         "--merge_mode",
@@ -159,6 +182,12 @@ def parse_args():
         help="Device to use (e.g., 'gpu', 'cpu').",
     )
     parser.add_argument(
+        "--dataset-cache-dir",
+        type=Path,
+        default=REPO_ROOT / "data" / "hf_cache",
+        help="Hugging Face datasets cache used for AdaMerging calibration loaders.",
+    )
+    parser.add_argument(
         "--optimize_alphas",
         type=str,
         choices=["adamerging", "adamergingpp", "adamerging_equal", "adamergingpp_equal"],
@@ -171,6 +200,7 @@ def parse_args():
 def main():
     args = parse_args()
     args.device = parse_device(args.device)
+    dataset_cache_dir = str(args.dataset_cache_dir) if args.dataset_cache_dir else None
 
     model_family = MODEL_FAMILIES[args.model_family]
     base_model_path = model_family.base_model_path
@@ -184,7 +214,11 @@ def main():
             for path in fisher_paths
         ]
 
-    use_wandb = not (
+    use_wandb = args.merge_method not in {
+        "orthomerge_c",
+        "orthomerge_c_ties",
+        "orthomerge_c_tsvm",
+    } and not (
         args.merge_method == "gradients"
         and args.merge_mode in {
             "standard",
@@ -197,12 +231,19 @@ def main():
         wandb.init(
             project=WANDB_PROJECT,
             name=f"{args.merge_method}-{args.merge_mode}-{model_family.name}",
-            config=vars(args),
+            config={
+                key: str(value) if isinstance(value, Path) else value
+                for key, value in vars(args).items()
+            },
         )
 
     merged_weights = None
     if args.merge_method == "adamerging":
-        merged_weights = _build_adamerging(model_family=model_family, device=args.device)
+        merged_weights = _build_adamerging(
+            model_family=model_family,
+            device=args.device,
+            dataset_cache_dir=dataset_cache_dir,
+        )
     else:
         if args.merge_method == "gradients":
             merging = OFTMerging(
@@ -215,6 +256,20 @@ def main():
             merging = WudiOFTMerging(device=args.device)
         elif args.merge_method == "karcher":
             merging = OFTKarcherMerging(lam=args.lam, alphas=args.alphas, device=args.device)
+        elif args.merge_method == "orthomerge_c":
+            merging = OrthoMergeCOFTMerging(lam=args.lam, alphas=args.alphas, device=args.device)
+        elif args.merge_method == "orthomerge_c_ties":
+            merging = OrthoMergeCTIESOFTMerging(
+                lam=args.lam,
+                alphas=args.alphas,
+                device=args.device,
+            )
+        elif args.merge_method == "orthomerge_c_tsvm":
+            merging = OrthoMergeCTSVMOFTMerging(
+                lam=args.lam,
+                alphas=args.alphas,
+                device=args.device,
+            )
         else:
             raise ValueError(f"Unsupported merge method: {args.merge_method}")
 
@@ -226,7 +281,9 @@ def main():
         )
         if args.optimize_alphas is not None:
             model, task_loaders, task_names = _build_alpha_optimizer_inputs(
-                model_family=model_family, device=args.device,
+                model_family=model_family,
+                device=args.device,
+                dataset_cache_dir=dataset_cache_dir,
             )
             merge_kwargs["model"] = model
             merge_kwargs["task_loaders"] = task_loaders

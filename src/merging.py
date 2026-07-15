@@ -581,7 +581,7 @@ class OFTMerging(RiemannianMerging):
 
         for alpha_t, omega_t, f_t in zip(alphas, weights_list, fisher_list):
             ft = f_t.float().to(ref.device)
-            ft = ft / torch.norm(ft, p="fro").clamp(min=1e-8)
+            # ft = ft / torch.norm(ft, p="fro").clamp(min=1e-8)
             A = A + alpha_t * ft
             b = b + alpha_t * (self.lam + ft) * omega_t.float().to(ref.device)
 
@@ -1367,6 +1367,218 @@ class OFTKarcherMerging(OFTMerging):
                 })
 
         return merged_weights
+
+
+class OrthoMergeCOFTMerging(OFTMerging):
+    """OrthoMerge-C Cayley averaging for OFT adapters.
+
+    Public inputs/outputs stay in OFT coordinates ``(num_blocks, d)``.
+    The OrthoMerge-C Cayley step is done in skew-matrix coordinates
+    ``(num_blocks, n, n)``, matching the standalone scripts.
+    """
+
+    def __init__(
+        self,
+        lam: float = 0.0,
+        alphas: Optional[List[float]] = None,
+        device: str = "cpu",
+        theta_agg: str = "mean",
+        direction_weight: str = "theta",
+    ):
+        super().__init__(lam=lam, alphas=alphas, device=device)
+        self.theta_agg = theta_agg
+        self.direction_weight = direction_weight
+
+    def _merge_cayley_Q_list(
+        self,
+        weights_list: List[Tensor],
+        theta_agg: Optional[str] = None,
+        direction_weight: Optional[str] = None,
+    ) -> Tensor:
+        base_shape = weights_list[0].shape
+        Q_stack = torch.stack(weights_list, dim=0)
+        Q_flat = Q_stack.reshape(Q_stack.shape[0], -1)
+
+        theta = torch.linalg.vector_norm(Q_flat, dim=1)
+        u = Q_flat / theta.clamp(min=1e-8).unsqueeze(1)
+
+        direction_weight = direction_weight or self.direction_weight
+        if direction_weight == "theta":
+            w = theta
+        elif direction_weight == "uniform":
+            w = torch.ones_like(theta)
+        else:
+            raise ValueError(f"Unknown direction_weight: {direction_weight}")
+
+        u_sum = (u * w.unsqueeze(1)).sum(dim=0)
+        u_sum_norm = torch.linalg.vector_norm(u_sum)
+        if u_sum_norm < 1e-8:
+            return torch.zeros(base_shape, device=Q_flat.device, dtype=Q_flat.dtype)
+
+        theta_agg = theta_agg or self.theta_agg
+        if theta_agg == "mean":
+            theta_merge = theta.mean()
+        elif theta_agg == "median":
+            theta_merge = theta.median()
+        elif theta_agg == "max":
+            theta_merge = theta.max()
+        else:
+            raise ValueError(f"Unknown theta_agg: {theta_agg}")
+
+        merged = (u_sum / u_sum_norm * theta_merge).reshape(base_shape)
+        return 0.5 * (merged - merged.transpose(-1, -2))
+
+    def merge_formula(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: Optional[List[Dict[str, Tensor]]] = None,
+        mode: MergeMode = "standard",
+        alphas: Optional[Tensor] = None,
+    ) -> Tensor:
+        if mode != "standard":
+            raise ValueError(f"{self.__class__.__name__} only supports standard mode.")
+
+        son_dimension = weights_list[0].shape[-1]
+        skew_list = [
+            self.oft_params_to_skew_matrix(w.float().to(self.device), son_dimension)
+            for w in weights_list
+        ]
+        merged_skew = self._merge_cayley_Q_list(skew_list)
+        return self.skew_matrix_to_oft_params(merged_skew).to(weights_list[0].dtype)
+
+
+class OrthoMergeCTIESOFTMerging(OrthoMergeCOFTMerging):
+    """OrthoMerge-C + TIES for OFT coordinate tensors.
+
+    The Cayley helper inherited from ``OrthoMergeCOFTMerging`` uses skew
+    matrices; the TIES residual merge from the scripts operates on parameter
+    deltas, so here it is applied directly to OFT coordinates.
+    """
+
+    def __init__(
+        self,
+        lam: float = 0.0,
+        alphas: Optional[List[float]] = None,
+        device: str = "cpu",
+        reset_thresh: float = 0.2,
+        chunk_size: int = 50_000_000,
+    ):
+        super().__init__(lam=lam, alphas=alphas, device=device)
+        self.reset_thresh = reset_thresh
+        self.chunk_size = chunk_size
+
+    def _ties(self, weights_list: List[Tensor]) -> Tensor:
+        kept_list = []
+        for delta in weights_list:
+            delta = delta.to(self.device)
+            k = int(delta.numel() * (1 - self.reset_thresh))
+            k = min(max(k, 1), delta.numel())
+            kth_val = delta.abs().flatten().kthvalue(k).values
+            kept_list.append(delta * (delta.abs() >= kth_val))
+
+        flat_kept = [k.reshape(-1) for k in kept_list]
+        total_params = flat_kept[0].numel()
+        merged = torch.zeros(total_params, dtype=flat_kept[0].dtype, device=self.device)
+
+        for start in range(0, total_params, self.chunk_size):
+            end = min(start + self.chunk_size, total_params)
+            task_chunks = [k[start:end] for k in flat_kept]
+            chunk_sum = torch.stack(task_chunks, dim=0).sum(dim=0)
+            final_signs = torch.sign(chunk_sum)
+            final_signs[final_signs == 0] = 1.0
+
+            numerator = torch.zeros_like(chunk_sum)
+            denominator = torch.zeros_like(chunk_sum)
+            for chunk in task_chunks:
+                keep = torch.where(final_signs > 0, chunk > 0, chunk < 0).to(chunk)
+                kept = chunk * keep
+                numerator += kept
+                denominator += (kept != 0).to(chunk)
+
+            merged[start:end] = numerator / denominator.clamp(min=1)
+
+        return merged.view_as(weights_list[0])
+
+    def merge_formula(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: Optional[List[Dict[str, Tensor]]] = None,
+        mode: MergeMode = "standard",
+        alphas: Optional[Tensor] = None,
+    ) -> Tensor:
+        if mode != "standard":
+            raise ValueError(f"{self.__class__.__name__} only supports standard mode.")
+        return self._ties(weights_list).to(weights_list[0].dtype)
+
+
+class OrthoMergeCTSVMOFTMerging(OrthoMergeCOFTMerging):
+    """OrthoMerge-C + TSV-Merge for OFT coordinate tensors."""
+
+    def __init__(
+        self,
+        lam: float = 0.0,
+        alphas: Optional[List[float]] = None,
+        device: str = "cpu",
+        exclude_matrix_svd: bool = False,
+    ):
+        super().__init__(lam=lam, alphas=alphas, device=device)
+        self.exclude_matrix_svd = exclude_matrix_svd
+
+    def _tsvm(self, weights_list: List[Tensor]) -> Tensor:
+        num_tasks = len(weights_list)
+        sv_reduction = 1.0 / num_tasks
+        ref = weights_list[0]
+        tensors = [w.to(self.device) for w in weights_list]
+
+        if ref.dim() != 2 or self.exclude_matrix_svd:
+            acc = tensors[0].clone()
+            for i, tensor in enumerate(tensors[1:], start=1):
+                acc += (tensor - acc) / (i + 1)
+            return acc
+
+        Ui_list = []
+        Si_list = []
+        Vi_list = []
+        rows, cols = ref.shape
+
+        for tensor in tensors:
+            mat = tensor.float()
+            Ui, Si, Vhi = torch.linalg.svd(mat, full_matrices=False)
+            reduced_rank = max(1, int(Si.shape[0] * sv_reduction))
+            Ui_list.append(Ui[:, :reduced_rank])
+            Si_list.append(Si[:reduced_rank])
+            Vi_list.append(Vhi[:reduced_rank, :])
+
+        r_list = [U.shape[1] for U in Ui_list]
+        sum_r = sum(r_list)
+        U_concat = torch.zeros(rows, sum_r, device=self.device, dtype=torch.float32)
+        V_concat = torch.zeros(cols, sum_r, device=self.device, dtype=torch.float32)
+        S_block = torch.zeros(sum_r, device=self.device, dtype=torch.float32)
+
+        offset = 0
+        for i in range(num_tasks):
+            r_i = r_list[i]
+            U_concat[:, offset:offset + r_i] = Ui_list[i]
+            V_concat[:, offset:offset + r_i] = Vi_list[i].transpose(0, 1)
+            S_block[offset:offset + r_i] = Si_list[i]
+            offset += r_i
+
+        PU, _, QUt = torch.linalg.svd(U_concat, full_matrices=False)
+        PV, _, QVt = torch.linalg.svd(V_concat, full_matrices=False)
+        U_hat = PU @ QUt
+        V_hat = PV @ QVt
+        return ((U_hat * S_block.unsqueeze(0)) @ V_hat.transpose(0, 1)).to(ref.dtype)
+
+    def merge_formula(
+        self,
+        weights_list: List[Tensor],
+        fisher_list: Optional[List[Dict[str, Tensor]]] = None,
+        mode: MergeMode = "standard",
+        alphas: Optional[Tensor] = None,
+    ) -> Tensor:
+        if mode != "standard":
+            raise ValueError(f"{self.__class__.__name__} only supports standard mode.")
+        return self._tsvm(weights_list).to(weights_list[0].dtype)
 
 
 class WudiOFTMerging(OFTMerging):

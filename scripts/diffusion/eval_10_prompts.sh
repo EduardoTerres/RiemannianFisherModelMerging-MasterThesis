@@ -11,37 +11,15 @@ set -e
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-SAMPLES_DIR="${OUTPUT_DIR}/samples"
-METHOD_SAMPLES_ROOT="${OUTPUT_DIR}/samples"
+SAMPLES_DIR="${OUTPUT_DIR}/samples_10_prompts"
+METHOD_SAMPLES_ROOT="${OUTPUT_DIR}/samples_10_prompts"
 EVAL_ROOT="${OUTPUT_DIR}/eval_runs"
 TABLES_DIR="${OUTPUT_DIR}/tables"
 
-# METHODS=(
-#   diagonal_fisher_mu_3
-#   fisher_kfac_mu_2
-#   orthofuse
-#   standard_rescaled
-#   fisher_geodesic_kfac_mu_4
-#   fisher_geodesic_kfac_mu_3
-# )
-
-
 METHODS=(
   orthofuse
-  standard_rescaled
-  diagonal_fisher_mu_0
-  diagonal_fisher_mu_3
-  diagonal_fisher_mu_4
+  fisher_geodesic_diagonal_corr_2_fim_frobenius
 )
-
-# METHODS=(
-#   orthofuse
-#   fisher_geodesic_diagonal_corr_1_fim_frobenius
-#   fisher_geodesic_diagonal_corr_1_fim_trace
-#   fisher_geodesic_diagonal_corr_2_fim_frobenius
-#   fisher_geodesic_diagonal_corr_2_fim_trace
-#   fisher_geodesic_diagonal_corr_2_fim_kl
-# )
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -58,4 +36,5 @@ python -m src.diffusion.eval.table \
   --eval_root "${EVAL_ROOT}" \
   --tables_dir "${TABLES_DIR}" \
   --methods "${METHODS[@]}" \
+  --aggregate-over-prompts
   "$@"

@@ -5,7 +5,9 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "OrthoFuse"))
 
+from nb_utils.eval_sets import merge_test_set
 from src.diffusion.pipe_gradients import (
     apply_pair as apply_gradient_pair,
     run_pipe as run_gradient_pipe,
@@ -15,12 +17,17 @@ from src.diffusion.pipe_orthofuse import (
     apply_pair as apply_orthofuse_pair,
     run_pipe as run_orthofuse_pipe,
 )
+from src.diffusion.pipeline_outputs import (
+    gradients_inference_folder_name,
+    orthofuse_inference_folder_name,
+)
 
 
 ORTHOFUSE_METHODS = {
     "orthofuse_geodesic": "no_modification",
     "orthofuse_geodesic_curve_over_id": "curve_over_id",
     "orthofuse_geodesic_rotation": "rotation",
+    "orthofuse": None,
 }
 METHODS = (
     "standard_geodesic",
@@ -40,8 +47,10 @@ def parse_args():
     parser.add_argument("--concept_name", type=str, default=None)
     parser.add_argument("--style_name", type=str, default=None)
     parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS))
+    parser.add_argument("--method_output_root", type=str, default=None)
     parser.add_argument("--num_points", type=int, default=7)
-    parser.add_argument("--num_images_per_medium_prompt", type=int, default=1)
+    parser.add_argument("--t_values", nargs="+", type=float, default=None)
+    parser.add_argument("--num_images_per_medium_prompt", type=int, default=5)
     parser.add_argument("--batch_size_medium", type=int, default=1)
     parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--guidance_scale", type=float, default=5.0)
@@ -52,7 +61,19 @@ def parse_args():
     parser.add_argument("--montage_prompt", type=str, default="a {0} in {1} style")
     parser.add_argument("--fisher_min", type=float, default=1e-14)
     parser.add_argument("--fisher_rescale", type=float, default=1e10)
+    parser.add_argument("--fisher_backend", choices=["diagonal", "kfac"], default="diagonal")
+    parser.add_argument("--correction_mu", type=float, default=2.0)
+    parser.add_argument(
+        "--fim_normalization",
+        choices=["none", "trace", "frobenius", "kl"],
+        default="trace",
+    )
     parser.add_argument("--orthofuse_postprocessing_method", type=str, default="no_modification")
+    parser.add_argument(
+        "--results_folder",
+        type=str,
+        default="samples_10_prompts/interpolation_geodesic",
+    )
     parser.add_argument("--replace_inference_output", action="store_true")
     return parser.parse_args()
 
@@ -63,12 +84,37 @@ def t_grid(num_points):
     return [i / (num_points - 1) for i in range(num_points)]
 
 
+def interpolation_ts(args):
+    ts = args.t_values if args.t_values is not None else t_grid(args.num_points)
+    for t in ts:
+        if t < 0.0 or t > 1.0:
+            raise ValueError(f"Interpolation factor t must be in [0, 1]; got {t:.6g}")
+    return ts
+
+
 def alphas_from_t(t):
-    return (t, 1.0 - t)
+    return (1.0 - t, t)
 
 
 def interpolation_root(args):
-    return Path(args.output_dir) / "geodesic_interpolation"
+    return Path(args.output_dir) / args.results_folder
+
+
+def method_output_name(args, method):
+    if method == "fisher_geodesic":
+        name = f"fisher_geodesic_{args.fisher_backend}"
+        if args.correction_mu is not None:
+            name += f"_corr_{args.correction_mu:g}_fim_{args.fim_normalization}"
+        return name
+    if method.startswith("orthofuse"):
+        return "orthofuse"
+    return method
+
+
+def method_output_dir(args, method):
+    if args.method_output_root is None:
+        return interpolation_root(args)
+    return Path(args.method_output_root) / method_output_name(args, method)
 
 
 def prompt_path(args, pair, folder, version):
@@ -86,23 +132,46 @@ def prompt_path(args, pair, folder, version):
     )
 
 
-def gradient_folder(args, pair_name, merge_mode, use_fishers, backend):
-    suffix = ""
-    if merge_mode == "geodesic":
-        suffix = f"_{backend}"
-        if use_fishers:
-            suffix += "_fisher"
-    return (
-        f"ns{args.num_inference_steps}_gs{args.guidance_scale}"
-        f"_gradients_{merge_mode}{suffix}_{pair_name}"
-    )
+def version_root(args, method, folder, version):
+    return method_output_dir(args, method) / "samples" / folder / f"version_{version}"
 
 
-def orthofuse_folder(args, pair_name, t, postprocessing_method):
-    return (
-        f"ns{args.num_inference_steps}_gs{args.guidance_scale}"
-        f"_orthofuse_t{t}_method_{postprocessing_method}_{pair_name}"
-    )
+def generated_prompt_paths(args, pair):
+    for template in merge_test_set:
+        prompt = template.format(
+            pair["concept"]["placeholder_token"],
+            pair["style"]["placeholder_token"],
+        )
+        for image_idx in range(args.num_images_per_medium_prompt):
+            yield prompt, image_idx
+
+
+def expected_image_paths(args, method, pair, folder, version):
+    root = version_root(args, method, folder, version)
+    return [
+        root / prompt / f"{image_idx}.png"
+        for prompt, image_idx in generated_prompt_paths(args, pair)
+    ]
+
+
+def missing_image_paths(args, method, pair, folder, version):
+    return [
+        path
+        for path in expected_image_paths(args, method, pair, folder, version)
+        if not path.exists()
+    ]
+
+
+def representative_image_path(args, method, pair, folder, version):
+    path = version_root(args, method, folder, version) / (
+        args.montage_prompt.format(
+            pair["concept"]["placeholder_token"],
+            pair["style"]["placeholder_token"],
+        )
+    ) / f"{args.image_index}.png"
+    if path.exists():
+        return path
+    return expected_image_paths(args, method, pair, folder, version)[0]
 
 
 def make_montage(image_paths, ts, save_path):
@@ -137,6 +206,10 @@ def gradient_args(args, alphas, version, merge_mode, use_fishers, backend):
         style_fisher_path=None,
         fisher_min=args.fisher_min,
         fisher_rescale=args.fisher_rescale,
+        fisher_backend=args.fisher_backend,
+        fisher_correction_mu=None,
+        correction_mu=args.correction_mu if use_fishers and merge_mode == "geodesic" else None,
+        fim_normalization=args.fim_normalization,
         alphas=list(alphas),
         merge_mode=merge_mode,
         geodesic_backend=backend,
@@ -191,20 +264,25 @@ def run_gradient_method(args, pair, ts, method, merge_mode, use_fishers, backend
         version = args.version_start + idx
         alpha = alphas_from_t(t)
         run_args = gradient_args(args, alpha, version, merge_mode, use_fishers, backend)
+        run_args.output_dir = str(method_output_dir(args, method))
         apply_gradient_pair(run_args, pair)
+        folder = gradients_inference_folder_name(run_args)
+        missing = missing_image_paths(args, method, pair, folder, version)
         print(
             f"[interpolate] {method} {pair['name']} t={t:.3f}",
             flush=True,
         )
-        run_gradient_pipe(run_args)
-        path = prompt_path(
-            args,
-            pair,
-            gradient_folder(args, pair["name"], merge_mode, use_fishers, backend),
-            version,
-        )
-        if not path.exists():
-            raise FileNotFoundError(f"Expected generated image missing: {path}")
+        if args.replace_inference_output or missing:
+            run_gradient_pipe(run_args)
+        else:
+            print(
+                f"[interpolate] using existing output: {version_root(args, method, folder, version)}",
+                flush=True,
+            )
+        missing = missing_image_paths(args, method, pair, folder, version)
+        if missing:
+            raise FileNotFoundError(f"Expected generated images missing, first: {missing[0]}")
+        path = representative_image_path(args, method, pair, folder, version)
         paths.append(path)
     return paths
 
@@ -214,31 +292,36 @@ def run_orthofuse_method(args, pair, ts, method, postprocessing_method):
     for idx, t in enumerate(ts):
         version = args.version_start + idx
         run_args = orthofuse_args(args, t, version, postprocessing_method)
+        run_args.output_dir = str(method_output_dir(args, method))
         apply_orthofuse_pair(run_args, pair)
+        folder = orthofuse_inference_folder_name(run_args)
+        missing = missing_image_paths(args, method, pair, folder, version)
         print(
             f"[interpolate] {method} {pair['name']} t={t:.3f} "
             f"post={postprocessing_method}",
             flush=True,
         )
-        run_orthofuse_pipe(run_args)
-        path = prompt_path(
-            args,
-            pair,
-            orthofuse_folder(args, pair["name"], t, postprocessing_method),
-            version,
-        )
-        if not path.exists():
-            raise FileNotFoundError(f"Expected generated image missing: {path}")
+        if args.replace_inference_output or missing:
+            run_orthofuse_pipe(run_args)
+        else:
+            print(
+                f"[interpolate] using existing output: {version_root(args, method, folder, version)}",
+                flush=True,
+            )
+        missing = missing_image_paths(args, method, pair, folder, version)
+        if missing:
+            raise FileNotFoundError(f"Expected generated images missing, first: {missing[0]}")
+        path = representative_image_path(args, method, pair, folder, version)
         paths.append(path)
     return paths
 
 
 def main():
     args = parse_args()
-    if args.samples is None and (args.concept_name is None or args.style_name is None):
-        raise ValueError("Pass --samples, or both --concept_name and --style_name.")
+    if args.samples is None and args.concept_name is None and args.style_name is None:
+        raise ValueError("Pass --samples, --concept_name, or --style_name.")
 
-    ts = t_grid(args.num_points)
+    ts = interpolation_ts(args)
 
     for pair in selected_pairs(args):
         method_paths = {}
@@ -285,17 +368,20 @@ def main():
                 )
         for method, postprocessing_method in ORTHOFUSE_METHODS.items():
             if method in args.methods:
+                if method == "orthofuse":
+                    postprocessing_method = args.orthofuse_postprocessing_method
                 method_paths[method] = run_orthofuse_method(
                     args,
                     pair,
                     ts,
                     method=method,
-                    postprocessing_method=postprocessing_method,
+                    postprocessing_method=postprocessing_method
+                    or args.orthofuse_postprocessing_method,
                 )
 
         for method, paths in method_paths.items():
             save_path = (
-                interpolation_root(args)
+                method_output_dir(args, method)
                 / f"{pair['name']}_{method}_ns{args.num_inference_steps}_gs{args.guidance_scale}.png"
             )
             make_montage(paths, ts, save_path)

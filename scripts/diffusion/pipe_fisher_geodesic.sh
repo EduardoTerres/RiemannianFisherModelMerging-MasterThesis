@@ -4,18 +4,19 @@
 #SBATCH --job-name=fisher_geodesic
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=03:00:00
+#SBATCH --time=06:00:00
 #SBATCH --array=0-5
 #SBATCH --output=outputs/diffusion/slurms/pipe_fisher_geodesic_%A_%a.out
 
 set -e
 
-MU=4  # correction
 FISHER_BACKEND="diagonal"  # "diagonal" or "kfac"
+CORRECTION_MU=2
+FIM_NORMALIZATION="trace"  # "none", "trace", "frobenius", or "kl"
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/fisher_geodesic_${FISHER_BACKEND}_mu_${MU}"
+METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples_10_prompts/fisher_geodesic_${FISHER_BACKEND}_corr_${CORRECTION_MU}_fim_${FIM_NORMALIZATION}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -40,7 +41,7 @@ CONCEPTS=(
 CONCEPT="${CONCEPTS[${SLURM_ARRAY_TASK_ID:-0}]}"
 
 echo "[pipe_fisher_geodesic] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
-echo "[pipe_fisher_geodesic] fisher_backend=${FISHER_BACKEND} output_dir=${METHOD_OUTPUT_DIR}"
+echo "[pipe_fisher_geodesic] fisher_backend=${FISHER_BACKEND} correction_mu=${CORRECTION_MU} fim_normalization=${FIM_NORMALIZATION} output_dir=${METHOD_OUTPUT_DIR}"
 
 python "${REPO_ROOT}/src/diffusion/pipe_fisher_geodesic.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
@@ -49,9 +50,10 @@ python "${REPO_ROOT}/src/diffusion/pipe_fisher_geodesic.py" \
   --t=0.6 \
   --geodesic_backend=cayley \
   --fisher_backend="${FISHER_BACKEND}" \
-  --num_images_per_medium_prompt=10 \
-  --replace_inference_output \
-  --fisher_correction_mu=${MU}
+  --correction_mu="${CORRECTION_MU}" \
+  --fim_normalization="${FIM_NORMALIZATION}" \
+  --num_images_per_medium_prompt=5 \
+  --replace_inference_output
 
   # --fisher_min=1e-14 \
   # --fisher_rescale=1e10 \

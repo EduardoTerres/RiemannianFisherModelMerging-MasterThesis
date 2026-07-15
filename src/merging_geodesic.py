@@ -27,13 +27,17 @@ class OFTGeodesicMerging(RiemannianMerging):
         alphas: Optional[List[float]] = None,
         device: str = "cpu",
         fisher_backend: FisherBackend = "diagonal",
+        fim_normalization: str = "frobenius",
     ):
         super().__init__(manifold=SOnManifold(), lam=lam, alphas=alphas)
         self.manifold: SOnManifold
         self.device = device
         if fisher_backend not in {"diagonal", "kfac"}:
             raise ValueError(f"Unsupported fisher_backend: {fisher_backend!r}")
+        if fim_normalization not in {"none", "trace", "frobenius", "kl"}:
+            raise ValueError(f"Unsupported fim_normalization: {fim_normalization!r}")
         self.fisher_backend = fisher_backend
+        self.fim_normalization = fim_normalization
 
     def _ensure_two(self, items: List, name: str) -> None:
         if len(items) != 2:
@@ -192,49 +196,78 @@ class OFTGeodesicMerging(RiemannianMerging):
             f"{tuple(ref.shape) + (ref.shape[-1],)}; got {tuple(fisher.shape)}"
         )
 
-    def _normalize_fisher_matrix(self, matrix: Tensor) -> Tensor:
-        trace = matrix.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
-        return matrix / trace.clamp_min(1e-8).unsqueeze(-1).unsqueeze(-1)
-
-    def _transport_saved_fisher_to_concept_tangent(
+    def _normalize_fisher_matrix(
         self,
-        fisher_matrix: Tensor,
+        matrix: Tensor,
+        kl_coords: Optional[Tensor] = None,
+    ) -> Tensor:
+        if self.fim_normalization == "trace":
+            denom = matrix.diagonal(dim1=-2, dim2=-1).sum(dim=-1).clamp_min(1e-8)
+            return matrix / denom.unsqueeze(-1).unsqueeze(-1)
+        if self.fim_normalization == "frobenius":
+            denom = torch.linalg.matrix_norm(matrix, ord="fro").clamp_min(1e-8)
+            return matrix / denom.unsqueeze(-1).unsqueeze(-1)
+        if self.fim_normalization == "none":
+            return matrix
+        if kl_coords is None:
+            raise ValueError("kl FIM normalization requires coordinates of the other model.")
+        denom = torch.einsum(
+            "...i,...ij,...j->",
+            kl_coords.float(),
+            matrix.float(),
+            kl_coords.float(),
+        ).clamp_min(1e-8)
+        return matrix / denom
+
+    def _transport_concept_coords_to_saved(
+        self,
+        coords: Tensor,
         concept_omega: Tensor,
         block_size: int,
-    ) -> Tensor:
+    ) -> tuple[Tensor, Tensor]:
         concept_to_saved = self.manifold.compute_Pt(
-            concept_omega.to(device=fisher_matrix.device, dtype=torch.float32),
+            concept_omega.to(device=coords.device, dtype=torch.float32),
             block_size,
-        ).to(device=fisher_matrix.device, dtype=torch.float32)
+        ).to(device=coords.device, dtype=torch.float32)
+        return (
+            (concept_to_saved @ coords.float().unsqueeze(-1)).squeeze(-1),
+            concept_to_saved,
+        )
+
+    def _transport_saved_coords_to_concept(
+        self,
+        coords: Tensor,
+        concept_to_saved: Tensor,
+    ) -> Tensor:
         return (
             concept_to_saved.transpose(-1, -2)
-            @ fisher_matrix
-            @ concept_to_saved
-        )
+            @ coords.float().unsqueeze(-1)
+        ).squeeze(-1)
 
     def _fisher_geodesic_tangent(
         self,
         log_coords: Tensor,
         relative_omega: Tensor,
         concept_omega: Tensor,
+        style_omega: Tensor,
         fisher_list: List[Tensor | Dict[str, Tensor]],
-        beta: Tensor,
+        t: Tensor,
     ) -> Tensor:
         """Compute the Fisher-weighted tangent step at ``theta_1``.
 
         This implements the tangent-coordinate part of
 
             Exp_{theta_1}[
-                (lambda I + (1-beta) H_1 + beta H_2)^-1
-                beta H_2 Log_{theta_1}(theta_2)
+                (lambda I + (1-t) H_1 + t H_2)^-1
+                t H_2 Log_{theta_1}(theta_2)
             ].
 
         ``log_coords`` is ``Log_{theta_1}(theta_2)`` expressed in the OFT
         upper-triangular Lie-algebra basis, shape ``(num_blocks, d)``.
         Fishers may be diagonal ``(num_blocks, d)``, full ``(num_blocks, d, d)``,
-        or KFAC factor dicts. Both Fisher matrices are transported into
-        ``theta_1`` -- the concept/start tangent space -- before solving the
-        blockwise linear systems.
+        or KFAC factor dicts. The tangent vector is transported to the saved
+        Fisher foot, the Fisher-weighted system is solved there, and the result
+        is transported back to the concept/start tangent space.
         """
         self._ensure_two(fisher_list, "Fisher tensors")
 
@@ -242,24 +275,30 @@ class OFTGeodesicMerging(RiemannianMerging):
         block_size = relative_omega.shape[-1]
         dtype, device = log_coords.dtype, log_coords.device
 
+        log_coords, concept_to_saved = self._transport_concept_coords_to_saved(
+            log_coords,
+            concept_omega,
+            block_size,
+        )
+        concept_coords = self.skew_matrix_to_oft_params(concept_omega.float().to(device))
+        style_coords = self.skew_matrix_to_oft_params(style_omega.float().to(device))
         h1 = self._fisher_matrix(fisher_list[0], log_coords)
-        h1 = self._transport_saved_fisher_to_concept_tangent(h1, concept_omega, block_size)
-        h1 = self._normalize_fisher_matrix(h1)
+        h1 = self._normalize_fisher_matrix(h1, kl_coords=style_coords)
         h2 = self._fisher_matrix(fisher_list[1], log_coords)
-        h2 = self._transport_saved_fisher_to_concept_tangent(h2, concept_omega, block_size)
-        h2 = self._normalize_fisher_matrix(h2)
+        h2 = self._normalize_fisher_matrix(h2, kl_coords=concept_coords)
 
         eye = torch.eye(son_dimension, device=device, dtype=torch.float32)
         eye = eye.unsqueeze(0).expand(num_blocks, -1, -1)
-        beta = beta.to(device=device, dtype=torch.float32)
+        t = t.to(device=device, dtype=torch.float32)
 
-        system = self.lam * eye + (1.0 - beta) * h1 + beta * h2
-        rhs = beta * (h2 @ log_coords.float().unsqueeze(-1)).squeeze(-1)
+        system = self.lam * eye + (1.0 - t) * h1 + t * h2
+        rhs = t * (h2 @ log_coords.float().unsqueeze(-1)).squeeze(-1)
 
         try:
-            return torch.linalg.solve(system, rhs.unsqueeze(-1)).squeeze(-1).to(dtype)
+            coords = torch.linalg.solve(system, rhs.unsqueeze(-1)).squeeze(-1)
         except RuntimeError:
-            return torch.linalg.lstsq(system, rhs.unsqueeze(-1)).solution.squeeze(-1).to(dtype)
+            coords = torch.linalg.lstsq(system, rhs.unsqueeze(-1)).solution.squeeze(-1)
+        return self._transport_saved_coords_to_concept(coords, concept_to_saved).to(dtype)
 
     def load_weights(self, adapter_paths: List[str]) -> List[Dict[str, Tensor]]:
         self._ensure_two(adapter_paths, "adapter paths")
@@ -351,8 +390,9 @@ class OFTGeodesicMerging(RiemannianMerging):
                 log_coords=log_coords,
                 relative_omega=relative_omega,
                 concept_omega=start_skew,
+                style_omega=end_skew,
                 fisher_list=fisher_list,
-                beta=s,
+                t=s,
             )
             merged_body_omega = self.oft_params_to_skew_matrix(
                 merged_coords,

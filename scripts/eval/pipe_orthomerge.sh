@@ -10,7 +10,7 @@
 set -e
 
 MODEL_NAME="llama3.1"
-MODEL_NAME="qwen2.5"
+# MODEL_NAME="qwen2.5"
 
 MERGE_METHOD="gradients"
 MERGE_MODE="standard"
@@ -46,9 +46,9 @@ python "${REPO_ROOT}/src/scripts/perform_merging.py" \
     --lam 0.0 \
     --device gpu
 
-sbatch \
-    --output="${SLURM_DIR}/eval_model_%A_%a.out" \
-    "${REPO_ROOT}/scripts/eval/eval.sh" \
-    "${BASE_MODEL_PATH}" \
-    "${EVAL_DIR}" \
-    "${MERGED_ADAPTER_PATH}"
+# sbatch \
+#     --output="${SLURM_DIR}/eval_model_%A_%a.out" \
+#     "${REPO_ROOT}/scripts/eval/eval.sh" \
+#     "${BASE_MODEL_PATH}" \
+#     "${EVAL_DIR}" \
+#     "${MERGED_ADAPTER_PATH}"

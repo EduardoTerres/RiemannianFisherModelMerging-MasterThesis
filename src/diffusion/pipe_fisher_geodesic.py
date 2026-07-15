@@ -28,6 +28,12 @@ def parse_args():
     parser.add_argument("--fisher_rescale", type=float, default=None)
     parser.add_argument("--fisher_backend", choices=["diagonal", "kfac"], default="kfac")
     parser.add_argument("--fisher_correction_mu", type=float, default=None)
+    parser.add_argument("--correction_mu", type=float, default=None)
+    parser.add_argument(
+        "--fim_normalization",
+        choices=["none", "trace", "frobenius", "kl"],
+        default="frobenius",
+    )
     parser.add_argument("--t", type=float, default=0.6)
     parser.add_argument("--geodesic_backend", choices=["cayley"], default="cayley")
     parser.add_argument(
@@ -74,7 +80,7 @@ if __name__ == "__main__":
             tqdm.write(f"Running pair: {pair['name']}")
             pipe_gradients.apply_pair(run_args, pair)
         existing_path = existing_output_path(run_args, gradients_inference_folder_name)
-        if existing_path is not None:
+        if existing_path is not None and not run_args.replace_inference_output:
             tqdm.write(f"Skipping existing Fisher geodesic output: {existing_path}")
             continue
         pipe_gradients.run_pipe(run_args)

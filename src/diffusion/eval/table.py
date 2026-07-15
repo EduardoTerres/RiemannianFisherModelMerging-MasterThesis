@@ -4,7 +4,9 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -12,6 +14,10 @@ sys.path.insert(0, str(REPO_ROOT / "OrthoFuse"))
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.diffusion.dataset_1 import DIFFUSION_MERGE_PAIRS, get_pair
+from src.diffusion.pipeline_outputs import (
+    gradients_inference_folder_name,
+    orthofuse_inference_folder_name,
+)
 
 DEFAULT_METHODS = (
     "fisher_rescaled",
@@ -50,6 +56,11 @@ def parse_args():
     parser.add_argument("--diagonal_fisher_mu", type=float, default=None)
     parser.add_argument("--orthofuse_t", type=str, default="0.6")
     parser.add_argument("--orthofuse_postprocessing", type=str, default="curve_over_id")
+    parser.add_argument(
+        "--aggregate-over-prompts",
+        action="store_true",
+        dest="aggregate_over_prompts",
+    )
     parser.add_argument("--clip_model", default=os.environ.get("ORTHOFUSE_CLIP_MODEL", "ViT-B/32"))
     parser.add_argument("--clip_pretrained", default=os.environ.get("ORTHOFUSE_CLIP_PRETRAINED", "openai"))
     parser.add_argument("--dino_model", default=os.environ.get("ORTHOFUSE_DINO_MODEL", "dinov2_vits14"))
@@ -91,116 +102,159 @@ def parse_mu(value, method):
         raise ValueError(f"Invalid mu value in method {method!r}: {value!r}") from exc
 
 
-def method_spec(method, args):
+def method_info(method, args, pair_name=None):
+    base = {
+        "num_inference_steps": args.num_inference_steps,
+        "guidance_scale": args.guidance_scale,
+        "dataset_pair_name": pair_name,
+    }
+
+    def build(display, **pipe_kwargs):
+        if pair_name is None:
+            return {"display": display, "folders": ()}
+        pipe_args = SimpleNamespace(**base, **pipe_kwargs)
+        folder = (
+            orthofuse_inference_folder_name(pipe_args)
+            if pipe_args.kind == "orthofuse"
+            else gradients_inference_folder_name(pipe_args)
+        )
+        legacy = (
+            folder.replace("gradients_fisher_kfac", "gradients_diagonal_fisher_kfac"),
+            folder.replace("gradients_fisher_mu", "gradients_diagonal_fisher_mu"),
+        )
+        return {"display": display, "folders": tuple(dict.fromkeys((folder, *legacy)))}
+
     if method == "orthofuse":
-        return {"kind": "orthofuse", "display": f"orthofuse_{args.orthofuse_postprocessing}_t{args.orthofuse_t}"}
+        return build(
+            f"orthofuse_{args.orthofuse_postprocessing}_t{args.orthofuse_t}",
+            kind="orthofuse",
+            t=args.orthofuse_t,
+            postprocessing_method=args.orthofuse_postprocessing,
+        )
+
+    geodesic_match = re.fullmatch(
+        r"fisher_geodesic_(?P<backend>diagonal|kfac)_corr_(?P<correction_mu>[^_]+)_fim_(?P<fim_normalization>none|trace|frobenius|kl)",
+        method,
+    )
+    if geodesic_match:
+        backend = geodesic_match.group("backend")
+        correction_mu = parse_mu(geodesic_match.group("correction_mu"), method)
+        fim_normalization = geodesic_match.group("fim_normalization")
+        backend_suffix = "" if backend == "diagonal" else f"_{backend}"
+        return build(
+            f"geodesic_cayley_fisher{backend_suffix}_corr{correction_mu:g}_fim_{fim_normalization}",
+            kind="gradients",
+            merge_mode="geodesic",
+            geodesic_backend="cayley",
+            geodesic_use_fishers=True,
+            fisher_backend=backend,
+            correction_mu=correction_mu,
+            fim_normalization=fim_normalization,
+        )
 
     geodesic_prefixes = (
-        ("fisher_geodesic_kfac_mu_", "fisher", "kfac", "geodesic_cayley_fisher_kfac"),
-        ("fisher_geodesic_kfac_mu", "fisher", "kfac", "geodesic_cayley_fisher_kfac"),
-        ("fisher_geodesic_mu_", "fisher", "diagonal", "geodesic_cayley_fisher"),
-        ("fisher_geodesic_mu", "fisher", "diagonal", "geodesic_cayley_fisher"),
+        ("fisher_geodesic_kfac_mu_", "kfac", "geodesic_cayley_fisher_kfac"),
+        ("fisher_geodesic_kfac_mu", "kfac", "geodesic_cayley_fisher_kfac"),
+        ("fisher_geodesic_mu_", "diagonal", "geodesic_cayley_fisher"),
+        ("fisher_geodesic_mu", "diagonal", "geodesic_cayley_fisher"),
     )
-    for prefix, mode, backend, display_prefix in geodesic_prefixes:
+    for prefix, backend, display_prefix in geodesic_prefixes:
         if method.startswith(prefix):
             mu = parse_mu(method[len(prefix) :], method)
-            return {
-                "kind": "gradients",
-                "mode": mode,
-                "backend": backend,
-                "mu": mu,
-                "geodesic": True,
-                "display": f"{display_prefix}_mu{mu:g}",
-            }
+            return build(
+                f"{display_prefix}_mu{mu:g}",
+                kind="gradients",
+                merge_mode="geodesic",
+                geodesic_backend="cayley",
+                geodesic_use_fishers=True,
+                fisher_backend=backend,
+                fisher_correction_mu=mu,
+            )
+
     if method == "fisher_geodesic":
-        return {
-            "kind": "gradients",
-            "mode": "fisher",
-            "backend": "diagonal",
-            "mu": None,
-            "geodesic": True,
-            "display": "geodesic_cayley_fisher",
-        }
+        return build(
+            "geodesic_cayley_fisher",
+            kind="gradients",
+            merge_mode="geodesic",
+            geodesic_backend="cayley",
+            geodesic_use_fishers=True,
+            fisher_backend="diagonal",
+        )
 
     mu_prefixes = (
-        ("fisher_kfac_mu_", "fisher", "kfac", "diagonal_fisher_kfac"),
-        ("fisher_kfac_mu", "fisher", "kfac", "diagonal_fisher_kfac"),
-        ("fisher_mu_", "fisher", "diagonal", "diagonal_fisher"),
-        ("fisher_mu", "fisher", "diagonal", "diagonal_fisher"),
-        ("diagonal_fisher_mu_", "fisher", "diagonal", "diagonal_fisher"),
-        ("diagonal_fisher_mu", "fisher", "diagonal", "diagonal_fisher"),
-        ("kfac_mu_", "fisher", "kfac", "diagonal_fisher_kfac"),
-        ("kfac_mu", "fisher", "kfac", "diagonal_fisher_kfac"),
+        ("fisher_kfac_mu_", "kfac", "diagonal_fisher_kfac"),
+        ("fisher_kfac_mu", "kfac", "diagonal_fisher_kfac"),
+        ("fisher_mu_", "diagonal", "diagonal_fisher"),
+        ("fisher_mu", "diagonal", "diagonal_fisher"),
+        ("diagonal_fisher_mu_", "diagonal", "diagonal_fisher"),
+        ("diagonal_fisher_mu", "diagonal", "diagonal_fisher"),
+        ("kfac_mu_", "kfac", "diagonal_fisher_kfac"),
+        ("kfac_mu", "kfac", "diagonal_fisher_kfac"),
     )
-    for prefix, mode, backend, display_prefix in mu_prefixes:
+    for prefix, backend, display_prefix in mu_prefixes:
         if method.startswith(prefix):
             mu = parse_mu(method[len(prefix) :], method)
-            return {
-                "kind": "gradients",
-                "mode": mode,
-                "backend": backend,
-                "mu": mu,
-                "geodesic": False,
-                "display": f"{display_prefix}_mu{mu:g}",
-            }
+            return build(
+                f"{display_prefix}_mu{mu:g}",
+                kind="gradients",
+                merge_mode="fisher",
+                fisher_backend=backend,
+                fisher_correction_mu=mu,
+            )
 
     if method == "kfac":
-        return {
-            "kind": "gradients",
-            "mode": "fisher",
-            "backend": "kfac",
-            "mu": None,
-            "geodesic": False,
-            "display": method,
-        }
+        return build(
+            method,
+            kind="gradients",
+            merge_mode="fisher",
+            fisher_backend="kfac",
+        )
 
     mode = "fisher" if method == "diagonal_fisher" else method
     mode = "fisher_rescaled" if mode == "diagonal_fisher_rescaled" else mode
     mu = (args.fisher_mu if args.fisher_mu is not None else args.diagonal_fisher_mu) if mode == "fisher" else None
     display = f"fisher_mu{mu:g}" if mu is not None else mode
-    return {
-        "kind": "gradients",
-        "mode": mode,
-        "backend": "diagonal",
-        "mu": mu,
-        "geodesic": False,
-        "display": display,
-    }
-
-
-def sample_name(args, method, pair_name):
-    spec = method_spec(method, args)
-    prefix = f"ns{args.num_inference_steps}_gs{args.guidance_scale}"
-    if spec["kind"] == "orthofuse":
-        return f"{prefix}_orthofuse_t{args.orthofuse_t}_method_{args.orthofuse_postprocessing}_{pair_name}"
-
-    if spec.get("geodesic"):
-        backend_suffix = "_cayley_fisher"
-        if spec["backend"] != "diagonal":
-            backend_suffix += f"_{spec['backend']}"
-        mu_suffix = f"_mu{spec['mu']:g}" if spec["mu"] is not None else ""
-        return f"{prefix}_gradients_geodesic{backend_suffix}{mu_suffix}_{pair_name}"
-
-    backend_suffix = f"_{spec['backend']}" if spec["backend"] != "diagonal" and "fisher" in spec["mode"] else ""
-    mu_suffix = f"_mu{spec['mu']:g}" if spec["mu"] is not None else ""
-    return f"{prefix}_gradients_{spec['mode']}{backend_suffix}{mu_suffix}_{pair_name}"
+    return build(
+        display,
+        kind="gradients",
+        merge_mode=mode,
+        fisher_backend="diagonal",
+        fisher_correction_mu=mu,
+    )
 
 
 def sample_roots(args, method):
-    roots = []
+    roots = [args.samples_dir or args.output_dir / "samples"]
     if args.method_samples_root is not None:
-        roots.append(args.method_samples_root / method / "samples")
-        roots.append(args.method_samples_root / method)
-    roots.append(args.samples_dir or args.output_dir / "samples")
-    return roots
+        roots.extend(
+            (
+                args.method_samples_root / method / "samples",
+                args.method_samples_root / method,
+            )
+        )
+        if args.method_samples_root.name in {"samples", "samples_10_prompts"}:
+            sibling = args.method_samples_root.parent / "samples_10_prompts"
+            roots.extend((sibling / method / "samples", sibling / method))
+    roots.extend(
+        (
+            args.output_dir / "samples" / method / "samples",
+            args.output_dir / "samples" / method,
+            args.output_dir / "samples_10_prompts" / method / "samples",
+            args.output_dir / "samples_10_prompts" / method,
+            args.output_dir / "samples",
+            args.output_dir / "samples_10_prompts",
+        )
+    )
+    return tuple(dict.fromkeys(roots))
 
 
 def find_sample_path(args, method, pair_name):
-    folder = sample_name(args, method, pair_name)
+    folders = method_info(method, args, pair_name)["folders"]
     for root in sample_roots(args, method):
-        src = root / folder
-        if (src / f"version_{args.version}").is_dir():
-            return src
+        for folder in folders:
+            src = root / folder
+            if (src / f"version_{args.version}").is_dir():
+                return src
     return None
 
 
@@ -245,8 +299,9 @@ def stage_runs(args):
             src = find_sample_path(args, method, pair_name)
             if src is None:
                 tried = [
-                    root / sample_name(args, method, pair_name) / f"version_{args.version}"
+                    root / folder / f"version_{args.version}"
                     for root in sample_roots(args, method)
+                    for folder in method_info(method, args, pair_name)["folders"]
                 ]
                 print(f"[skip] missing samples: {', '.join(map(str, tried))}", file=sys.stderr)
                 continue
@@ -426,7 +481,7 @@ def method_from_exp_name(exp_name):
 
 
 def display_method_name(method, args):
-    return method_spec(method, args)["display"]
+    return method_info(method, args)["display"]
 
 
 def display_prompt(prompt, record):
@@ -451,6 +506,7 @@ def write_summary_table(summary_path, exp_names, args):
         if isinstance(value, dict)
     }
 
+    aggregate_key = "__all_prompts__"
     aggregates = {}
     method_order = []
     prompts = None
@@ -461,23 +517,35 @@ def write_summary_table(summary_path, exp_names, args):
             continue
         current_prompts = list(record.get("image_similarities_mx", {}))
         if prompts is None:
-            prompts = current_prompts[:2]
+            prompts = current_prompts
             prompt_labels = [display_prompt(prompt, record) for prompt in prompts]
+        if not prompts:
+            continue
         method = display_method_name(method_from_exp_name(exp_name), args)
         if method not in aggregates:
-            aggregates[method] = {prompt: {metric: [] for metric, _ in METRICS} for prompt in prompts}
+            keys = [aggregate_key] if args.aggregate_over_prompts else prompts
+            aggregates[method] = {key: {metric: [] for metric, _ in METRICS} for key in keys}
             method_order.append(method)
         for prompt in prompts:
             for metric, _ in METRICS:
                 values = record.get(metric, {})
                 if isinstance(values, dict):
                     values = values.get(prompt, [])
-                aggregates[method][prompt][metric].extend(flatten(values))
+                elif args.aggregate_over_prompts:
+                    continue
+                key = aggregate_key if args.aggregate_over_prompts else prompt
+                aggregates[method][key][metric].extend(flatten(values))
+        if args.aggregate_over_prompts:
+            for metric, _ in METRICS:
+                values = record.get(metric, {})
+                if not isinstance(values, dict):
+                    aggregates[method][aggregate_key][metric].extend(flatten(values))
 
     rows = []
     for method in method_order:
         row = [method]
-        for prompt in prompts:
+        keys = [aggregate_key] if args.aggregate_over_prompts else prompts
+        for prompt in keys:
             for metric, _ in METRICS:
                 row.append(format_cell(aggregates[method][prompt][metric]))
         rows.append(row)
@@ -485,7 +553,8 @@ def write_summary_table(summary_path, exp_names, args):
         raise SystemExit("No evaluated records found in eval_summary.json for this run.")
 
     headers = ["method"]
-    for prompt_idx in range(1, len(prompts) + 1):
+    prompt_count = 1 if args.aggregate_over_prompts else len(prompts)
+    for prompt_idx in range(1, prompt_count + 1):
         headers.extend(f"({prompt_idx}.{metric_idx})" for metric_idx in range(1, len(METRICS) + 1))
     widths = [max(len(str(row[idx])) for row in [headers, *rows]) for idx in range(len(headers))]
 
@@ -499,10 +568,14 @@ def write_summary_table(summary_path, exp_names, args):
         lines.append(" | ".join(str(value).ljust(widths[idx]) for idx, value in enumerate(row)))
 
     lines.extend(["", "Column correspondence"])
-    for prompt_idx, prompt in enumerate(prompt_labels, start=1):
+    if args.aggregate_over_prompts:
         for metric_idx, (_, label) in enumerate(METRICS, start=1):
-            suffix = "" if "reference-image similarity" in label else f"; prompt {prompt_idx}: {prompt}"
-            lines.append(f"({prompt_idx}.{metric_idx}) {label}{suffix}")
+            lines.append(f"(1.{metric_idx}) {label}; pooled over all prompts")
+    else:
+        for prompt_idx, prompt in enumerate(prompt_labels, start=1):
+            for metric_idx, (_, label) in enumerate(METRICS, start=1):
+                suffix = "" if "reference-image similarity" in label else f"; prompt {prompt_idx}: {prompt}"
+                lines.append(f"({prompt_idx}.{metric_idx}) {label}{suffix}")
 
     table_text = "\n".join(lines)
     print(table_text)

@@ -184,6 +184,25 @@ def _inverse_cayley(q):
     return _skew(generator)
 
 
+def _orthogonal_log(q):
+    eigvals, eigvecs = torch.linalg.eig(q)
+    log_diag = torch.diag_embed(torch.log(eigvals).imag) * 1j
+    matrix_log = eigvecs @ log_diag @ eigvecs.transpose(-1, -2).conj()
+    return _skew(matrix_log.real)
+
+
+def _curve_over_id_retract(q, t, mu):
+    t = torch.as_tensor(t, dtype=torch.float32, device=q.device).reshape(())
+    if not torch.isfinite(t):
+        raise ValueError("curve_over_id t must be finite")
+    if t < 0 or t > 1:
+        raise ValueError(
+            f"curve_over_id t must be in [0, 1]; got {t.item():.6g}"
+        )
+    eta = 0.5 + float(mu) * t * (1.0 - t)
+    return _cayley(eta * q)
+
+
 def _upper_coords(tensor):
     n = tensor.shape[-1]
     idx = torch.triu_indices(n, n, offset=1, device=tensor.device)
@@ -219,14 +238,6 @@ def _kfac_to_matrix(fisher, ref_coords):
     return matrix.reshape(*ref_coords.shape[:-1], d, d)
 
 
-def _transport_matrix(skew_matrix):
-    block_size = skew_matrix.shape[-1]
-    idx = torch.triu_indices(block_size, block_size, offset=1, device=skew_matrix.device)
-    r = torch.matrix_exp(skew_matrix / 2)
-    i, j = idx[0], idx[1]
-    return r[:, i][:, :, i] * r[:, j][:, :, j] - r[:, i][:, :, j] * r[:, j][:, :, i]
-
-
 def _fisher_to_matrix(fisher, ref_coords):
     if isinstance(fisher, dict):
         return _kfac_to_matrix(fisher, ref_coords)
@@ -240,46 +251,153 @@ def _fisher_to_matrix(fisher, ref_coords):
     raise ValueError(f"Unsupported Fisher shape {tuple(fisher.shape)} for {tuple(ref_coords.shape)}")
 
 
-def _normalize_fisher_matrix(matrix):
-    return matrix / torch.linalg.vector_norm(matrix).clamp_min(1e-8)
+def _fisher_to_diagonal(fisher, ref_coords):
+    if isinstance(fisher, dict):
+        return None
+    fisher = fisher.to(device=ref_coords.device, dtype=torch.float32)
+    if fisher.dim() == 3 and fisher.shape[-1] == fisher.shape[-2]:
+        if fisher.shape[-1] == ref_coords.shape[-1]:
+            return fisher.diagonal(dim1=-2, dim2=-1).clamp(min=0.0)
+        fisher = _upper_coords(fisher)
+    if fisher.shape == ref_coords.shape:
+        return fisher.clamp(min=0.0)
+    raise ValueError(f"Unsupported Fisher shape {tuple(fisher.shape)} for {tuple(ref_coords.shape)}")
 
 
-def _transport_saved_fisher_to_concept_tangent(fisher_matrix, concept_skew):
-    concept_to_saved = _transport_matrix(
-        _skew(concept_skew).to(device=fisher_matrix.device, dtype=torch.float32)
-    ).to(dtype=torch.float32)
-    return concept_to_saved.transpose(-1, -2) @ fisher_matrix @ concept_to_saved
+def _joint_rescale_fisher_diagonals(*diagonals):
+    finite_diagonals = [
+        torch.nan_to_num(diagonal.float(), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+        for diagonal in diagonals
+    ]
+    scale = torch.stack(
+        [diagonal.abs().amax(dim=-1) for diagonal in finite_diagonals],
+        dim=0,
+    ).amax(dim=0)
+    scale = torch.where(scale > 0.0, scale, torch.ones_like(scale))
+    return [diagonal / scale[..., None] for diagonal in finite_diagonals]
 
 
-def _cayley_fisher_tangent(tangent, fishers, beta, concept_skew):
-    log_coords = _upper_coords(tangent)
+def _normalize_fisher_diagonal(diagonal, mode="frobenius", kl_coords=None):
+    """Normalize a diagonal Fisher in OFT Lie coordinates.
+
+    The KL mode uses the local second-order approximation
+
+        D_KL(p_theta || p_{theta + delta}) ~= 1/2 delta^T F_theta delta,
+
+    so dividing by ``kl_coords^T F kl_coords`` makes each task Fisher represent
+    one unit of this approximate KL scale toward the other adapter.
+    """
+    if mode == "trace":
+        denom = diagonal.sum(dim=-1).clamp_min(1e-8)
+        return diagonal / denom[..., None]
+    if mode == "frobenius":
+        denom = torch.linalg.vector_norm(diagonal, dim=-1).clamp_min(1e-8)
+        return diagonal / denom[..., None]
+    if mode == "none":
+        return diagonal
+    if mode == "kl":
+        if kl_coords is None:
+            raise ValueError("kl FIM normalization requires coordinates of the other model.")
+        denom = (diagonal.float() * kl_coords.float().square()).sum(dim=-1).clamp_min(1e-8)
+        return diagonal / denom[..., None]
+    raise ValueError(f"Unsupported fim_normalization: {mode!r}")
+
+
+def _normalize_fisher_matrix(matrix, mode="frobenius", kl_coords=None):
+    if mode == "trace":
+        denom = matrix.diagonal(dim1=-2, dim2=-1).sum(dim=-1).clamp_min(1e-8)
+        return matrix / denom[..., None, None]
+    if mode == "frobenius":
+        denom = torch.linalg.matrix_norm(matrix, ord="fro").clamp_min(1e-8)
+        return matrix / denom[..., None, None]
+    if mode == "none":
+        return matrix
+    if mode == "kl":
+        if kl_coords is None:
+            raise ValueError("kl FIM normalization requires coordinates of the other model.")
+        denom = torch.einsum(
+            "...i,...ij,...j->",
+            kl_coords.float(),
+            matrix.float(),
+            kl_coords.float(),
+        ).clamp_min(1e-8)
+        return matrix / denom
+    raise ValueError(f"Unsupported fim_normalization: {mode!r}")
+
+
+def _geodesic_fraction_from_alphas(alphas, device):
+    if alphas is None:
+        return torch.tensor(0.5, dtype=torch.float32, device=device)
+    alpha_tensor = torch.as_tensor(alphas, dtype=torch.float32, device=device).flatten()
+    if alpha_tensor.numel() != 2:
+        raise ValueError(f"Geodesic alphas must have length 2; got {alpha_tensor.numel()}")
+    total = alpha_tensor.sum()
+    if total.abs() < 1e-8:
+        raise ValueError("Geodesic alphas must not sum to zero")
+    return alpha_tensor[1] / total
+
+
+def _cayley_fisher_tangent(
+    tangent,
+    fishers,
+    t,
+    concept_skew,
+    style_skew,
+    fim_normalization="frobenius",
+):
+    """Return ((1-t) F_A + t F_B)^-1 t F_B Log_A(B)."""
+    log_coords = _upper_coords(tangent).float()
+    concept_coords = _upper_coords(
+        _skew(concept_skew).to(device=log_coords.device, dtype=torch.float32)
+    )
+    style_coords = _upper_coords(
+        _skew(style_skew).to(device=log_coords.device, dtype=torch.float32)
+    )
+    h1_diag = _fisher_to_diagonal(fishers[0], log_coords)
+    h2_diag = _fisher_to_diagonal(fishers[1], log_coords)
+    if h1_diag is not None and h2_diag is not None:
+        h1_diag, h2_diag = _joint_rescale_fisher_diagonals(h1_diag, h2_diag)
+        h1_diag = _normalize_fisher_diagonal(
+            h1_diag,
+            fim_normalization,
+            kl_coords=style_coords,
+        )
+        h2_diag = _normalize_fisher_diagonal(
+            h2_diag,
+            fim_normalization,
+            kl_coords=concept_coords,
+        )
+        denominator = ((1.0 - t) * h1_diag + t * h2_diag).clamp_min(1e-8)
+        coords = t * h2_diag * log_coords / denominator
+        return _coords_to_skew(coords, tangent.shape[-1])
+
     h1 = _fisher_to_matrix(fishers[0], log_coords)
-    h1 = _transport_saved_fisher_to_concept_tangent(h1, concept_skew)
-    h1 = _normalize_fisher_matrix(h1)
+    h1 = _normalize_fisher_matrix(h1, fim_normalization, kl_coords=style_coords)
     h2 = _fisher_to_matrix(fishers[1], log_coords)
-    h2 = _transport_saved_fisher_to_concept_tangent(h2, concept_skew)
-    h2 = _normalize_fisher_matrix(h2)
+    h2 = _normalize_fisher_matrix(h2, fim_normalization, kl_coords=concept_coords)
 
     d = log_coords.shape[-1]
     eye = torch.eye(d, dtype=torch.float32, device=log_coords.device).expand(
         log_coords.shape[0], d, d
     )
-    system = (1.0 - beta) * h1 + beta * h2
-    rhs = beta * (h2 @ log_coords.float().unsqueeze(-1)).squeeze(-1)
+    system = (1.0 - t) * h1 + t * h2
+    rhs = t * (h2 @ log_coords.float().unsqueeze(-1)).squeeze(-1)
     coords = torch.linalg.solve(system + 1e-8 * eye, rhs.unsqueeze(-1)).squeeze(-1)
     return _coords_to_skew(coords, tangent.shape[-1])
 
 
-def _cayley_geodesic_merge_with_generators(tensors, device, alphas=None, fishers=None):
+def _cayley_geodesic_merge_with_generators(
+    tensors,
+    device,
+    alphas=None,
+    fishers=None,
+    apply_curve_over_id=False,
+    correction_mu=None,
+    fim_normalization="frobenius",
+):
     if len(tensors) != 2:
         raise ValueError(f"Geodesic interpolation requires exactly 2 tensors; got {len(tensors)}")
-    if alphas is None:
-        t = torch.tensor(0.5, dtype=torch.float32, device=device)
-    else:
-        alpha_tensor = torch.tensor(alphas, dtype=torch.float32, device=device).flatten()
-        if alpha_tensor.numel() != 2:
-            raise ValueError(f"Geodesic alphas must have length 2; got {alpha_tensor.numel()}")
-        t = alpha_tensor[1] / alpha_tensor.sum().clamp_min(1e-8)
+    t = _geodesic_fraction_from_alphas(alphas, device)
 
     if t <= 1e-8:
         return _skew(tensors[0]).to(dtype=tensors[0].dtype)
@@ -290,13 +408,22 @@ def _cayley_geodesic_merge_with_generators(tensors, device, alphas=None, fishers
     q0 = _cayley(concept_skew.to(device=device, dtype=torch.float32))
     q1 = _cayley(tensors[1].to(device=device, dtype=torch.float32))
     relative = q0.transpose(-1, -2) @ q1
-    tangent = _inverse_cayley(relative)
+    tangent = _orthogonal_log(relative)
     tangent_step = (
-        _cayley_fisher_tangent(tangent, fishers, t, concept_skew)
+        _cayley_fisher_tangent(
+            tangent,
+            fishers,
+            t,
+            concept_skew,
+            tensors[1],
+            fim_normalization=fim_normalization,
+        )
         if fishers is not None
         else t * tangent
     )
-    qt = q0 @ _cayley(tangent_step)
+    qt = q0 @ torch.matrix_exp(tangent_step)
+    if apply_curve_over_id:
+        qt = _curve_over_id_retract(qt, t, correction_mu)
     return _inverse_cayley(qt).to(dtype=tensors[0].dtype)
 
 
@@ -309,10 +436,21 @@ def _gradients_merge_with_merging_py(
     alphas=None,
     geodesic_backend="cayley",
     fisher_backend="diagonal",
+    apply_curve_over_id=False,
+    correction_mu=None,
+    fim_normalization="frobenius",
 ):
     if mode == "geodesic":
         if geodesic_backend == "cayley":
-            return _cayley_geodesic_merge_with_generators(tensors, device, alphas, fishers)
+            return _cayley_geodesic_merge_with_generators(
+                tensors,
+                device,
+                alphas,
+                fishers,
+                apply_curve_over_id=apply_curve_over_id,
+                correction_mu=correction_mu,
+                fim_normalization=fim_normalization,
+            )
         raise ValueError(f"Unsupported geodesic_backend: {geodesic_backend!r}")
 
     if merger is None:
@@ -351,6 +489,10 @@ def _fisher_correction_mu(args):
     if mu is not None:
         return mu
     return getattr(args, "diagonal_fisher_correction_mu", None)
+
+
+def _geodesic_correction_mu(args):
+    return getattr(args, "correction_mu", None)
 
 
 def _diagonal_fisher_correction(merged, alphas, mu):
@@ -714,6 +856,13 @@ class GradientsMergeInferencer(MOFTInferencer):
         correction_mu = _fisher_correction_mu(self.args)
         if correction_mu is not None:
             backend_suffix += f"_mu{correction_mu:g}"
+        geodesic_correction_mu = _geodesic_correction_mu(self.args)
+        if mode == "geodesic" and geodesic_correction_mu is not None:
+            backend_suffix += f"_corr{geodesic_correction_mu:g}"
+        fim_normalization = getattr(self.args, "fim_normalization", None)
+        if mode == "geodesic" and getattr(self.args, "geodesic_use_fishers", False):
+            if fim_normalization is not None:
+                backend_suffix += f"_fim_{fim_normalization}"
         pair_name = getattr(self.args, "dataset_pair_name", None)
         pair_suffix = f"_{pair_name}" if pair_name else ""
         self.inference_folder_name = (
@@ -846,8 +995,15 @@ class GradientsMergeInferencer(MOFTInferencer):
         merge_alphas = getattr(self.args, "alphas", None)
         _log_merge(f"alphas concept/style={merge_alphas if merge_alphas is not None else [1.0, 1.0]}")
         correction_mu = _fisher_correction_mu(self.args)
+        geodesic_correction_mu = _geodesic_correction_mu(self.args)
+        apply_curve_over_id = merge_mode == "geodesic" and geodesic_correction_mu is not None
+        if apply_curve_over_id:
+            _log_merge(f"applying curve_over_id with eta=0.5+{geodesic_correction_mu:g}t(1-t)")
         if correction_mu is not None:
             _log_merge(f"post-merge correction mu={correction_mu:g}")
+        fim_normalization = getattr(self.args, "fim_normalization", "frobenius")
+        if merge_mode == "geodesic" and concept_fisher is not None:
+            _log_merge(f"FIM normalization={fim_normalization}")
         shape_counts = Counter(tuple(concept_state[key].shape) for key in merge_keys)
         side_counts = Counter(key.rsplit(".", 1)[-1] for key in merge_keys)
         projection_counts = Counter(
@@ -882,7 +1038,11 @@ class GradientsMergeInferencer(MOFTInferencer):
                 else _load_root_oft_merging_class()
             )
             if merge_mode == "geodesic":
-                merge_engine = merger_cls(device=str(self.device))
+                merge_engine = merger_cls(
+                    device=str(self.device),
+                    fisher_backend=fisher_backend,
+                    fim_normalization=fim_normalization,
+                )
             else:
                 merge_engine = merger_cls(device=str(self.device), fisher_backend=fisher_backend)
             _log_merge(f"initialized {merger_cls.__name__} engine once for this adapter merge")
@@ -919,6 +1079,9 @@ class GradientsMergeInferencer(MOFTInferencer):
                     alphas=merge_alphas,
                     geodesic_backend=geodesic_backend,
                     fisher_backend=fisher_backend,
+                    apply_curve_over_id=apply_curve_over_id,
+                    correction_mu=geodesic_correction_mu,
+                    fim_normalization=fim_normalization,
                 )
                 merged_state[key] = _diagonal_fisher_correction(
                     merged,

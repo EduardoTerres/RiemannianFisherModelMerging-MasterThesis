@@ -51,6 +51,13 @@ def gradients_inference_folder_name(args):
         correction_mu = getattr(args, "diagonal_fisher_correction_mu", None)
     if correction_mu is not None:
         backend_suffix += f"_mu{correction_mu:g}"
+    geodesic_correction_mu = getattr(args, "correction_mu", None)
+    if mode == "geodesic" and geodesic_correction_mu is not None:
+        backend_suffix += f"_corr{geodesic_correction_mu:g}"
+    fim_normalization = getattr(args, "fim_normalization", None)
+    if mode == "geodesic" and getattr(args, "geodesic_use_fishers", False):
+        if fim_normalization is not None:
+            backend_suffix += f"_fim_{fim_normalization}"
 
     pair_name = getattr(args, "dataset_pair_name", None)
     pair_suffix = f"_{pair_name}" if pair_name else ""

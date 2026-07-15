@@ -11,10 +11,4 @@ set -e
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
 
-if [ "$#" -gt 0 ]; then
-  python src/diffusion/oft_adapter_info.py "$@"
-else
-  python src/diffusion/oft_adapter_info.py \
-    /scratch-shared/eterres/SDXL/concepts/pytorch_lora_weights_cat.safetensors \
-    /scratch-shared/eterres/SDXL/adapters/pytorch_lora_weights_01_07.safetensors
-fi
+python -m src.diffusion.oft_adapter_info "$@"

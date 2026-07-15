@@ -52,6 +52,12 @@ def parse_args():
     parser.add_argument("--merge_mode", type=str, default=None)
     parser.add_argument("--fisher_correction_mu", type=float, default=None)
     parser.add_argument("--diagonal_fisher_correction_mu", type=float, default=None)
+    parser.add_argument("--correction_mu", type=float, default=None)
+    parser.add_argument(
+        "--fim_normalization",
+        choices=["none", "trace", "frobenius", "kl"],
+        default="frobenius",
+    )
     parser.add_argument("--geodesic_backend", choices=["cayley"], default="cayley")
     parser.add_argument("--geodesic_use_fishers", action="store_true")
     parser.add_argument(

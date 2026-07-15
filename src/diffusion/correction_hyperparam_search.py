@@ -144,8 +144,7 @@ def run_generation(args, pair, mu, alphas):
         )
         apply_pair(run_args, pair)
         print(
-            f"[correction] pair={pair['name']} mu={mu:g} "
-            f"t={t:.3f} alpha_1={alpha[0]:.3f} alpha_2={alpha[1]:.3f}",
+            f"[correction] pair={pair['name']} mu={mu:g} t={t:.3f}",
             flush=True,
         )
         run_pipe(run_args)

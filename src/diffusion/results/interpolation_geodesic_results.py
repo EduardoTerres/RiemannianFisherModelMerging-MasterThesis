@@ -33,6 +33,7 @@ from src.diffusion.results.pareto import (
 
 
 DEFAULT_T_VALUES = (0.0, 0.2, 0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 1.0)
+DEFAULT_RESULTS_FOLDER = "samples_interpolation_geodesic"
 
 
 def parse_args():
@@ -40,6 +41,7 @@ def parse_args():
     parser.add_argument("--config_path", type=str, default=str(REPO_ROOT / "src/diffusion/config/config.yaml"))
     parser.add_argument("--output_dir", type=Path, default=REPO_ROOT / "outputs/diffusion")
     parser.add_argument("--method_output_root", type=Path, default=None)
+    parser.add_argument("--results_folder", type=str, default=DEFAULT_RESULTS_FOLDER)
     parser.add_argument("--plot_dir", type=Path, default=None)
     parser.add_argument("--output_prefix", type=str, default="interpolation_geodesic")
     parser.add_argument("--samples", nargs="+", default=["all_dataset_pairs"])
@@ -75,8 +77,9 @@ def prompt(pair, template, placeholders=True):
 
 
 def method_root(args, method):
-    root = args.method_output_root or args.output_dir / "samples_10_prompts"
-    return Path(root) / method_output_name(args, method)
+    if args.method_output_root is None:
+        return args.output_dir / args.results_folder
+    return Path(args.method_output_root) / method_output_name(args, method)
 
 
 def method_folder(args, method, pair, t, version):

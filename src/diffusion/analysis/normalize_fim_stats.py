@@ -58,6 +58,10 @@ def fim_paths(entry):
     ]
 
 
+def fim_path(entry, kind):
+    return entry["fim_path"] if kind == "FIM" else kfac_path(entry)
+
+
 def kfac_factors(fim, key, device):
     row = fim[f"{key}.row"].to(device).float()
     col = fim[f"{key}.col"].to(device).float()
@@ -101,6 +105,25 @@ def kfac_coord_diag_values(fim, key, device):
         row, col = torch.triu_indices(diag.shape[-2], diag.shape[-1], offset=1, device=device)
         values.append(diag[row, col])
     return torch.stack(values)
+
+
+def fisher_trace(fim, device):
+    total = torch.tensor(0.0, device=device)
+    if any(k.endswith(".row") for k in fim):
+        keys = sorted(k.removesuffix(".row") for k in fim if k.endswith(".row"))
+        for key in keys:
+            total += kfac_coord_diag_values(fim, key, device).sum()
+        return total.item()
+
+    for key, value in fim.items():
+        if parse_fisher_key(key) is None:
+            continue
+        value = value.to(device=device).float()
+        if value.dim() >= 2 and value.shape[-1] == value.shape[-2]:
+            total += value.diagonal(dim1=-2, dim2=-1).sum()
+        else:
+            total += value.sum()
+    return total.item()
 
 
 def transported_delta(a_tensor, b_tensor):
@@ -497,6 +520,83 @@ def plot_all_pair_fim_and_diff_grids(device):
             print(f"saved plot {save_path}")
 
 
+def directional_kl(source_state, target_state, fim, device):
+    keys = sorted(k for k in source_state if k in target_state and is_oft_key(k))
+    fmap = build_map(source_state, fim, keys)
+    is_kfac = any(k.endswith(".row") for k in fim)
+
+    quad = torch.tensor(0.0, device=device)
+    for key in keys:
+        fkey = fisher_key(key, fmap)
+        delta = transported_delta(source_state[key], target_state[key])
+        if is_kfac:
+            quad += kfac_quad(fim, fkey, delta)
+        else:
+            quad += (fim[fkey].float() * to_coords(delta).square()).sum()
+    return 0.5 * quad.item()
+
+
+def print_all_pair_kl_ratios(device):
+    print("=" * 50)
+    print("paired KL concept-closeness t for all concept-style pairs")
+
+    concept_states = {
+        entry["name"]: load_file(entry["adapter_path"], device=str(device)) for entry in CONCEPT_ADAPTERS
+    }
+    style_states = {
+        entry["name"]: load_file(entry["adapter_path"], device=str(device)) for entry in STYLE_ADAPTERS
+    }
+
+    for kind in ("FIM", "KFAC"):
+        print("-" * 50)
+        print(kind)
+        concept_fishers = {}
+        style_fishers = {}
+        concept_traces = {}
+        style_traces = {}
+        for entry in CONCEPT_ADAPTERS:
+            path = fim_path(entry, kind)
+            if Path(path).exists():
+                fim = load_file(path, device=str(device))
+                concept_fishers[entry["name"]] = fim
+                concept_traces[entry["name"]] = fisher_trace(fim, device)
+        for entry in STYLE_ADAPTERS:
+            path = fim_path(entry, kind)
+            if Path(path).exists():
+                fim = load_file(path, device=str(device))
+                style_fishers[entry["name"]] = fim
+                style_traces[entry["name"]] = fisher_trace(fim, device)
+
+        for pair in DIFFUSION_MERGE_PAIRS:
+            concept = pair["concept"]
+            style = pair["style"]
+            concept_fim = concept_fishers.get(concept["name"])
+            style_fim = style_fishers.get(style["name"])
+            if concept_fim is None or style_fim is None:
+                print(f"{pair['name']} missing_{kind.lower()}=nan")
+                continue
+
+            kl_a_to_b = directional_kl(
+                concept_states[concept["name"]],
+                style_states[style["name"]],
+                concept_fim,
+                device,
+            )
+            kl_b_to_a = directional_kl(
+                style_states[style["name"]],
+                concept_states[concept["name"]],
+                style_fim,
+                device,
+            )
+            trace_b = style_traces[style["name"]]
+            trace_a = concept_traces[concept["name"]]
+            normalized_kl_a_to_b = kl_a_to_b / trace_b if trace_b != 0.0 else float("nan")
+            normalized_kl_b_to_a = kl_b_to_a / trace_a if trace_a != 0.0 else float("nan")
+            denom = normalized_kl_a_to_b + normalized_kl_b_to_a
+            concept_closeness_t = normalized_kl_b_to_a / denom if denom != 0.0 else float("nan")
+            print(f"{kind} {pair['name']} t={concept_closeness_t:.8g}")
+
+
 def report_one(source, target, source_state, target_state, source_label, target_label, fim_kind, fim_path, device):
     if not Path(fim_path).exists():
         print(f"{fim_kind}: skip missing {fim_path}")
@@ -545,6 +645,7 @@ def report(source, target, source_label, target_label, device):
 
 def main():
     device = torch.device(DEVICE)
+    print_all_pair_kl_ratios(device)
     print(f"A={A['name']} B={B['name']}")
     results_a = report(A, B, "A", "B", device)
     print("=" * 50)

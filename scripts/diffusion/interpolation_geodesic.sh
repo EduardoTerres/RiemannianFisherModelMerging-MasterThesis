@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=08:00:00
-#SBATCH --array=0-5
+#SBATCH --array=0-11
 #SBATCH --output=outputs/diffusion/slurms/interpolation_geodesic_%A_%a.out
 
 set -e
@@ -17,7 +17,7 @@ ORTHOFUSE_POSTPROCESSING="${ORTHOFUSE_POSTPROCESSING:-curve_over_id}"
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-METHOD_OUTPUT_ROOT="${OUTPUT_DIR}/samples_10_prompts"
+METHOD_OUTPUT_ROOT="${OUTPUT_DIR}/samples_interpolation_geodesic"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -34,13 +34,19 @@ export MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/matplotlib-${USER}}"
 
 mkdir -p "${MPLCONFIGDIR}"
 
-CONCEPTS=(
-  "cat"
-  "cat2"
-  "dog"
-  "dog2"
-  "dog3"
-  "dog6"
+STYLES=(
+  "01_01"
+  "01_02"
+  "01_03"
+  "01_07"
+  "01_08"
+  "02_03"
+  "03_04"
+  "dolina"
+  "etsy"
+  "gondoliers"
+  "image_scan"
+  "pots"
 )
 
 T_VALUES=(
@@ -63,9 +69,9 @@ METHODS=(
 )
 
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
-CONCEPT="${CONCEPTS[${TASK_ID}]}"
+STYLE="${STYLES[${TASK_ID}]}"
 
-echo "[interpolation-geodesic] array_task=${TASK_ID} concept=${CONCEPT}"
+echo "[interpolation-geodesic] array_task=${TASK_ID} style=${STYLE}"
 echo "[interpolation-geodesic] fisher_backend=${FISHER_BACKEND} correction_mu=${CORRECTION_MU} fim_normalization=${FIM_NORMALIZATION}"
 echo "[interpolation-geodesic] t_values=${T_VALUES[*]}"
 
@@ -73,7 +79,7 @@ python "${REPO_ROOT}/src/diffusion/geodesic_interpolation.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
   --output_dir="${OUTPUT_DIR}" \
   --method_output_root="${METHOD_OUTPUT_ROOT}" \
-  --concept_name="${CONCEPT}" \
+  --style_name="${STYLE}" \
   --methods "${METHODS[@]}" \
   --t_values "${T_VALUES[@]}" \
   --geodesic_backend=cayley \

@@ -24,7 +24,7 @@ from moft.model.moft import MOFTCrossAttnProcessor
 from src.diffusion.dataset_1 import CONCEPT_ADAPTERS, STYLE_ADAPTERS, get_entry
 
 
-BASE_PROMPT = "a photo of {0}"
+BASE_PROMPT = "a photo of a {0}"
 VAE_MODEL_PATH = "madebyollin/sdxl-vae-fp16-fix"
 HF_HUB_CACHE_ENV = "HF_HUB_CACHE"
 HF_HOME_ENV = "HF_HOME"

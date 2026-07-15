@@ -16,7 +16,7 @@ ORTHOFUSE_POSTPROCESSING="${ORTHOFUSE_POSTPROCESSING:-curve_over_id}"
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-METHOD_OUTPUT_ROOT="${OUTPUT_DIR}/samples_10_prompts"
+METHOD_OUTPUT_ROOT="${OUTPUT_DIR}/samples_interpolation_geodesic"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env

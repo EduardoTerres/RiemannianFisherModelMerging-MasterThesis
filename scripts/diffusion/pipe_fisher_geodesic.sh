@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=06:00:00
-#SBATCH --array=0-5
+#SBATCH --array=0-11
 #SBATCH --output=outputs/diffusion/slurms/pipe_fisher_geodesic_%A_%a.out
 
 set -e
@@ -29,24 +29,31 @@ export DIFFUSERS_OFFLINE=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONPATH="${REPO_ROOT}/OrthoFuse:${REPO_ROOT}:${PYTHONPATH:-}"
 
-CONCEPTS=(
-  "cat"
-  "cat2"
-  "dog"
-  "dog2"
-  "dog3"
-  "dog6"
+STYLES=(
+  "01_01"
+  "01_02"
+  "01_03"
+  "01_07"
+  "01_08"
+  "02_03"
+  "03_04"
+  "dolina"
+  "etsy"
+  "gondoliers"
+  "image_scan"
+  "pots"
 )
 
-CONCEPT="${CONCEPTS[${SLURM_ARRAY_TASK_ID:-0}]}"
+TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
+STYLE="${STYLES[${TASK_ID}]}"
 
-echo "[pipe_fisher_geodesic] array_task=${SLURM_ARRAY_TASK_ID:-0} concept=${CONCEPT}"
+echo "[pipe_fisher_geodesic] array_task=${TASK_ID} style=${STYLE}"
 echo "[pipe_fisher_geodesic] fisher_backend=${FISHER_BACKEND} correction_mu=${CORRECTION_MU} fim_normalization=${FIM_NORMALIZATION} output_dir=${METHOD_OUTPUT_DIR}"
 
 python "${REPO_ROOT}/src/diffusion/pipe_fisher_geodesic.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
   --output_dir="${METHOD_OUTPUT_DIR}" \
-  --concept_name="${CONCEPT}" \
+  --samples="style:${STYLE}" \
   --t=0.6 \
   --geodesic_backend=cayley \
   --fisher_backend="${FISHER_BACKEND}" \

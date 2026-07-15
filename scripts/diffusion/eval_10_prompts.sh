@@ -19,6 +19,7 @@ TABLES_DIR="${OUTPUT_DIR}/tables"
 METHODS=(
   orthofuse
   fisher_geodesic_diagonal_corr_2_fim_frobenius
+  fisher_geodesic_diagonal_corr_2_fim_trace
 )
 
 source "$(conda info --base)/etc/profile.d/conda.sh"

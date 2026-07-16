@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument(
         "--fim_normalization",
         choices=["none", "trace", "frobenius", "kl"],
-        default="frobenius",
+        default="none",
     )
     parser.add_argument("--geodesic_backend", choices=["cayley"], default="cayley")
     parser.add_argument("--geodesic_use_fishers", action="store_true")
@@ -129,6 +129,11 @@ def apply_pair(args, pair):
     args.concept_class_name = pair["concept"]["class_name"]
     args.placeholder_token_concept = pair["concept"]["placeholder_token"]
     args.placeholder_token_style = pair["style"]["placeholder_token"]
+    print(f"[pipe_gradients] pair={pair['name']} backend={backend}", flush=True)
+    print(f"[pipe_gradients] concept_adapter={args.moft_layers_concept_path}", flush=True)
+    print(f"[pipe_gradients] style_adapter={args.moft_layers_style_path}", flush=True)
+    print(f"[pipe_gradients] concept_fim={args.concept_fisher_path}", flush=True)
+    print(f"[pipe_gradients] style_fim={args.style_fisher_path}", flush=True)
     return args
 
 

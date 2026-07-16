@@ -455,7 +455,11 @@ def _gradients_merge_with_merging_py(
 
     if merger is None:
         merger_cls = _load_root_oft_merging_class()
-        merger = merger_cls(device=str(device), fisher_backend=fisher_backend)
+        merger = merger_cls(
+            device=str(device),
+            fisher_backend=fisher_backend,
+            fim_normalization=fim_normalization,
+        )
     coords = [
         _full_generator_to_oft_coords(merger, tensor).to(device=device)
         for tensor in tensors
@@ -863,6 +867,8 @@ class GradientsMergeInferencer(MOFTInferencer):
         if mode == "geodesic" and getattr(self.args, "geodesic_use_fishers", False):
             if fim_normalization is not None:
                 backend_suffix += f"_fim_{fim_normalization}"
+        elif "fisher" in mode and fim_normalization not in {None, "none"}:
+            backend_suffix += f"_fim_{fim_normalization}"
         pair_name = getattr(self.args, "dataset_pair_name", None)
         pair_suffix = f"_{pair_name}" if pair_name else ""
         self.inference_folder_name = (
@@ -934,11 +940,6 @@ class GradientsMergeInferencer(MOFTInferencer):
             device=self.device,
         )
         _log_merge(f"loaded concept adapter in {time.time() - load_start:.2f}s")
-        print_state_dict_summary(
-            concept_state,
-            "Gradients concept adapter",
-            self.args.moft_layers_concept_path,
-        )
         _log_merge(f"loading style adapter: {self.args.moft_layers_style_path}")
         load_start = time.time()
         style_state = load_file(
@@ -946,11 +947,6 @@ class GradientsMergeInferencer(MOFTInferencer):
             device=self.device,
         )
         _log_merge(f"loaded style adapter in {time.time() - load_start:.2f}s")
-        print_state_dict_summary(
-            style_state,
-            "Gradients style adapter",
-            self.args.moft_layers_style_path,
-        )
         if concept_state.keys() != style_state.keys():
             missing_from_style = sorted(concept_state.keys() - style_state.keys())
             missing_from_concept = sorted(style_state.keys() - concept_state.keys())
@@ -972,8 +968,6 @@ class GradientsMergeInferencer(MOFTInferencer):
             load_start = time.time()
             style_fisher = load_file(fisher_paths[1], device=self.device)
             _log_merge(f"loaded style Fisher in {time.time() - load_start:.2f}s")
-            print_state_dict_summary(concept_fisher, "Gradients concept Fisher", fisher_paths[0])
-            print_state_dict_summary(style_fisher, "Gradients style Fisher", fisher_paths[1])
 
         merge_keys = [key for key in concept_state if key.endswith((".L", ".R"))]
         passthrough_keys = len(concept_state) - len(merge_keys)
@@ -1002,7 +996,7 @@ class GradientsMergeInferencer(MOFTInferencer):
         if correction_mu is not None:
             _log_merge(f"post-merge correction mu={correction_mu:g}")
         fim_normalization = getattr(self.args, "fim_normalization", "frobenius")
-        if merge_mode == "geodesic" and concept_fisher is not None:
+        if concept_fisher is not None and fim_normalization not in {None, "none"}:
             _log_merge(f"FIM normalization={fim_normalization}")
         shape_counts = Counter(tuple(concept_state[key].shape) for key in merge_keys)
         side_counts = Counter(key.rsplit(".", 1)[-1] for key in merge_keys)
@@ -1044,7 +1038,11 @@ class GradientsMergeInferencer(MOFTInferencer):
                     fim_normalization=fim_normalization,
                 )
             else:
-                merge_engine = merger_cls(device=str(self.device), fisher_backend=fisher_backend)
+                merge_engine = merger_cls(
+                    device=str(self.device),
+                    fisher_backend=fisher_backend,
+                    fim_normalization=fim_normalization,
+                )
             _log_merge(f"initialized {merger_cls.__name__} engine once for this adapter merge")
         merge_start = time.time()
         merged_count = 0
@@ -1117,15 +1115,10 @@ class GradientsMergeInferencer(MOFTInferencer):
 
         _log_merge("setting UNet attention processors")
         self.unet.set_attn_processor(moft_attn_procs)
-        print_unet_oft_summary(self.unet, "Gradients UNet after processor setup")
         _log_merge("loading merged state into AttnProcsLayers")
         self.moft_layers = AttnProcsLayers(self.unet.attn_processors)
         self.moft_layers.load_state_dict(merged_state)
         self.moft_layers = self.moft_layers.to(self.device)
-        print_parameter_loading_summary(
-            self.moft_layers,
-            "Gradients merged adapter layers after load_state_dict",
-        )
 
         moft_layer_names = (
             "to_q_moft",

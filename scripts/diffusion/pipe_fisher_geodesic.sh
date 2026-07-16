@@ -12,7 +12,7 @@ set -e
 
 FISHER_BACKEND="diagonal"  # "diagonal" or "kfac"
 CORRECTION_MU=2
-FIM_NORMALIZATION="trace"  # "none", "trace", "frobenius", or "kl"
+FIM_NORMALIZATION="none"  # "none", "trace", "frobenius", or "kl"
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
@@ -49,6 +49,7 @@ STYLE="${STYLES[${TASK_ID}]}"
 
 echo "[pipe_fisher_geodesic] array_task=${TASK_ID} style=${STYLE}"
 echo "[pipe_fisher_geodesic] fisher_backend=${FISHER_BACKEND} correction_mu=${CORRECTION_MU} fim_normalization=${FIM_NORMALIZATION} output_dir=${METHOD_OUTPUT_DIR}"
+echo "[pipe_fisher_geodesic] paths are printed by pipe_gradients after resolving style:${STYLE}"
 
 python "${REPO_ROOT}/src/diffusion/pipe_fisher_geodesic.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \

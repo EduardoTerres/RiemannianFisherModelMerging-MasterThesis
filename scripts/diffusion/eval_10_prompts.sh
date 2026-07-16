@@ -20,6 +20,8 @@ METHODS=(
   orthofuse
   fisher_geodesic_diagonal_corr_2_fim_frobenius
   fisher_geodesic_diagonal_corr_2_fim_trace
+  fisher_geodesic_diagonal_corr_2_fim_kl
+  fisher_geodesic_diagonal_corr_2_fim_none
 )
 
 source "$(conda info --base)/etc/profile.d/conda.sh"

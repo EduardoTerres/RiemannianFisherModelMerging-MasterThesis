@@ -5,7 +5,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=05:00:00
-#SBATCH --output=outputs/diffusion/slurms/fim_%A.out
+#SBATCH --array=8-17
+#SBATCH --output=outputs/diffusion/slurms/fim_%A_%a.out
 
 set -e
 
@@ -19,11 +20,42 @@ export TRANSFORMERS_OFFLINE=1
 export DIFFUSERS_OFFLINE=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+TASKS=(
+  "concept cat2"
+  "concept cat"
+  "concept dog"
+  "concept dog2"
+  "concept dog3"
+  "concept dog6"
+  "style 01_01"
+  "style 01_02"
+  "style 01_03"
+  "style 01_07"
+  "style 01_08"
+  "style 02_03"
+  "style 03_04"
+  "style dolina"
+  "style etsy"
+  "style gondoliers"
+  "style image_scan"
+  "style pots"
+)
+
+read -r ENTRY_TYPE DATASET_NAME <<< "${TASKS[$SLURM_ARRAY_TASK_ID]}"
+
+REPEATS=500
+if [[ "${ENTRY_TYPE}" == "style" ]]; then
+  REPEATS=2500
+fi
+
+echo "Running FIM for ${ENTRY_TYPE}:${DATASET_NAME} with repeats=${REPEATS}"
+
 python src/diffusion/compute_fim.py \
   --config_path=src/diffusion/config/config.yaml \
-  --output_dir=/scratch-shared/eterres/fishers/sdxl \
-  --debug \
+  --output_dir=/scratch-shared/eterres/fishers/sdxl_decharted \
+  --entry_type="${ENTRY_TYPE}" \
+  --dataset_name="${DATASET_NAME}" \
   --batch_size=1 \
-  --repeats=500 \
+  --repeats="${REPEATS}" \
   --device=cuda \
   --weight_dtype=float32

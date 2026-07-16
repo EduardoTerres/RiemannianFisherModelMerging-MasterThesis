@@ -58,6 +58,8 @@ def gradients_inference_folder_name(args):
     if mode == "geodesic" and getattr(args, "geodesic_use_fishers", False):
         if fim_normalization is not None:
             backend_suffix += f"_fim_{fim_normalization}"
+    elif "fisher" in mode and fim_normalization not in {None, "none"}:
+        backend_suffix += f"_fim_{fim_normalization}"
 
     pair_name = getattr(args, "dataset_pair_name", None)
     pair_suffix = f"_{pair_name}" if pair_name else ""

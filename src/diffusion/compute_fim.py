@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO_ROOT / "OrthoFuse"))
 
 from moft.data.dataset_sdxl import ImageDataset, StyleDataset, collate_fn, compute_time_ids, encode_tokens, tokenize_prompt
 from moft.model.moft import MOFTCrossAttnProcessor
+from moft.model.monarch_orthogonal import MonarchOrthogonal
 from src.diffusion.dataset_1 import CONCEPT_ADAPTERS, STYLE_ADAPTERS, get_entry
 
 
@@ -48,11 +49,112 @@ def log_stage(message):
 
 
 def weight_dtype(name):
-    return {
-        "float32": torch.float32,
-        "bf16": torch.bfloat16,
-        "fp16": torch.float16,
-    }[name]
+    return {"float32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[name]
+
+
+def cay(omega, s):
+    n = omega.shape[-1]
+    eye = torch.eye(n, dtype=omega.dtype, device=omega.device).expand_as(omega)
+    return torch.linalg.solve(eye - s * omega, eye + s * omega, left=False)
+
+
+def upper_triangle_values(tensor):
+    row, col = torch.triu_indices(tensor.shape[-2], tensor.shape[-1], offset=1, device=tensor.device)
+    return tensor[..., row, col]
+
+
+def infer_oft_cayley_scale(device="cpu"):
+    nb, h = 8, 1e-4
+    layer = MonarchOrthogonal(nb, nblocks=1, orthogonal=True, method="cayley", device=device)
+    e = torch.randn(1, nb, nb, device=device)
+    e = 0.5 * (e - e.transpose(-1, -2))
+    with torch.no_grad():
+        fd = (layer.cayley_batch(h * e) - layer.cayley_batch(-h * e)) / (2 * h)
+    return (0.5 * (fd * e).sum() / (e.square().sum().clamp_min(1e-30))).item()
+
+
+def run_oft_geometry_checks(s):
+    torch.manual_seed(0)
+    nb, h = 8, 1e-6
+    dtype = torch.float64
+    eye = torch.eye(nb, dtype=dtype)
+    om = torch.randn(nb, nb, dtype=dtype)
+    om = 0.1 * 0.5 * (om - om.T) / om.norm()
+    e = torch.randn(nb, nb, dtype=dtype)
+    e = 0.5 * (e - e.T)
+
+    theta = cay(om, s)
+    assert torch.allclose(om, -om.T, atol=1e-12, rtol=0)
+    assert torch.allclose(theta.T @ theta, eye, atol=1e-10, rtol=1e-10)
+    assert torch.isclose(torch.linalg.det(theta), torch.tensor(1.0, dtype=dtype), atol=1e-10, rtol=1e-10)
+
+    c = torch.randn(nb, nb, dtype=dtype)
+    p = om.clone().detach().requires_grad_(True)
+    loss = (cay(0.5 * (p - p.T), s) * c).sum()
+    loss.backward()
+    g = p.grad - p.grad.T
+    fd = (((cay(om + h * e, s) * c).sum() - (cay(om - h * e, s) * c).sum()) / (2 * h)).item()
+    inner = (0.5 * (g * e).sum()).item()
+    assert abs(fd - inner) <= 1e-4 * max(abs(fd), abs(inner), 1.0)
+
+    fd0 = (cay(h * e, s) - cay(-h * e, s)) / (2 * h)
+    assert torch.allclose(fd0, 2 * s * e, rtol=1e-5, atol=1e-8)
+
+    theta_half = cay(om / 2, s)
+    residual = (theta_half @ theta_half - theta).norm()
+    assert residual < 10.0 * om.norm().pow(3)
+
+    g0 = torch.randn(nb, nb, dtype=dtype)
+    g0 = 0.5 * (g0 - g0.T)
+    w = ((eye - s * om) @ g0 @ (eye + s * om)) / (2 * s)
+    u = theta_half @ w @ theta_half.T
+    a = theta_half @ (eye - s * om)
+    fused = a @ g0 @ a.T / (2 * s)
+    assert torch.allclose(theta_half.T @ theta_half, eye, atol=1e-10, rtol=1e-10)
+    assert torch.allclose(w, -w.T, atol=1e-10, rtol=1e-10)
+    assert torch.allclose(u, -u.T, atol=1e-10, rtol=1e-10)
+    assert torch.allclose(u, fused, atol=1e-10, rtol=1e-10)
+    assert torch.isclose(u.norm(), w.norm(), atol=1e-10, rtol=1e-10)
+
+    a0 = cay(torch.zeros_like(om), s) @ (eye - s * torch.zeros_like(om))
+    assert torch.allclose(a0, eye, atol=1e-12, rtol=0)
+    assert torch.allclose(a0 @ g0 @ a0.T / (2 * s), g0 / (2 * s), atol=1e-12, rtol=0)
+    assert not torch.allclose(u, g0 / (2 * s), atol=1e-8, rtol=1e-5)
+
+    i, j = 2, 5
+    eij = torch.zeros(nb, nb, dtype=dtype)
+    eij[i, j] = 1.0
+    eij[j, i] = -1.0
+    assert torch.isclose(0.5 * (eij * u).sum(), u[i, j], atol=1e-12, rtol=1e-12)
+
+
+@torch.no_grad()
+def precompute_transport_factors(named_params, s):
+    factors = {}
+    log_stage(f"START precompute Cayley de-chart/transport factors for {len(named_params)} tensors")
+    start = time.time()
+    for name, param in tqdm(named_params.items(), desc="Precomputing Cayley factors", unit="tensor"):
+        om = 0.5 * (param.detach().float() - param.detach().float().transpose(-1, -2))
+        eye = torch.eye(om.shape[-1], dtype=om.dtype, device=om.device).expand_as(om)
+        factors[name] = (cay(om / 2, s) @ (eye - s * om)).detach()
+    log_stage(f"DONE precompute Cayley factors in {time.time() - start:.1f}s")
+    return factors
+
+
+def transport_grad(raw_param_grad, factor, s):
+    chart_grad = raw_param_grad.float() - raw_param_grad.float().transpose(-1, -2)
+    return factor @ chart_grad @ factor.transpose(-1, -2) / (2 * s)
+
+
+@torch.no_grad()
+def precompute_transport_rotations(named_params):
+    s = infer_oft_cayley_scale("cpu")
+    return {name: (factor, s) for name, factor in precompute_transport_factors(named_params, s).items()}
+
+
+def transport_skew_gradient(skew_grad, packed_factor):
+    factor, s = packed_factor
+    return factor @ skew_grad.float() @ factor.transpose(-1, -2) / s
 
 
 def maybe_init_wandb(args, config):
@@ -91,17 +193,12 @@ def maybe_init_wandb(args, config):
 def log_fisher_metrics(wandb, fisher, normalizer, previous):
     if wandb is None or wandb.run is None:
         return previous
-
-    running = {
-        name: (value.detach().float() / max(normalizer, 1)).cpu()
-        for name, value in fisher.items()
-    }
+    running = {name: (value.detach().float() / max(normalizer, 1)).cpu() for name, value in fisher.items()}
     flat = torch.cat([value.flatten() for value in running.values()])
     metric_flat = flat
     if metric_flat.numel() > WANDB_METRIC_MAX_ENTRIES:
         step = metric_flat.numel() / WANDB_METRIC_MAX_ENTRIES
         metric_flat = metric_flat[(torch.arange(WANDB_METRIC_MAX_ENTRIES) * step).long()]
-
     payload = {
         "fim/step": normalizer,
         "fim/num_samples": normalizer,
@@ -116,7 +213,6 @@ def log_fisher_metrics(wandb, fisher, normalizer, previous):
         diff = flat - prev_flat
         payload["fim/rel_fro_change"] = (diff.norm() / prev_flat.norm().clamp_min(1e-12)).item()
         payload["fim/cosine_to_prev"] = F.cosine_similarity(flat, prev_flat, dim=0, eps=1e-12).item()
-
     wandb.log(payload)
     return {name: value.clone() for name, value in running.items()}
 
@@ -135,7 +231,6 @@ def build_moft_processors(unet, config, device):
             hidden_size = unet.config.block_out_channels[block_id]
         else:
             continue
-
         processors[name] = MOFTCrossAttnProcessor(
             hidden_size=hidden_size,
             cross_attention_dim=cross_attention_dim,
@@ -145,27 +240,6 @@ def build_moft_processors(unet, config, device):
             device=device,
         )
     return processors
-
-
-def upper_triangle_values(tensor):
-    row, col = torch.triu_indices(tensor.shape[-2], tensor.shape[-1], offset=1, device=tensor.device)
-    return tensor[..., row, col]
-
-
-@torch.no_grad()
-def precompute_transport_rotations(named_params):
-    transport_rotations = {}
-    log_stage(f"START precompute blockwise transport rotations for {len(named_params)} tensors")
-    start = time.time()
-    for name, param in tqdm(named_params.items(), desc="Precomputing blockwise transport", unit="tensor"):
-        skew_matrix = 0.5 * (param.detach().float() - param.detach().float().transpose(-1, -2))
-        transport_rotations[name] = torch.matrix_exp(skew_matrix / 2).detach()
-    log_stage(f"DONE precompute blockwise transport rotations in {time.time() - start:.1f}s")
-    return transport_rotations
-
-
-def transport_skew_gradient(skew_grad, transport_rotation):
-    return transport_rotation @ skew_grad @ transport_rotation.transpose(-1, -2)
 
 
 def apply_entry_defaults(args):
@@ -185,7 +259,6 @@ def iter_entries(args):
         if args.entry_type is None or args.dataset_name is None:
             raise ValueError("--entry_type and --dataset_name must be set together.")
         return [get_entry(args.entry_type, args.dataset_name)]
-
     entries = []
     selected = set(args.datasets)
     if "concepts" in selected:
@@ -201,9 +274,7 @@ def resolve_seed(args, config):
 
 def resolve_repo_path(path):
     path = Path(path)
-    if path.is_absolute():
-        return path
-    return REPO_ROOT / path
+    return path if path.is_absolute() else REPO_ROOT / path
 
 
 def get_hf_cache_dir():
@@ -213,18 +284,14 @@ def get_hf_cache_dir():
 
 
 def pretrained_load_kwargs(args, config, *, revision=True):
-    kwargs = {
-        "cache_dir": get_hf_cache_dir(),
-    }
+    kwargs = {"cache_dir": get_hf_cache_dir()}
     if revision:
         kwargs["revision"] = config.revision
     return kwargs
 
 
 def vae_load_kwargs(args):
-    return {
-        "cache_dir": get_hf_cache_dir(),
-    }
+    return {"cache_dir": get_hf_cache_dir()}
 
 
 def get_placeholder(config, args):
@@ -253,16 +320,9 @@ def build_dataset_and_prompt(args, config, tokenizers):
             size=config.resolution,
             repeats=args.repeats,
         )
-        loader = DataLoader(
-            dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            collate_fn=lambda examples: collate_fn(examples, False),
-            num_workers=0,
-        )
+        loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, collate_fn=lambda x: collate_fn(x, False), num_workers=0)
         log_stage(f"DONE build style dataset len={len(dataset)} prompt={dataset.instance_prompt!r} in {time.time() - start:.1f}s")
         return dataset, loader, dataset.instance_prompt
-
     dataset = ImageDataset(args.train_data_dir, resolution=config.resolution, repeats=args.repeats)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     prompt = BASE_PROMPT.format(f"{placeholder} {class_name}")
@@ -289,109 +349,61 @@ def parse_args():
 
 def load_base_components(args, config, device):
     pretrained_model_path = config.pretrained_model_name_or_path
-    vae_model_path = VAE_MODEL_PATH
+    dtype = weight_dtype(args.weight_dtype)
     pretrained_kwargs = pretrained_load_kwargs(args, config)
     vae_kwargs = vae_load_kwargs(args)
-    dtype = weight_dtype(args.weight_dtype)
     log_stage(
-        f"Using device={device}; pretrained_model={config.pretrained_model_name_or_path}; "
-        f"revision={config.revision}; vae_model={vae_model_path}; cache_dir={pretrained_kwargs['cache_dir']}; "
-        f"local_files_only=False; weight_dtype={args.weight_dtype}"
+        f"Using device={device}; pretrained_model={pretrained_model_path}; revision={config.revision}; "
+        f"vae_model={VAE_MODEL_PATH}; cache_dir={pretrained_kwargs['cache_dir']}; local_files_only=False; "
+        f"weight_dtype={args.weight_dtype}"
     )
 
-    log_stage(
-        "START load scheduler "
-        f"model={pretrained_model_path} subfolder={SCHEDULER_SUBFOLDER} revision={config.revision}"
-    )
+    log_stage(f"START load scheduler model={pretrained_model_path} subfolder={SCHEDULER_SUBFOLDER} revision={config.revision}")
     start = time.time()
-    scheduler = DDPMScheduler.from_pretrained(
-        pretrained_model_path,
-        subfolder=SCHEDULER_SUBFOLDER,
-        **pretrained_kwargs,
-    )
+    scheduler = DDPMScheduler.from_pretrained(pretrained_model_path, subfolder=SCHEDULER_SUBFOLDER, **pretrained_kwargs)
     log_stage(f"DONE load scheduler in {time.time() - start:.1f}s")
 
-    log_stage(
-        "START load UNet "
-        f"model={pretrained_model_path} subfolder={UNET_SUBFOLDER} revision={config.revision}"
-    )
+    log_stage(f"START load UNet model={pretrained_model_path} subfolder={UNET_SUBFOLDER} revision={config.revision}")
     start = time.time()
-    unet = UNet2DConditionModel.from_pretrained(
-        pretrained_model_path,
-        subfolder=UNET_SUBFOLDER,
-        torch_dtype=dtype,
-        **pretrained_kwargs,
-    )
+    unet = UNet2DConditionModel.from_pretrained(pretrained_model_path, subfolder=UNET_SUBFOLDER, torch_dtype=dtype, **pretrained_kwargs)
     log_stage(f"DONE load UNet from_pretrained in {time.time() - start:.1f}s")
     log_stage(f"START move UNet to {device}")
     start = time.time()
     unet = unet.to(device)
     log_stage(f"DONE move UNet to {device} in {time.time() - start:.1f}s")
 
-    log_stage(f"START load VAE model={vae_model_path}")
+    log_stage(f"START load VAE model={VAE_MODEL_PATH}")
     start = time.time()
-    vae = AutoencoderKL.from_pretrained(
-        vae_model_path,
-        torch_dtype=dtype,
-        **vae_kwargs,
-    )
+    vae = AutoencoderKL.from_pretrained(VAE_MODEL_PATH, torch_dtype=dtype, **vae_kwargs)
     log_stage(f"DONE load VAE from_pretrained in {time.time() - start:.1f}s")
     log_stage(f"START move VAE to {device}")
     start = time.time()
     vae = vae.to(device)
     log_stage(f"DONE move VAE to {device} in {time.time() - start:.1f}s")
 
-    log_stage(
-        "START load tokenizer "
-        f"model={pretrained_model_path} subfolder={TOKENIZER_SUBFOLDER} revision={config.revision}"
-    )
+    log_stage(f"START load tokenizer model={pretrained_model_path} subfolder={TOKENIZER_SUBFOLDER} revision={config.revision}")
     start = time.time()
-    tokenizer = CLIPTokenizer.from_pretrained(
-        pretrained_model_path,
-        subfolder=TOKENIZER_SUBFOLDER,
-        **pretrained_kwargs,
-    )
+    tokenizer = CLIPTokenizer.from_pretrained(pretrained_model_path, subfolder=TOKENIZER_SUBFOLDER, **pretrained_kwargs)
     log_stage(f"DONE load tokenizer in {time.time() - start:.1f}s")
 
-    log_stage(
-        "START load tokenizer_2 "
-        f"model={pretrained_model_path} subfolder={TOKENIZER_2_SUBFOLDER} revision={config.revision}"
-    )
+    log_stage(f"START load tokenizer_2 model={pretrained_model_path} subfolder={TOKENIZER_2_SUBFOLDER} revision={config.revision}")
     start = time.time()
-    tokenizer_2 = CLIPTokenizer.from_pretrained(
-        pretrained_model_path,
-        subfolder=TOKENIZER_2_SUBFOLDER,
-        **pretrained_kwargs,
-    )
+    tokenizer_2 = CLIPTokenizer.from_pretrained(pretrained_model_path, subfolder=TOKENIZER_2_SUBFOLDER, **pretrained_kwargs)
     log_stage(f"DONE load tokenizer_2 in {time.time() - start:.1f}s")
 
-    log_stage(
-        "START load text_encoder "
-        f"model={pretrained_model_path} subfolder={TEXT_ENCODER_SUBFOLDER} revision={config.revision}"
-    )
+    log_stage(f"START load text_encoder model={pretrained_model_path} subfolder={TEXT_ENCODER_SUBFOLDER} revision={config.revision}")
     start = time.time()
-    text_encoder = CLIPTextModel.from_pretrained(
-        pretrained_model_path,
-        subfolder=TEXT_ENCODER_SUBFOLDER,
-        torch_dtype=dtype,
-        **pretrained_kwargs,
-    )
+    text_encoder = CLIPTextModel.from_pretrained(pretrained_model_path, subfolder=TEXT_ENCODER_SUBFOLDER, torch_dtype=dtype, **pretrained_kwargs)
     log_stage(f"DONE load text_encoder from_pretrained in {time.time() - start:.1f}s")
     log_stage(f"START move text_encoder to {device}")
     start = time.time()
     text_encoder = text_encoder.to(device)
     log_stage(f"DONE move text_encoder to {device} in {time.time() - start:.1f}s")
 
-    log_stage(
-        "START load text_encoder_2 "
-        f"model={pretrained_model_path} subfolder={TEXT_ENCODER_2_SUBFOLDER} revision={config.revision}"
-    )
+    log_stage(f"START load text_encoder_2 model={pretrained_model_path} subfolder={TEXT_ENCODER_2_SUBFOLDER} revision={config.revision}")
     start = time.time()
     text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
-        pretrained_model_path,
-        subfolder=TEXT_ENCODER_2_SUBFOLDER,
-        torch_dtype=dtype,
-        **pretrained_kwargs,
+        pretrained_model_path, subfolder=TEXT_ENCODER_2_SUBFOLDER, torch_dtype=dtype, **pretrained_kwargs
     )
     log_stage(f"DONE load text_encoder_2 from_pretrained in {time.time() - start:.1f}s")
     log_stage(f"START move text_encoder_2 to {device}")
@@ -425,10 +437,8 @@ def load_base_components(args, config, device):
     trainable_count = 0
     for name, param in moft_layers.named_parameters():
         param.requires_grad_(name.endswith((".L", ".R")))
-        if param.requires_grad:
-            trainable_count += 1
+        trainable_count += int(param.requires_grad)
     log_stage(f"DONE set trainable MOFT parameters trainable_tensors={trainable_count}")
-
     return SimpleNamespace(
         scheduler=scheduler,
         unet=unet,
@@ -441,26 +451,21 @@ def load_base_components(args, config, device):
     )
 
 
-def compute_one(args, config, base):
+def compute_one(args, config, base, chart_scale):
     args = apply_entry_defaults(args)
     log_stage(
         f"START compute_one entry_type={args.entry_type} dataset_name={args.dataset_name} "
         f"adapter_path={args.adapter_path} train_data_dir={args.train_data_dir} output_name={args.output_name}"
     )
-
     wandb = maybe_init_wandb(args, config)
-
     device = torch.device(args.device)
     seed = resolve_seed(args, config)
     log_stage(f"Using seed={seed}")
     torch.manual_seed(seed)
-    scheduler = base.scheduler
-    unet = base.unet
-    vae = base.vae
-    tokenizer = base.tokenizer
-    tokenizer_2 = base.tokenizer_2
-    text_encoder = base.text_encoder
-    text_encoder_2 = base.text_encoder_2
+
+    scheduler, unet, vae = base.scheduler, base.unet, base.vae
+    tokenizer, tokenizer_2 = base.tokenizer, base.tokenizer_2
+    text_encoder, text_encoder_2 = base.text_encoder, base.text_encoder_2
     moft_layers = base.moft_layers
 
     log_stage(f"START load adapter safetensors {args.adapter_path}")
@@ -480,21 +485,14 @@ def compute_one(args, config, base):
     log_stage(f"DONE tokenize prompt in {time.time() - start:.1f}s")
 
     log_stage("START collect named trainable parameters")
-    named_params = {
-        name: param
-        for name, param in moft_layers.named_parameters()
-        if param.requires_grad
-    }
+    named_params = {name: param for name, param in moft_layers.named_parameters() if param.requires_grad}
     log_stage(f"DONE collect named trainable parameters count={len(named_params)}")
-    transport_rotations = precompute_transport_rotations(named_params)
+    transport_factors = precompute_transport_factors(named_params, chart_scale)
 
     log_stage("START allocate Fisher tensors on CPU")
     start = time.time()
     fisher = {
-        name: torch.zeros(
-            (*param.shape[:-2], param.shape[-1] * (param.shape[-1] - 1) // 2),
-            dtype=torch.float32,
-        )
+        name: torch.zeros((*param.shape[:-2], param.shape[-1] * (param.shape[-1] - 1) // 2), dtype=torch.float32)
         for name, param in named_params.items()
     }
     log_stage(f"DONE allocate Fisher tensors count={len(fisher)} in {time.time() - start:.1f}s")
@@ -503,43 +501,35 @@ def compute_one(args, config, base):
     previous_fisher = None
     unet.train()
     log_stage("START FIM dataloader loop")
-    for batch_idx, batch in enumerate(tqdm(loader, desc="Computing transported OFT Lie-basis FIM"), 1):
-        if batch_idx == 1:
-            log_stage("START first FIM batch")
+    for batch_idx, batch in enumerate(tqdm(loader, desc="Computing Cayley-transported OFT Lie FIM"), 1):
         if args.num_samples is not None and count >= args.num_samples:
             break
-
         if batch_idx == 1:
-            log_stage("START first batch tensor transfer/prep")
+            log_stage("START first FIM batch")
+
         images = batch["pixel_values"].to(device) if args.entry_type == "style" else batch["image"].to(device) * 2.0 - 1.0
         original_sizes = batch["original_sizes"].to(device)
         crop_top_lefts = batch["crop_top_lefts"].to(device)
         batch_size = images.shape[0]
-        if batch_idx == 1:
-            log_stage("DONE first batch tensor transfer/prep")
+        take = batch_size if args.num_samples is None else min(batch_size, args.num_samples - count)
 
         with torch.no_grad():
             if batch_idx == 1:
                 log_stage("START first batch VAE/noise/text conditioning")
-            latents = vae.encode(images).latent_dist.sample() * vae.config.scaling_factor
+            latents = vae.encode(images[:take]).latent_dist.sample() * vae.config.scaling_factor
             noise = torch.randn_like(latents)
-            timesteps = torch.randint(
-                0,
-                scheduler.num_train_timesteps,
-                (batch_size,),
-                device=device,
-            )
+            timesteps = torch.randint(0, scheduler.num_train_timesteps, (take,), device=device)
             target = noise if scheduler.config.prediction_type == "epsilon" else scheduler.get_velocity(latents, noise, timesteps)
             noisy_latents = scheduler.add_noise(latents, noise, timesteps)
             encoder_hidden_states, pooled = encode_tokens((text_encoder, text_encoder_2), input_ids_list)
-            encoder_hidden_states = encoder_hidden_states.expand(batch_size, -1, -1)
-            pooled = pooled.expand(batch_size, -1)
-            add_time_ids = compute_time_ids(original_sizes, crop_top_lefts, config.resolution)
+            encoder_hidden_states = encoder_hidden_states.expand(take, -1, -1)
+            pooled = pooled.expand(take, -1)
+            add_time_ids = compute_time_ids(original_sizes[:take], crop_top_lefts[:take], config.resolution)
             if batch_idx == 1:
                 log_stage("DONE first batch VAE/noise/text conditioning")
 
         if batch_idx == 1:
-            log_stage("START first batch UNet forward/backward")
+            log_stage("START first batch UNet forward/per-sample backward")
         unet.zero_grad(set_to_none=True)
         outputs = unet(
             noisy_latents,
@@ -547,40 +537,30 @@ def compute_one(args, config, base):
             encoder_hidden_states,
             added_cond_kwargs={"time_ids": add_time_ids, "text_embeds": pooled},
         ).sample
-        loss = F.mse_loss(outputs.float(), target.float(), reduction="mean")
-        loss.backward()
-        if batch_idx == 1:
-            log_stage("DONE first batch UNet forward/backward")
+        losses = F.mse_loss(outputs.float(), target.float(), reduction="none").flatten(1).mean(1)
 
-        with torch.no_grad():
-            if batch_idx == 1:
-                log_stage("START first batch gradient transport/accumulation")
-            param_iter = named_params.items()
-            if batch_idx == 1:
-                param_iter = tqdm(param_iter, desc="Transporting gradients for first batch", unit="tensor")
-            for name, param in param_iter:
-                if param.grad is None:
-                    continue
-                skew_grad = 0.5 * (param.grad.detach().float() - param.grad.detach().float().transpose(-1, -2))
-                transported_skew_grad = transport_skew_gradient(skew_grad, transport_rotations[name])
-                transported_grad = upper_triangle_values(transported_skew_grad)
-                fisher[name] += transported_grad.pow(2).cpu()
-            if batch_idx == 1:
-                log_stage("DONE first batch gradient transport/accumulation")
+        for sample_idx in range(take):
+            unet.zero_grad(set_to_none=True)
+            losses[sample_idx].backward(retain_graph=sample_idx + 1 < take)
+            with torch.no_grad():
+                param_iter = named_params.items()
+                if batch_idx == 1 and sample_idx == 0:
+                    param_iter = tqdm(param_iter, desc="Transporting first sample gradients", unit="tensor")
+                for name, param in param_iter:
+                    if param.grad is None:
+                        continue
+                    transported = transport_grad(param.grad.detach(), transport_factors[name], chart_scale)
+                    fisher[name] += upper_triangle_values(transported).pow(2).cpu()
+            count += 1
 
-        count += batch_size
         if batch_idx == 1:
+            log_stage("DONE first batch UNet forward/per-sample backward")
             log_stage("DONE first FIM batch")
         if WANDB_LOG_EVERY > 0 and batch_idx % WANDB_LOG_EVERY == 0:
-            if batch_idx == 1:
-                log_stage("START first wandb Fisher metric log")
             previous_fisher = log_fisher_metrics(wandb, fisher, count, previous_fisher)
-            if batch_idx == 1:
-                log_stage("DONE first wandb Fisher metric log")
 
     if count == 0:
         raise RuntimeError("No samples processed.")
-
     for name in fisher:
         fisher[name] /= count
 
@@ -603,6 +583,10 @@ def main():
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable.")
 
+    chart_scale = infer_oft_cayley_scale("cpu")
+    run_oft_geometry_checks(chart_scale)
+    log_stage(f"OFT Cayley chart scale s={chart_scale:g}")
+
     config_path = resolve_repo_path(args.config_path)
     log_stage(f"START load config {config_path}")
     start = time.time()
@@ -615,12 +599,11 @@ def main():
     log_stage(f"Using seed={seed}")
     torch.manual_seed(seed)
     base = load_base_components(args, config, device)
-
     for entry in iter_entries(args):
         run_args = argparse.Namespace(**vars(args))
         run_args.entry_type = entry["type"]
         run_args.dataset_name = entry["name"]
-        compute_one(run_args, config, base)
+        compute_one(run_args, config, base, chart_scale)
 
 
 if __name__ == "__main__":

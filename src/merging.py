@@ -118,6 +118,7 @@ class OFTMerging(RiemannianMerging):
         alphas: Optional[List[float]] = None,
         device: str = "cpu",
         fisher_backend: FisherBackend = "diagonal",
+        fim_normalization: str = "none",
     ):
         super().__init__(manifold=SOnManifold(), lam=lam, alphas=alphas)
         self.manifold: SOnManifold
@@ -125,6 +126,9 @@ class OFTMerging(RiemannianMerging):
         if fisher_backend not in {"diagonal", "kfac"}:
             raise ValueError(f"Unsupported fisher_backend: {fisher_backend!r}")
         self.fisher_backend = fisher_backend
+        if fim_normalization not in {"none", "trace", "frobenius", "kl"}:
+            raise ValueError(f"Unsupported fim_normalization: {fim_normalization!r}")
+        self.fim_normalization = fim_normalization
 
     def oft_params_to_skew_matrix(
             self, oft_params: torch.Tensor, son_dimension: int,
@@ -579,13 +583,79 @@ class OFTMerging(RiemannianMerging):
         A = torch.zeros_like(ref, dtype=torch.float32)  # sum_t alpha_t * f_t
         b = torch.zeros_like(ref, dtype=torch.float32)  # sum_t alpha_t * (lam + f_t) * omega_t
 
-        for alpha_t, omega_t, f_t in zip(alphas, weights_list, fisher_list):
-            ft = f_t.float().to(ref.device)
-            # ft = ft / torch.norm(ft, p="fro").clamp(min=1e-8)
+        kl_coords = self._kl_coords_for_fishers(weights_list)
+        for idx, (alpha_t, omega_t, f_t) in enumerate(zip(alphas, weights_list, fisher_list)):
+            ft = self._normalize_fisher_diagonal(
+                f_t.float().to(ref.device),
+                kl_coords=None if kl_coords is None else kl_coords[idx],
+            )
             A = A + alpha_t * ft
             b = b + alpha_t * (self.lam + ft) * omega_t.float().to(ref.device)
 
         return (b / (self.lam + A).clamp(min=1e-8)).to(ref.dtype)
+
+    def _kl_coords_for_fishers(self, weights_list: List[Tensor]) -> Optional[List[Tensor]]:
+        if self.fim_normalization != "kl":
+            return None
+        if len(weights_list) != 2:
+            raise ValueError("kl FIM normalization is only implemented for two-way Fisher merges.")
+        return [
+            weights_list[1].float().to(weights_list[0].device),
+            weights_list[0].float().to(weights_list[0].device),
+        ]
+
+    def _normalize_fisher_diagonal(
+        self,
+        diagonal: Tensor,
+        kl_coords: Optional[Tensor] = None,
+    ) -> Tensor:
+        diagonal = torch.nan_to_num(
+            diagonal.float(),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp_min(0.0)
+        if self.fim_normalization == "trace":
+            denom = diagonal.sum(dim=-1).clamp_min(1e-8)
+            return diagonal / denom[..., None]
+        if self.fim_normalization == "frobenius":
+            denom = torch.linalg.vector_norm(diagonal, dim=-1).clamp_min(1e-8)
+            return diagonal / denom[..., None]
+        if self.fim_normalization == "none":
+            return diagonal
+        if kl_coords is None:
+            raise ValueError("kl FIM normalization requires coordinates of the other model.")
+        denom = (diagonal * kl_coords.float().square()).sum(dim=-1).clamp_min(1e-8)
+        return diagonal / denom[..., None]
+
+    def _normalize_fisher_matrix(
+        self,
+        matrix: Tensor,
+        kl_coords: Optional[Tensor] = None,
+    ) -> Tensor:
+        matrix = torch.nan_to_num(
+            matrix.float(),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        if self.fim_normalization == "trace":
+            denom = matrix.diagonal(dim1=-2, dim2=-1).sum(dim=-1).clamp_min(1e-8)
+            return matrix / denom[..., None, None]
+        if self.fim_normalization == "frobenius":
+            denom = torch.linalg.matrix_norm(matrix, ord="fro").clamp_min(1e-8)
+            return matrix / denom[..., None, None]
+        if self.fim_normalization == "none":
+            return matrix
+        if kl_coords is None:
+            raise ValueError("kl FIM normalization requires coordinates of the other model.")
+        denom = torch.einsum(
+            "...i,...ij,...j->...",
+            kl_coords.float(),
+            matrix,
+            kl_coords.float(),
+        ).clamp_min(1e-8)
+        return matrix / denom[..., None, None]
 
     def _diagonal_fisher_merging_kl_rescaled(
         self,
@@ -980,9 +1050,12 @@ class OFTMerging(RiemannianMerging):
         A = self.lam * eye.clone()
         b = torch.zeros_like(ref, dtype=torch.float32, device=device)
 
-        for alpha_t, omega_t, fisher_t in zip(alpha_tensors, weights, fishers):
-            norm = torch.linalg.vector_norm(fisher_t).clamp(min=1e-8)
-            ft = fisher_t / norm
+        kl_coords = self._kl_coords_for_fishers(weights)
+        for idx, (alpha_t, omega_t, fisher_t) in enumerate(zip(alpha_tensors, weights, fishers)):
+            ft = self._normalize_fisher_matrix(
+                fisher_t,
+                kl_coords=None if kl_coords is None else kl_coords[idx],
+            )
             A = A + alpha_t * ft
             b = b + alpha_t * ((self.lam * eye + ft) @ omega_t.unsqueeze(-1)).squeeze(-1)
 

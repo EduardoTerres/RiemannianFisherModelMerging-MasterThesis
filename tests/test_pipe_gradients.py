@@ -52,6 +52,8 @@ from moft.inferencer_sdxl import (  # noqa: E402
     _diagonal_fisher_correction,
     _gradients_merge_with_merging_py,
     _inverse_cayley,
+    _normalize_fisher_diagonal,
+    _normalize_fisher_matrix,
     _orthogonal_log,
     _transport_matrix,
 )
@@ -270,6 +272,29 @@ def test_fisher_geodesic_fast_path_kl_normalization_uses_other_model_coords():
     expected = _inverse_cayley(expected_q)
 
     assert torch.allclose(actual, expected, atol=1e-5)
+
+
+def test_fisher_geodesic_fast_path_layer_normalizations_use_all_blocks():
+    diagonal = torch.tensor([[2.0, 3.0, 5.0], [7.0, 11.0, 13.0]], dtype=torch.float32)
+    matrix = torch.diag_embed(diagonal)
+
+    layer_trace_diag = _normalize_fisher_diagonal(diagonal, "layer-trace")
+    layer_frobenius_diag = _normalize_fisher_diagonal(diagonal, "layer-frobenius")
+    layer_trace_matrix = _normalize_fisher_matrix(matrix, "layer-trace")
+    layer_frobenius_matrix = _normalize_fisher_matrix(matrix, "layer-frobenius")
+
+    assert torch.allclose(layer_trace_diag, diagonal / diagonal.sum(), atol=1e-6)
+    assert torch.allclose(
+        layer_frobenius_diag,
+        diagonal / torch.linalg.vector_norm(diagonal),
+        atol=1e-6,
+    )
+    assert torch.allclose(layer_trace_matrix, matrix / diagonal.sum(), atol=1e-6)
+    assert torch.allclose(
+        layer_frobenius_matrix,
+        matrix / torch.linalg.vector_norm(matrix),
+        atol=1e-6,
+    )
 
 
 def test_with_fishers_matches_fisher_merge():

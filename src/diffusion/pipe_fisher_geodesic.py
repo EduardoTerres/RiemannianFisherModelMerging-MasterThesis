@@ -31,7 +31,14 @@ def parse_args():
     parser.add_argument("--correction_mu", type=float, default=None)
     parser.add_argument(
         "--fim_normalization",
-        choices=["none", "trace", "frobenius", "kl"],
+        choices=[
+            "none",
+            "trace",
+            "frobenius",
+            "layer-trace",
+            "layer-frobenius",
+            "kl",
+        ],
         default="frobenius",
     )
     parser.add_argument("--t", type=float, default=0.6)

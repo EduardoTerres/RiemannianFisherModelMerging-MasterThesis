@@ -133,7 +133,7 @@ def method_info(method, args, pair_name=None):
         )
 
     geodesic_match = re.fullmatch(
-        r"fisher_geodesic_(?P<backend>diagonal|kfac)_corr_(?P<correction_mu>[^_]+)_fim_(?P<fim_normalization>none|trace|frobenius|kl)",
+        r"fisher_geodesic_(?P<backend>diagonal|kfac)_corr_(?P<correction_mu>[^_]+)_fim_(?P<fim_normalization>none|trace|frobenius|layer-trace|layer-frobenius|kl)",
         method,
     )
     if geodesic_match:

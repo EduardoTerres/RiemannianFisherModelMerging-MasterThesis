@@ -55,7 +55,14 @@ def parse_args():
     parser.add_argument("--correction_mu", type=float, default=None)
     parser.add_argument(
         "--fim_normalization",
-        choices=["none", "trace", "frobenius", "kl"],
+        choices=[
+            "none",
+            "trace",
+            "frobenius",
+            "layer-trace",
+            "layer-frobenius",
+            "kl",
+        ],
         default="none",
     )
     parser.add_argument("--geodesic_backend", choices=["cayley"], default="cayley")

@@ -60,7 +60,14 @@ def parse_args():
     parser.add_argument("--correction_mu", type=float, default=2.0)
     parser.add_argument(
         "--fim_normalization",
-        choices=["none", "trace", "frobenius", "kl"],
+        choices=[
+            "none",
+            "trace",
+            "frobenius",
+            "layer-trace",
+            "layer-frobenius",
+            "kl",
+        ],
         default="trace",
     )
     parser.add_argument("--orthofuse_postprocessing_method", type=str, default="curve_over_id")

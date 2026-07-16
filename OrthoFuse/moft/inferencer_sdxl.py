@@ -293,6 +293,12 @@ def _normalize_fisher_diagonal(diagonal, mode="frobenius", kl_coords=None):
     if mode == "frobenius":
         denom = torch.linalg.vector_norm(diagonal, dim=-1).clamp_min(1e-8)
         return diagonal / denom[..., None]
+    if mode == "layer-trace":
+        denom = diagonal.sum().clamp_min(1e-8)
+        return diagonal / denom
+    if mode == "layer-frobenius":
+        denom = torch.linalg.vector_norm(diagonal).clamp_min(1e-8)
+        return diagonal / denom
     if mode == "none":
         return diagonal
     if mode == "kl":
@@ -310,6 +316,12 @@ def _normalize_fisher_matrix(matrix, mode="frobenius", kl_coords=None):
     if mode == "frobenius":
         denom = torch.linalg.matrix_norm(matrix, ord="fro").clamp_min(1e-8)
         return matrix / denom[..., None, None]
+    if mode == "layer-trace":
+        denom = matrix.diagonal(dim1=-2, dim2=-1).sum().clamp_min(1e-8)
+        return matrix / denom
+    if mode == "layer-frobenius":
+        denom = torch.linalg.vector_norm(matrix).clamp_min(1e-8)
+        return matrix / denom
     if mode == "none":
         return matrix
     if mode == "kl":

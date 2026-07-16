@@ -24,6 +24,12 @@ METHODS=(
   fisher_geodesic_diagonal_corr_2_fim_none
 )
 
+METHODS=(
+  orthofuse
+  diagonal_fisher_mu_4_fim_frobenius
+  diagonal_fisher_mu_4_fim_trace
+)
+
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
 

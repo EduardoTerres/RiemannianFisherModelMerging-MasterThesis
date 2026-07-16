@@ -47,6 +47,38 @@ def test_geodesic_fisher_normalization_divides_by_trace():
     assert torch.allclose(actual.diagonal(dim1=-2, dim2=-1).sum(dim=-1), torch.ones(NUM_BLOCKS))
 
 
+def test_geodesic_fisher_layer_trace_normalization_uses_all_blocks():
+    merger = OFTGeodesicMerging(device="cpu", fim_normalization="layer-trace")
+    fisher = torch.tensor([[2.0, 3.0, 5.0], [7.0, 11.0, 13.0]], dtype=torch.float32)
+    matrix = merger._fisher_matrix(fisher, fisher)
+
+    actual = merger._normalize_fisher_matrix(matrix)
+    expected = torch.diag_embed(fisher / fisher.sum())
+
+    assert torch.allclose(actual, expected, atol=1e-6)
+    assert torch.allclose(
+        actual.diagonal(dim1=-2, dim2=-1).sum(),
+        torch.tensor(1.0),
+    )
+
+
+def test_geodesic_fisher_layer_frobenius_normalization_uses_all_blocks():
+    merger = OFTGeodesicMerging(device="cpu", fim_normalization="layer-frobenius")
+    matrix = torch.tensor(
+        [
+            [[1.0, 2.0], [2.0, 3.0]],
+            [[4.0, 5.0], [5.0, 6.0]],
+        ],
+        dtype=torch.float32,
+    )
+
+    actual = merger._normalize_fisher_matrix(matrix)
+    expected = matrix / torch.linalg.vector_norm(matrix)
+
+    assert torch.allclose(actual, expected, atol=1e-6)
+    assert torch.allclose(torch.linalg.vector_norm(actual), torch.tensor(1.0))
+
+
 def test_geodesic_fisher_normalization_none_keeps_matrix_unchanged():
     merger = OFTGeodesicMerging(device="cpu", fim_normalization="none")
     fisher = torch.tensor([[2.0, 3.0, 5.0]], dtype=torch.float32)

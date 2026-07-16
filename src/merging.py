@@ -126,7 +126,14 @@ class OFTMerging(RiemannianMerging):
         if fisher_backend not in {"diagonal", "kfac"}:
             raise ValueError(f"Unsupported fisher_backend: {fisher_backend!r}")
         self.fisher_backend = fisher_backend
-        if fim_normalization not in {"none", "trace", "frobenius", "kl"}:
+        if fim_normalization not in {
+            "none",
+            "trace",
+            "frobenius",
+            "layer-trace",
+            "layer-frobenius",
+            "kl",
+        }:
             raise ValueError(f"Unsupported fim_normalization: {fim_normalization!r}")
         self.fim_normalization = fim_normalization
 
@@ -621,6 +628,12 @@ class OFTMerging(RiemannianMerging):
         if self.fim_normalization == "frobenius":
             denom = torch.linalg.vector_norm(diagonal, dim=-1).clamp_min(1e-8)
             return diagonal / denom[..., None]
+        if self.fim_normalization == "layer-trace":
+            denom = diagonal.sum().clamp_min(1e-8)
+            return diagonal / denom
+        if self.fim_normalization == "layer-frobenius":
+            denom = torch.linalg.vector_norm(diagonal).clamp_min(1e-8)
+            return diagonal / denom
         if self.fim_normalization == "none":
             return diagonal
         if kl_coords is None:
@@ -645,6 +658,12 @@ class OFTMerging(RiemannianMerging):
         if self.fim_normalization == "frobenius":
             denom = torch.linalg.matrix_norm(matrix, ord="fro").clamp_min(1e-8)
             return matrix / denom[..., None, None]
+        if self.fim_normalization == "layer-trace":
+            denom = matrix.diagonal(dim1=-2, dim2=-1).sum().clamp_min(1e-8)
+            return matrix / denom
+        if self.fim_normalization == "layer-frobenius":
+            denom = torch.linalg.vector_norm(matrix).clamp_min(1e-8)
+            return matrix / denom
         if self.fim_normalization == "none":
             return matrix
         if kl_coords is None:

@@ -1,4 +1,5 @@
 import argparse
+import csv
 import sys
 from pathlib import Path
 
@@ -41,6 +42,7 @@ def parse_args():
     parser.add_argument("--guidance_scale", type=float, default=5.0)
     parser.add_argument("--version_start", type=int, default=0)
     parser.add_argument("--image_index", type=int, default=0)
+    parser.add_argument("--force_recompute", action="store_true")
     add_evaluator_args(parser)
     parser.set_defaults(reference_root=REPO_ROOT / "outputs/diffusion/d1_images")
     return parser.parse_args()
@@ -94,20 +96,27 @@ def plot_text_similarity(rows, save_path, title):
     plt.close(fig)
 
 
+def parse_csv_value(key, value):
+    if key in {"mu", "t", "alpha_1", "alpha_2", *METRIC_KEYS, "clip_text"}:
+        return float(value)
+    if key in {"step", "n"}:
+        return int(value)
+    if key in {"clip_pareto", "dino_pareto"}:
+        return value == "True"
+    return value
+
+
+def read_csv(path):
+    with path.open(encoding="utf-8", newline="") as handle:
+        return [
+            {key: parse_csv_value(key, value) for key, value in row.items()}
+            for row in csv.DictReader(handle)
+        ]
+
+
 def run(args):
     pairs = selected_pairs(args.samples)
-    reference_root = args.reference_root or args.output_dir / "d1_images"
-    scorer = SimilarityScorer(make_evaluator(args), reference_root)
-    rows = score_records(records(args, pairs), scorer)
-    if not rows:
-        raise RuntimeError("No correction search images were found for the requested pairs.")
-
     group_keys = ("prompt", "mu", "step", "t", "alpha_1", "alpha_2")
-    metric_keys = (*METRIC_KEYS, "clip_text")
-    aggregate = aggregate_rows(rows, group_keys, metric_keys)
-    aggregate = sorted(aggregate, key=lambda row: (row["prompt"], row["mu"], row["step"]))
-    add_pareto_flags(aggregate, group_keys=("prompt",))
-
     prefix = output_prefix(pairs)
     csv_path = root(args) / f"{prefix}_pareto_frontier.csv"
     fieldnames = [
@@ -121,7 +130,23 @@ def run(args):
         "clip_pareto",
         "dino_pareto",
     ]
-    write_csv(csv_path, aggregate, fieldnames)
+    if csv_path.exists() and not args.force_recompute:
+        aggregate = read_csv(csv_path)
+        print(f"[correction-results] using existing {csv_path}", flush=True)
+    else:
+        reference_root = args.reference_root or args.output_dir / "d1_images"
+        scorer = SimilarityScorer(make_evaluator(args), reference_root)
+        rows = score_records(records(args, pairs), scorer)
+        if not rows:
+            raise RuntimeError("No correction search images were found for the requested pairs.")
+
+        metric_keys = (*METRIC_KEYS, "clip_text")
+        aggregate = aggregate_rows(rows, group_keys, metric_keys)
+        aggregate = sorted(aggregate, key=lambda row: (row["prompt"], row["mu"], row["step"]))
+        add_pareto_flags(aggregate, group_keys=("prompt",))
+        write_csv(csv_path, aggregate, fieldnames)
+        print(f"[correction-results] wrote {csv_path}", flush=True)
+
     for prompt_name in PROMPTS:
         prompt_rows = [row for row in aggregate if row["prompt"] == prompt_name]
         png_path = root(args) / f"{prefix}_pareto_frontier_{prompt_name}.png"
@@ -146,7 +171,6 @@ def run(args):
                 label_key="t",
             )
             print(f"[correction-results] wrote {default_png_path}", flush=True)
-    print(f"[correction-results] wrote {csv_path}", flush=True)
 
 
 def main():
@@ -155,4 +179,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

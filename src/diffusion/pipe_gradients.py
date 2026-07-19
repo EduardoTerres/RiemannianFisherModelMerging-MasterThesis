@@ -221,7 +221,7 @@ def run_pipe(args):
     pipe = inferencers["gradients"](
         config,
         args,
-        merge_test_set,
+        getattr(args, "prompt_templates", None) or merge_test_set,
         merge_base_set,
         device="cuda",
     )

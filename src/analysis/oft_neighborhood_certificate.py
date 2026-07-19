@@ -21,10 +21,25 @@ RADIUS_THRESHOLD = math.pi / 2.0
 RADIUS_THRESHOLD_LABEL = r"$\pi/2$"
 PAIRWISE_THRESHOLD = math.pi
 ANGLE_TOL = 1e-10
+FONT_SCALE = 1.5
+
+
+def scaled_fontsize(size: float) -> float:
+    return size * FONT_SCALE
+
 
 plt.rcParams.update({
     "text.usetex": True,
     "font.family": "serif",
+    "font.weight": "bold",
+    "font.size": scaled_fontsize(10),
+    "axes.labelsize": scaled_fontsize(10),
+    "axes.labelweight": "bold",
+    "axes.titlesize": scaled_fontsize(12),
+    "axes.titleweight": "bold",
+    "xtick.labelsize": scaled_fontsize(10),
+    "ytick.labelsize": scaled_fontsize(10),
+    "legend.fontsize": scaled_fontsize(10),
 })
 
 
@@ -354,7 +369,8 @@ def add_radial_marks(ax, center: tuple[float, float], min_radius: float, max_rad
                 cx + label_radius * math.cos(label_angle),
                 cy + label_radius * math.sin(label_angle),
                 label,
-                fontsize=14,
+                fontsize=scaled_fontsize(14),
+                fontweight="bold",
                 color="#333333",
                 ha="left",
                 va="center",
@@ -465,7 +481,8 @@ def render_distance_mds(
             xy=(x, y),
             xytext=(offset_x, offset_y),
             textcoords="offset points",
-            fontsize=12,
+            fontsize=scaled_fontsize(12),
+            fontweight="bold",
             ha="left" if offset_x >= 0 else "right",
             va="bottom" if offset_y >= 0 else "top",
         )
@@ -473,10 +490,11 @@ def render_distance_mds(
     limit = plot_threshold * 1.14 if plot_threshold else 1.0
     ax.text(
         plot_threshold + 0.018 * limit,
-        0.0,
+        0.035 * limit,
         RADIUS_THRESHOLD_LABEL,
         color="red",
-        fontsize=14,
+        fontsize=scaled_fontsize(14),
+        fontweight="bold",
         ha="left",
         va="bottom",
     )
@@ -484,7 +502,7 @@ def render_distance_mds(
     ax.set_ylim(-limit, limit)
     ax.set_aspect("equal", adjustable="box")
     hide_cartesian_axes(ax)
-    ax.legend(loc="best", fontsize=13)
+    ax.legend(loc="best", prop={"size": scaled_fontsize(13), "weight": "bold"})
     plt.tight_layout(pad=0.25)
     png_path = output_dir / f"{family_name}_mean_block_distance_mds.png"
     pdf_path = output_dir / f"{family_name}_mean_block_distance_mds.pdf"

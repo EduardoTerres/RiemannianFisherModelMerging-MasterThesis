@@ -4,16 +4,19 @@
 #SBATCH --job-name=interp_geodesic
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=08:00:00
+#SBATCH --time=02:00:00
 #SBATCH --array=0-11
-#SBATCH --output=outputs/diffusion/slurms/interpolation_geodesic_%A_%a.out
+#SBATCH --output=outputs/diffusion/slurms/geo_int_%A_%a.out
 
 set -e
 
 FISHER_BACKEND="diagonal"
 CORRECTION_MU="2"
+FISHER_MU="4"
 FIM_NORMALIZATION="trace"
 ORTHOFUSE_POSTPROCESSING="curve_over_id"
+
+CONCEPT_NAME="dog3"
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
@@ -64,29 +67,38 @@ T_VALUES=(
 )
 
 METHODS=(
-  "fisher_geodesic"
+  # "fisher_geodesic"
+  # "fisher"
   "orthofuse"
 )
 
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
-STYLE="${STYLES[${TASK_ID}]}"
+METHOD_COUNT="${#METHODS[@]}"
+STYLE_INDEX=$((TASK_ID / METHOD_COUNT))
+METHOD_INDEX=$((TASK_ID % METHOD_COUNT))
+STYLE="${STYLES[${STYLE_INDEX}]}"
+METHOD="${METHODS[${METHOD_INDEX}]}"
 
-echo "[interpolation-geodesic] array_task=${TASK_ID} style=${STYLE}"
+echo "[interpolation-geodesic] array_task=${TASK_ID} style=${STYLE} method=${METHOD}"
 echo "[interpolation-geodesic] fisher_backend=${FISHER_BACKEND} correction_mu=${CORRECTION_MU} fim_normalization=${FIM_NORMALIZATION}"
+echo "[interpolation-geodesic] fisher_mu=${FISHER_MU}"
 echo "[interpolation-geodesic] t_values=${T_VALUES[*]}"
 
 python "${REPO_ROOT}/src/diffusion/geodesic_interpolation.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
   --output_dir="${OUTPUT_DIR}" \
   --method_output_root="${METHOD_OUTPUT_ROOT}" \
+  --concept_name="${CONCEPT_NAME}" \
   --style_name="${STYLE}" \
-  --methods "${METHODS[@]}" \
+  --methods "${METHOD}" \
+  --prompt_templates "a {0} in {1} style" \
   --t_values "${T_VALUES[@]}" \
   --geodesic_backend=cayley \
   --fisher_backend="${FISHER_BACKEND}" \
+  --fisher_correction_mu="${FISHER_MU}" \
   --correction_mu="${CORRECTION_MU}" \
   --fim_normalization="${FIM_NORMALIZATION}" \
   --orthofuse_postprocessing_method="${ORTHOFUSE_POSTPROCESSING}" \
-  --num_images_per_medium_prompt=2 \
-  --batch_size_medium=2 \
+  --num_images_per_medium_prompt=5 \
+  --batch_size_medium=5 \
   --replace_inference_output

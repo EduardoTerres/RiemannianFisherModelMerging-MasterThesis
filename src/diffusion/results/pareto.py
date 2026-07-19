@@ -265,56 +265,138 @@ def write_csv(path, rows, fieldnames):
 
 def plot_style_concept_curves(rows, save_path, title, series_key, label_key=None):
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    plt.rcParams.update(
+        {
+            "text.usetex": True,
+            "font.family": "serif",
+            "axes.titlesize": 20,
+            "axes.labelsize": 18,
+            "xtick.labelsize": 30,
+            "ytick.labelsize": 30,
+            "legend.fontsize": 13,
+            "legend.title_fontsize": 14,
+        }
+    )
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(19, 6.5))
+    fig.subplots_adjust(left=0.1, right=0.855, bottom=0.28, top=0.9, wspace=0.12)
     specs = (
-        (axes[0], "clip_concept", "clip_style", "clip_pareto", "CLIP"),
-        (axes[1], "dino_concept", "dino_style", "dino_pareto", "DINO"),
+        (axes[0], "clip_concept", "clip_style", "CLIP"),
+        (axes[1], "dino_concept", "dino_style", "DINO"),
     )
     series_values = list(dict.fromkeys(row[series_key] for row in rows))
+    label_values = list(dict.fromkeys(row[label_key] for row in rows)) if label_key is not None else []
+    if label_values:
+        numeric_label_values = [float(value) for value in label_values]
+        min_label = min(numeric_label_values)
+        max_label = max(numeric_label_values)
+        label_range = max(max_label - min_label, 1e-12)
+        min_radius = 2.0
+        max_radius = 11.0
+        label_radii = {
+            value: max_radius - (float(value) - min_label) / label_range * (max_radius - min_radius)
+            for value in label_values
+        }
+        min_alpha = 0.35
+        max_alpha = 1.0
+        label_alphas = {
+            value: max_alpha - (float(value) - min_label) / label_range * (max_alpha - min_alpha)
+            for value in label_values
+        }
+    else:
+        label_radii = {}
+        label_alphas = {}
     cmap = plt.get_cmap("tab10" if len(series_values) <= 10 else "viridis")
     denom = max(len(series_values) - 1, 1)
 
-    for ax, concept_key, style_key, pareto_key, axis_title in specs:
+    color_handles = []
+    for ax, concept_key, style_key, axis_title in specs:
         for idx, series_value in enumerate(series_values):
             series_rows = [row for row in rows if row[series_key] == series_value]
             if not series_rows:
                 continue
             color = cmap(idx % 10 if len(series_values) <= 10 else idx / denom)
+            label = (
+                rf"$\mu={label_value(series_value)}$"
+                if series_key == "mu"
+                else str(series_value)
+            )
+            if ax is axes[0]:
+                color_handles.append(Line2D([0], [0], color=color, linewidth=2.0, label=label))
             ax.plot(
                 [row[concept_key] for row in series_rows],
                 [row[style_key] for row in series_rows],
-                marker="o",
-                linewidth=1.5,
-                markersize=3,
+                linewidth=2.0,
                 color=color,
-                label=str(series_value),
+                label="_nolegend_",
             )
             if label_key is not None:
                 for row in series_rows:
-                    ax.annotate(
-                        label_value(row[label_key]),
-                        (row[concept_key], row[style_key]),
-                        fontsize=7,
-                        xytext=(3, 3),
-                        textcoords="offset points",
+                    radius = label_radii[row[label_key]]
+                    alpha = label_alphas[row[label_key]]
+                    ax.scatter(
+                        row[concept_key],
+                        row[style_key],
+                        marker="o",
+                        s=radius**2,
+                        color=color,
+                        alpha=alpha,
+                        zorder=3,
                     )
-        frontier = sort_frontier([row for row in rows if row.get(pareto_key)], concept_key)
-        if frontier:
-            ax.plot(
-                [row[concept_key] for row in frontier],
-                [row[style_key] for row in frontier],
-                color="black",
-                linewidth=2.0,
-                linestyle="--",
-                label="pareto frontier",
-            )
+                    if float(row[label_key]) <= 0.5:
+                        ax.annotate(
+                            label_value(row[label_key]),
+                            (row[concept_key], row[style_key]),
+                            fontsize=13,
+                            xytext=(4, 4),
+                            textcoords="offset points",
+                        )
+            else:
+                ax.scatter(
+                    [row[concept_key] for row in series_rows],
+                    [row[style_key] for row in series_rows],
+                    marker="x",
+                    s=42,
+                    color=color,
+                    linewidths=1.4,
+                    zorder=3,
+                )
         ax.set_title(axis_title)
-        ax.set_xlabel("concept preservation")
-        ax.set_ylabel("style preservation")
         ax.grid(True, alpha=0.25)
-    axes[1].legend(loc="best", fontsize=7)
-    fig.suptitle(title)
-    fig.savefig(save_path, dpi=200)
+    fig.supxlabel("Style similarity", y=-0.05, fontsize=200)
+    fig.supylabel("Concept similarity", y=-0.2, fontsize=200)
+    if color_handles:
+        series_title = rf"${series_key}$" if series_key != "mu" else r"$\mu$"
+        fig.legend(
+            handles=color_handles,
+            loc="center",
+            bbox_to_anchor=(0.935, 0.73),
+            frameon=False,
+            title=series_title,
+        )
+    if label_key is not None:
+        marker_handles = [
+            Line2D(
+                [0],
+                [0],
+                color="black",
+                marker="o",
+                linestyle="None",
+                markersize=label_radii[value],
+                alpha=label_alphas[value],
+                label=f"t={label_value(value)}" if label_key == "t" else label_value(value),
+            )
+            for value in label_values
+        ]
+        fig.legend(
+            handles=marker_handles,
+            loc="center",
+            bbox_to_anchor=(0.935, 0.29),
+            frameon=False,
+            title=rf"${label_key}$",
+        )
+    fig.savefig(save_path, dpi=200, bbox_inches="tight")
     plt.close(fig)

@@ -3,8 +3,8 @@
 #SBATCH --gpus=1
 #SBATCH --job-name=plot_correction
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=9
-#SBATCH --time=04:00:00
+#SBATCH --cpus-per-task=2
+#SBATCH --time=00:20:00
 #SBATCH --output=outputs/diffusion/slurms/plot_correction_hyperparam_search_%A.out
 
 set -e
@@ -21,9 +21,9 @@ export TORCH_HOME="${HF_HOME}/torch"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export DIFFUSERS_OFFLINE=1
-export CUDA_VISIBLE_DEVICES=0
 export PYTHONPATH="${REPO_ROOT}/OrthoFuse:${REPO_ROOT}:${PYTHONPATH:-}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/matplotlib-${USER}}"
+mkdir -p "${MPLCONFIGDIR}" outputs/diffusion/slurms
 
 PAIRS=(
   cat:pots

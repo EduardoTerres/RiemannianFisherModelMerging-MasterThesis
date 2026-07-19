@@ -47,6 +47,7 @@ def parse_args():
     parser.add_argument("--concept_name", type=str, default=None)
     parser.add_argument("--style_name", type=str, default=None)
     parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS))
+    parser.add_argument("--prompt_templates", nargs="+", default=None)
     parser.add_argument("--method_output_root", type=str, default=None)
     parser.add_argument("--num_points", type=int, default=7)
     parser.add_argument("--t_values", nargs="+", type=float, default=None)
@@ -62,6 +63,7 @@ def parse_args():
     parser.add_argument("--fisher_min", type=float, default=1e-14)
     parser.add_argument("--fisher_rescale", type=float, default=1e10)
     parser.add_argument("--fisher_backend", choices=["diagonal", "kfac"], default="diagonal")
+    parser.add_argument("--fisher_correction_mu", type=float, default=None)
     parser.add_argument("--correction_mu", type=float, default=2.0)
     parser.add_argument(
         "--fim_normalization",
@@ -113,6 +115,13 @@ def method_output_name(args, method):
         if args.correction_mu is not None:
             name += f"_corr_{args.correction_mu:g}_fim_{args.fim_normalization}"
         return name
+    if method == "fisher":
+        prefix = "diagonal_fisher" if args.fisher_backend == "diagonal" else f"fisher_{args.fisher_backend}"
+        if args.fisher_correction_mu is not None:
+            prefix += f"_mu_{args.fisher_correction_mu:g}"
+        if args.fim_normalization != "none":
+            prefix += f"_fim_{args.fim_normalization}"
+        return prefix
     if method.startswith("orthofuse"):
         return "orthofuse"
     return method
@@ -144,7 +153,7 @@ def version_root(args, method, folder, version):
 
 
 def generated_prompt_paths(args, pair):
-    for template in merge_test_set:
+    for template in args.prompt_templates or merge_test_set:
         prompt = template.format(
             pair["concept"]["placeholder_token"],
             pair["style"]["placeholder_token"],
@@ -214,7 +223,7 @@ def gradient_args(args, alphas, version, merge_mode, use_fishers, backend):
         fisher_min=args.fisher_min,
         fisher_rescale=args.fisher_rescale,
         fisher_backend=args.fisher_backend,
-        fisher_correction_mu=None,
+        fisher_correction_mu=args.fisher_correction_mu if use_fishers and merge_mode == "fisher" else None,
         correction_mu=args.correction_mu if use_fishers and merge_mode == "geodesic" else None,
         fim_normalization=args.fim_normalization,
         alphas=list(alphas),
@@ -235,6 +244,7 @@ def gradient_args(args, alphas, version, merge_mode, use_fishers, backend):
         replace_inference_output=args.replace_inference_output,
         version=version,
         seed=args.seed,
+        prompt_templates=args.prompt_templates,
     )
 
 
@@ -262,6 +272,7 @@ def orthofuse_args(args, beta, version, postprocessing_method):
         replace_inference_output=args.replace_inference_output,
         version=version,
         seed=args.seed,
+        prompt_templates=args.prompt_templates,
     )
 
 

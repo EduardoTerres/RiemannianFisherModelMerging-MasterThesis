@@ -82,8 +82,7 @@ LLAMA_D1_PRETRAINED_FISHER_PATHS = [
 ]
 
 # LLAMA WITH DATASET 3
-# its dataset2
-LLAMA_D3_ADAPTERS_FOLDER = f"{MODELS_DIR}/Llama-3.1-8B_OFT_dataset2_adapters"
+LLAMA_D3_ADAPTERS_FOLDER = f"{MODELS_DIR}/Llama-3.1-8B_OFT_dataset3_adapters"
 LLAMA_D3_TASKS = [tag for tag, *_ in DATASET_3_TRAIN]
 LLAMA_D3_ADAPTER_PATHS = [
     f"{LLAMA_D3_ADAPTERS_FOLDER}/llama3-1_8b_finetune_{adapter_task_name(task)}"
@@ -125,8 +124,7 @@ QWEN_D1_PRETRAINED_FISHER_PATHS = [
 ]
 
 # QWEN WITH DATASET 3
-# its dataset2
-QWEN_D3_ADAPTERS_FOLDER = f"{MODELS_DIR}/Qwen-2.5-3B_OFT_dataset2_adapters"
+QWEN_D3_ADAPTERS_FOLDER = f"{MODELS_DIR}/Qwen-2.5-3B_OFT_dataset3_adapters"
 QWEN_D3_TASKS = [tag for tag, *_ in DATASET_3_TRAIN]
 QWEN_D3_ADAPTER_PATHS = [
     f"{QWEN_D3_ADAPTERS_FOLDER}/qwen2.5_3b_finetune_{adapter_task_name(task)}"

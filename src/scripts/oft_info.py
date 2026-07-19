@@ -24,6 +24,13 @@ DEFAULT_DIFFUSION = Path(
 )
 DEFAULT_OUTPUT = Path("outputs/oft_info/oft_info.txt")
 DIFFUSION_PROJECTIONS = ("to_q_moft", "to_k_moft", "to_v_moft", "to_out_moft")
+DIFFUSION_SCALE_SUFFIXES = ("q_scale", "k_scale", "v_scale", "out_scale")
+DIFFUSION_SCALE_TO_PROJECTION = {
+    "q_scale": "to_q_moft",
+    "k_scale": "to_k_moft",
+    "v_scale": "to_v_moft",
+    "out_scale": "to_out_moft",
+}
 
 
 def safetensors_path(path: Path) -> Path:
@@ -79,11 +86,50 @@ def diffusion_projection(name: str) -> str:
     for projection in DIFFUSION_PROJECTIONS:
         if projection in name:
             return projection
-    return "scale" if name.endswith(("q_scale", "k_scale", "v_scale", "out_scale")) else "other"
+    for scale_name, projection in DIFFUSION_SCALE_TO_PROJECTION.items():
+        if name.endswith(scale_name):
+            return projection
+    return "other"
 
 
 def diffusion_block(name: str) -> str:
     return name.split(".", 1)[0]
+
+
+def diffusion_attention(name: str) -> str:
+    for part in name.split("."):
+        if part in {"attn1", "attn2"}:
+            return part
+    return "unknown"
+
+
+def diffusion_matrix_side(name: str) -> str:
+    if name.endswith(".L"):
+        return "left"
+    if name.endswith(".R"):
+        return "right"
+    return "other"
+
+
+def diffusion_matrix_adapter(name: str) -> str:
+    for suffix in (".L", ".R"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)].rstrip(".")
+    return name
+
+
+def diffusion_host_module(name: str) -> str:
+    for projection in DIFFUSION_PROJECTIONS:
+        marker = f".{projection}"
+        if marker in name:
+            return name.split(marker, 1)[0]
+    return name
+
+
+def geometry_text(shape: tuple[int, ...]) -> str:
+    if len(shape) == 3 and shape[-1] == shape[-2]:
+        return f"{shape[0]} blocks of SO({shape[-1]})"
+    return shape_text(shape)
 
 
 def summarize_llm(label: str, path: Path) -> list[str]:
@@ -120,25 +166,60 @@ def summarize_llm(label: str, path: Path) -> list[str]:
 def summarize_diffusion(path: Path) -> list[str]:
     rows = keys_and_shapes(path)
     matrices = [(name, shape) for name, shape in rows if name.endswith((".L", ".R"))]
-    scales = [(name, shape) for name, shape in rows if name.endswith(("q_scale", "k_scale", "v_scale", "out_scale"))]
-    projections = Counter(diffusion_projection(name) for name, _ in matrices)
-    blocks = Counter(diffusion_block(name) for name, _ in matrices)
+    scales = [(name, shape) for name, shape in rows if name.endswith(DIFFUSION_SCALE_SUFFIXES)]
+    matrix_adapters = {diffusion_matrix_adapter(name) for name, _ in matrices}
+    host_modules = {diffusion_host_module(name) for name, _ in matrices}
+    side_counts = Counter(diffusion_matrix_side(name) for name, _ in matrices)
+    side_values = Counter()
+    for name, shape in matrices:
+        side_values[diffusion_matrix_side(name)] += numel(shape)
+    side_shapes = Counter(
+        f"{diffusion_matrix_side(name)} {shape_text(shape)}" for name, shape in matrices
+    )
+    side_geometry = Counter(
+        f"{diffusion_matrix_side(name)} {geometry_text(shape)}" for name, shape in matrices
+    )
+    matrix_projections = Counter(diffusion_projection(name) for name in matrix_adapters)
+    matrix_tensor_projections = Counter(diffusion_projection(name) for name, _ in matrices)
+    scale_projections = Counter(diffusion_projection(name) for name, _ in scales)
+    blocks = Counter(diffusion_block(name) for name in host_modules)
+    attention = Counter(diffusion_attention(name) for name in host_modules)
     by_projection_shape = Counter(
-        f"{diffusion_projection(name)} {shape_text(shape)}" for name, shape in matrices
+        f"{diffusion_projection(name)} {geometry_text(shape)}" for name, shape in matrices
     )
     scale_shapes = Counter(shape_text(shape) for _, shape in scales)
+    matrix_values = sum(numel(shape) for _, shape in matrices)
+    scale_values = sum(numel(shape) for _, shape in scales)
 
     return [
         "Diffusion adapter",
         f"  path: {safetensors_path(path)}",
-        f"  OFT matrix tensors: {len(matrices)}",
-        f"  scale tensors: {len(scales)}",
-        f"  expanded OFT matrix entries: {sum(numel(shape) for _, shape in matrices):,}",
-        f"  scale values: {sum(numel(shape) for _, shape in scales):,}",
-        f"  projections: {compact(projections)}",
-        f"  SDXL blocks: {compact(blocks)}",
-        f"  projection shapes: {compact(by_projection_shape)}",
-        f"  scale shapes: {compact(scale_shapes)}",
+        "  What is adapted:",
+        f"    attention modules with adapters: {len(host_modules)}",
+        f"    logical projection adapters: {len(matrix_adapters)}",
+        f"    logical adapters by projection: {compact(matrix_projections)}",
+        "    each logical adapter corresponds to one to_q/to_k/to_v/to_out projection in one attention module",
+        "  Orthogonal GSOFT/MOFT parameters:",
+        "    each logical projection adapter is stored as two tensors: one left .L tensor and one right .R tensor",
+        f"    left .L tensors: {side_counts['left']} ({side_values['left']:,} parameters)",
+        f"    right .R tensors: {side_counts['right']} ({side_values['right']:,} parameters)",
+        f"    total .L/.R tensors: {len(matrices)} ({matrix_values:,} parameters)",
+        f"    .L/.R tensor shapes: {compact(side_shapes)}",
+        f"    .L/.R geometries: {compact(side_geometry)}",
+        f"    .L/.R tensors by projection: {compact(matrix_tensor_projections)}",
+        f"    geometries by projection: {compact(by_projection_shape)}",
+        "  Extra learned scale parameters:",
+        "    each logical projection adapter also has one diagonal scale vector, separate from the orthogonal .L/.R tensors",
+        f"    scale tensors: {len(scales)} ({scale_values:,} parameters)",
+        f"    scale tensors by projection: {compact(scale_projections)}",
+        f"    scale vector shapes: {compact(scale_shapes)}",
+        "  Parameter totals:",
+        f"    orthogonal .L/.R parameters: {matrix_values:,}",
+        f"    scale parameters: {scale_values:,}",
+        f"    total adapter parameters: {matrix_values + scale_values:,}",
+        "  SDXL placement:",
+        f"    UNet blocks: {compact(blocks)}",
+        f"    attention types: {compact(attention)}",
     ]
 
 

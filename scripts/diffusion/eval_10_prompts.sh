@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --job-name=eval
 #SBATCH --ntasks=1
@@ -17,18 +17,22 @@ EVAL_ROOT="${OUTPUT_DIR}/eval_runs"
 TABLES_DIR="${OUTPUT_DIR}/tables"
 
 METHODS=(
-  orthofuse
-  fisher_geodesic_diagonal_corr_2_fim_frobenius
+  # orthofuse
+  # fisher_geodesic_diagonal_corr_2_fim_frobenius
   fisher_geodesic_diagonal_corr_2_fim_trace
-  fisher_geodesic_diagonal_corr_2_fim_kl
+  # fisher_geodesic_diagonal_corr_2_fim_kl
   fisher_geodesic_diagonal_corr_2_fim_none
+  # fisher_geodesic_diagonal_corr_2_fim_layer-trace
+  # diagonal_fisher_mu_4_fim_frobenius
+  # diagonal_fisher_mu_4_fim_trace
+  # diagonal_fisher_mu_4_fim_layer-trace
 )
 
-METHODS=(
-  orthofuse
-  diagonal_fisher_mu_4_fim_frobenius
-  diagonal_fisher_mu_4_fim_trace
-)
+# METHODS=(
+#   orthofuse
+#   diagonal_fisher_mu_4_fim_frobenius
+#   diagonal_fisher_mu_4_fim_trace
+# )
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env

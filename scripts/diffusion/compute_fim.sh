@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=05:00:00
-#SBATCH --array=8-17
+#SBATCH --array=0-7
 #SBATCH --output=outputs/diffusion/slurms/fim_%A_%a.out
 
 set -e
@@ -52,7 +52,7 @@ echo "Running FIM for ${ENTRY_TYPE}:${DATASET_NAME} with repeats=${REPEATS}"
 
 python src/diffusion/compute_fim.py \
   --config_path=src/diffusion/config/config.yaml \
-  --output_dir=/scratch-shared/eterres/fishers/sdxl_decharted \
+  --output_dir=/scratch-shared/eterres/fishers/sdxl_correct \
   --entry_type="${ENTRY_TYPE}" \
   --dataset_name="${DATASET_NAME}" \
   --batch_size=1 \

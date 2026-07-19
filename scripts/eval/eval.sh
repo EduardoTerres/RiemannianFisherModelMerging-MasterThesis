@@ -4,7 +4,7 @@
 #SBATCH --job-name=eval
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --array=0-11%4
 #SBATCH --output=eval_model_%A_%a.out
 

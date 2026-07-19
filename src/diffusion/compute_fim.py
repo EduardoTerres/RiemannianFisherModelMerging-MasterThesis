@@ -3,7 +3,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -45,25 +45,30 @@ WANDB_LOG_EVERY = 1
 
 
 def log_stage(message):
+    """Print a timestamped FIM progress message."""
     print(f"[fim {time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
 
 
 def weight_dtype(name):
+    """Map a dtype CLI name to a torch dtype."""
     return {"float32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[name]
 
 
 def cay(omega, s):
+    """Apply the scaled Cayley transform to a batch of skew matrices."""
     n = omega.shape[-1]
     eye = torch.eye(n, dtype=omega.dtype, device=omega.device).expand_as(omega)
     return torch.linalg.solve(eye - s * omega, eye + s * omega, left=False)
 
 
 def upper_triangle_values(tensor):
+    """Return strict upper-triangle entries from the last two dimensions."""
     row, col = torch.triu_indices(tensor.shape[-2], tensor.shape[-1], offset=1, device=tensor.device)
     return tensor[..., row, col]
 
 
 def infer_oft_cayley_scale(device="cpu"):
+    """Infer the local Cayley derivative scale used by the OFT layer."""
     nb, h = 8, 1e-4
     layer = MonarchOrthogonal(nb, nblocks=1, orthogonal=True, method="cayley", device=device)
     e = torch.randn(1, nb, nb, device=device)
@@ -74,6 +79,7 @@ def infer_oft_cayley_scale(device="cpu"):
 
 
 def run_oft_geometry_checks(s):
+    """Run sanity checks for the OFT Cayley geometry assumptions."""
     torch.manual_seed(0)
     nb, h = 8, 1e-6
     dtype = torch.float64
@@ -128,36 +134,68 @@ def run_oft_geometry_checks(s):
     assert torch.isclose(0.5 * (eij * u).sum(), u[i, j], atol=1e-12, rtol=1e-12)
 
 
+def coordinate_grad_to_skew(raw_param_grad, s):
+    """Convert raw OFT coordinate gradients to skew Lie-algebra gradients."""
+    return (raw_param_grad.float() - raw_param_grad.float().transpose(-1, -2)) / (2 * s)
+
+
+def monarch_forward_with_delta(self, x):
+    """Run MonarchOrthogonal with additive zero-initialized tangent deltas."""
+    l_param = self.L + self.L_delta
+    r_param = self.R + self.R_delta
+    if self.orthogonal:
+        if self.method == "cayley":
+            L = self.cayley_batch(l_param)
+            R = self.cayley_batch(r_param)
+        elif self.method == "exp":
+            L = self.exp_full(l_param)
+            R = self.exp_full(r_param)
+        elif self.method == "already_orthogonal":
+            L = l_param
+            R = r_param
+        else:
+            raise NotImplementedError("Method is not supported. Use 'cayley' or 'exp'.")
+    else:
+        L = l_param
+        R = r_param
+    return self.blockdiag_butterfly_multiply(x, R, L)
+
+
+def enable_zero_oft_delta_parameters(moft_layers):
+    """Freeze trained OFT tensors and add trainable zero deltas in the same chart."""
+    for param in moft_layers.parameters():
+        param.requires_grad_(False)
+    for module in moft_layers.modules():
+        if not isinstance(module, MonarchOrthogonal):
+            continue
+        if hasattr(module, "L_delta"):
+            module.L_delta.data.zero_()
+            module.R_delta.data.zero_()
+            module.L_delta.requires_grad_(True)
+            module.R_delta.requires_grad_(True)
+        else:
+            module.register_parameter("L_delta", torch.nn.Parameter(torch.zeros_like(module.L)))
+            module.register_parameter("R_delta", torch.nn.Parameter(torch.zeros_like(module.R)))
+        module.forward = MethodType(monarch_forward_with_delta, module)
+
+
+def fisher_name_from_delta(name):
+    """Map a delta parameter name back to the corresponding trained OFT name."""
+    return name.removesuffix("_delta")
+
+
 @torch.no_grad()
-def precompute_transport_factors(named_params, s):
-    factors = {}
-    log_stage(f"START precompute Cayley de-chart/transport factors for {len(named_params)} tensors")
-    start = time.time()
-    for name, param in tqdm(named_params.items(), desc="Precomputing Cayley factors", unit="tensor"):
-        om = 0.5 * (param.detach().float() - param.detach().float().transpose(-1, -2))
-        eye = torch.eye(om.shape[-1], dtype=om.dtype, device=om.device).expand_as(om)
-        factors[name] = (cay(om / 2, s) @ (eye - s * om)).detach()
-    log_stage(f"DONE precompute Cayley factors in {time.time() - start:.1f}s")
-    return factors
-
-
-def transport_grad(raw_param_grad, factor, s):
-    chart_grad = raw_param_grad.float() - raw_param_grad.float().transpose(-1, -2)
-    return factor @ chart_grad @ factor.transpose(-1, -2) / (2 * s)
-
-
-@torch.no_grad()
-def precompute_transport_rotations(named_params):
-    s = infer_oft_cayley_scale("cpu")
-    return {name: (factor, s) for name, factor in precompute_transport_factors(named_params, s).items()}
-
-
-def transport_skew_gradient(skew_grad, packed_factor):
-    factor, s = packed_factor
-    return factor @ skew_grad.float() @ factor.transpose(-1, -2) / s
+def assert_oft_parameters_zero(named_params):
+    """Assert that all trainable OFT parameters are exactly zero."""
+    assert named_params, "No trainable zero OFT delta parameters found before FIM."
+    for name, param in named_params.items():
+        assert name.endswith(("_delta")), f"Unexpected trainable non-delta OFT parameter before FIM: {name}"
+        max_abs = param.detach().abs().max().item()
+        assert max_abs == 0.0, f"OFT parameter {name} is not zero before FIM; max_abs={max_abs:g}"
 
 
 def maybe_init_wandb(args, config):
+    """Initialize wandb logging for an FIM run if available."""
     try:
         import wandb
     except ImportError:
@@ -191,6 +229,7 @@ def maybe_init_wandb(args, config):
 
 
 def log_fisher_metrics(wandb, fisher, normalizer, previous):
+    """Log running Fisher summary statistics to wandb."""
     if wandb is None or wandb.run is None:
         return previous
     running = {name: (value.detach().float() / max(normalizer, 1)).cpu() for name, value in fisher.items()}
@@ -218,6 +257,7 @@ def log_fisher_metrics(wandb, fisher, normalizer, previous):
 
 
 def build_moft_processors(unet, config, device):
+    """Build MOFT attention processors matching the UNet attention blocks."""
     processors = {}
     for name in unet.attn_processors.keys():
         cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
@@ -242,7 +282,21 @@ def build_moft_processors(unet, config, device):
     return processors
 
 
+def load_pretrained_unet(args, config, device):
+    """Load the frozen pretrained UNet used for trained-adapter FIM."""
+    dtype = weight_dtype(args.weight_dtype)
+    kwargs = pretrained_load_kwargs(args, config)
+    unet = UNet2DConditionModel.from_pretrained(
+        config.pretrained_model_name_or_path,
+        subfolder=UNET_SUBFOLDER,
+        torch_dtype=dtype,
+        **kwargs,
+    )
+    unet.requires_grad_(False)
+    return unet.to(device)
+
 def apply_entry_defaults(args):
+    """Fill dataset-specific paths and labels into parsed arguments."""
     if args.dataset_name is None:
         raise ValueError("dataset_name must be set by iter_entries().")
     entry = get_entry(args.entry_type, args.dataset_name)
@@ -255,6 +309,7 @@ def apply_entry_defaults(args):
 
 
 def iter_entries(args):
+    """Yield dataset entries selected by the CLI arguments."""
     if getattr(args, "entry_type", None) is not None or getattr(args, "dataset_name", None) is not None:
         if args.entry_type is None or args.dataset_name is None:
             raise ValueError("--entry_type and --dataset_name must be set together.")
@@ -269,21 +324,25 @@ def iter_entries(args):
 
 
 def resolve_seed(args, config):
+    """Resolve the random seed from CLI args or config."""
     return args.seed if args.seed is not None else getattr(config, "seed", 8)
 
 
 def resolve_repo_path(path):
+    """Resolve a path relative to the repository root."""
     path = Path(path)
     return path if path.is_absolute() else REPO_ROOT / path
 
 
 def get_hf_cache_dir():
+    """Return the configured Hugging Face hub cache directory."""
     return os.environ.get(HF_HUB_CACHE_ENV) or (
         os.path.join(os.environ[HF_HOME_ENV], HF_HUB_SUBDIR) if os.environ.get(HF_HOME_ENV) else None
     )
 
 
 def pretrained_load_kwargs(args, config, *, revision=True):
+    """Build common from_pretrained keyword arguments for SDXL components."""
     kwargs = {"cache_dir": get_hf_cache_dir()}
     if revision:
         kwargs["revision"] = config.revision
@@ -291,10 +350,12 @@ def pretrained_load_kwargs(args, config, *, revision=True):
 
 
 def vae_load_kwargs(args):
+    """Build from_pretrained keyword arguments for the VAE."""
     return {"cache_dir": get_hf_cache_dir()}
 
 
 def get_placeholder(config, args):
+    """Resolve the placeholder token for the current dataset."""
     return (
         getattr(args, "placeholder_token", None)
         or getattr(config, "placeholder_token", None)
@@ -303,10 +364,12 @@ def get_placeholder(config, args):
 
 
 def get_class_name(config, args):
+    """Resolve the class name for the current dataset."""
     return getattr(args, "class_name", None) or config.class_name
 
 
 def build_dataset_and_prompt(args, config, tokenizers):
+    """Build the image dataset, dataloader, and conditioning prompt."""
     log_stage(f"START build dataset entry_type={args.entry_type} train_data_dir={args.train_data_dir}")
     start = time.time()
     placeholder = get_placeholder(config, args)
@@ -331,6 +394,7 @@ def build_dataset_and_prompt(args, config, tokenizers):
 
 
 def parse_args():
+    """Parse command-line arguments for diffusion FIM computation."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", default="src/diffusion/config/config.yaml")
     parser.add_argument("--output_dir", default="/scratch-shared/eterres/fishers/sdxl")
@@ -348,6 +412,7 @@ def parse_args():
 
 
 def load_base_components(args, config, device):
+    """Load shared frozen SDXL components except the per-entry UNet."""
     pretrained_model_path = config.pretrained_model_name_or_path
     dtype = weight_dtype(args.weight_dtype)
     pretrained_kwargs = pretrained_load_kwargs(args, config)
@@ -362,15 +427,6 @@ def load_base_components(args, config, device):
     start = time.time()
     scheduler = DDPMScheduler.from_pretrained(pretrained_model_path, subfolder=SCHEDULER_SUBFOLDER, **pretrained_kwargs)
     log_stage(f"DONE load scheduler in {time.time() - start:.1f}s")
-
-    log_stage(f"START load UNet model={pretrained_model_path} subfolder={UNET_SUBFOLDER} revision={config.revision}")
-    start = time.time()
-    unet = UNet2DConditionModel.from_pretrained(pretrained_model_path, subfolder=UNET_SUBFOLDER, torch_dtype=dtype, **pretrained_kwargs)
-    log_stage(f"DONE load UNet from_pretrained in {time.time() - start:.1f}s")
-    log_stage(f"START move UNet to {device}")
-    start = time.time()
-    unet = unet.to(device)
-    log_stage(f"DONE move UNet to {device} in {time.time() - start:.1f}s")
 
     log_stage(f"START load VAE model={VAE_MODEL_PATH}")
     start = time.time()
@@ -413,45 +469,21 @@ def load_base_components(args, config, device):
 
     log_stage("START freeze base model parameters")
     vae.requires_grad_(False)
-    unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
     text_encoder_2.requires_grad_(False)
     log_stage("DONE freeze base model parameters")
-
-    log_stage("START build MOFT attention processors")
-    start = time.time()
-    unet.set_attn_processor(build_moft_processors(unet, config, device))
-    log_stage(f"DONE build/set MOFT attention processors in {time.time() - start:.1f}s")
-
-    log_stage("START wrap AttnProcsLayers")
-    start = time.time()
-    moft_layers = AttnProcsLayers(unet.attn_processors)
-    log_stage(f"DONE wrap AttnProcsLayers in {time.time() - start:.1f}s")
-
-    log_stage(f"START move MOFT layers to {device}")
-    start = time.time()
-    moft_layers = moft_layers.to(device)
-    log_stage(f"DONE move MOFT layers to {device} in {time.time() - start:.1f}s")
-
-    log_stage("START set trainable MOFT parameters")
-    trainable_count = 0
-    for name, param in moft_layers.named_parameters():
-        param.requires_grad_(name.endswith((".L", ".R")))
-        trainable_count += int(param.requires_grad)
-    log_stage(f"DONE set trainable MOFT parameters trainable_tensors={trainable_count}")
     return SimpleNamespace(
         scheduler=scheduler,
-        unet=unet,
         vae=vae,
         tokenizer=tokenizer,
         tokenizer_2=tokenizer_2,
         text_encoder=text_encoder,
         text_encoder_2=text_encoder_2,
-        moft_layers=moft_layers,
     )
 
 
 def compute_one(args, config, base, chart_scale):
+    """Compute and save the trained-GSOFT delta diagonal FIM for one dataset entry."""
     args = apply_entry_defaults(args)
     log_stage(
         f"START compute_one entry_type={args.entry_type} dataset_name={args.dataset_name} "
@@ -463,20 +495,27 @@ def compute_one(args, config, base, chart_scale):
     log_stage(f"Using seed={seed}")
     torch.manual_seed(seed)
 
-    scheduler, unet, vae = base.scheduler, base.unet, base.vae
+    scheduler, vae = base.scheduler, base.vae
     tokenizer, tokenizer_2 = base.tokenizer, base.tokenizer_2
     text_encoder, text_encoder_2 = base.text_encoder, base.text_encoder_2
-    moft_layers = base.moft_layers
 
     log_stage(f"START load adapter safetensors {args.adapter_path}")
     start = time.time()
     adapter_state = load_file(args.adapter_path, device=str(device))
     log_stage(f"DONE load adapter safetensors tensors={len(adapter_state)} in {time.time() - start:.1f}s")
 
-    log_stage("START load adapter state into MOFT layers")
+    log_stage("START load pretrained UNet for trained MOFT FIM")
     start = time.time()
+    unet = load_pretrained_unet(args, config, device)
+    log_stage(f"DONE load pretrained UNet in {time.time() - start:.1f}s")
+
+    log_stage("START attach trained MOFT adapter with zero delta probes")
+    start = time.time()
+    unet.set_attn_processor(build_moft_processors(unet, config, device))
+    moft_layers = AttnProcsLayers(unet.attn_processors).to(device)
     moft_layers.load_state_dict(adapter_state)
-    log_stage(f"DONE load adapter state into MOFT layers in {time.time() - start:.1f}s")
+    enable_zero_oft_delta_parameters(moft_layers)
+    log_stage(f"DONE attach trained MOFT adapter with zero deltas in {time.time() - start:.1f}s")
 
     _, loader, prompt = build_dataset_and_prompt(args, config, (tokenizer, tokenizer_2))
     log_stage(f"START tokenize prompt {prompt!r}")
@@ -487,12 +526,14 @@ def compute_one(args, config, base, chart_scale):
     log_stage("START collect named trainable parameters")
     named_params = {name: param for name, param in moft_layers.named_parameters() if param.requires_grad}
     log_stage(f"DONE collect named trainable parameters count={len(named_params)}")
-    transport_factors = precompute_transport_factors(named_params, chart_scale)
+    assert_oft_parameters_zero(named_params)
 
     log_stage("START allocate Fisher tensors on CPU")
     start = time.time()
     fisher = {
-        name: torch.zeros((*param.shape[:-2], param.shape[-1] * (param.shape[-1] - 1) // 2), dtype=torch.float32)
+        fisher_name_from_delta(name): torch.zeros(
+            (*param.shape[:-2], param.shape[-1] * (param.shape[-1] - 1) // 2), dtype=torch.float32
+        )
         for name, param in named_params.items()
     }
     log_stage(f"DONE allocate Fisher tensors count={len(fisher)} in {time.time() - start:.1f}s")
@@ -501,7 +542,7 @@ def compute_one(args, config, base, chart_scale):
     previous_fisher = None
     unet.train()
     log_stage("START FIM dataloader loop")
-    for batch_idx, batch in enumerate(tqdm(loader, desc="Computing Cayley-transported OFT Lie FIM"), 1):
+    for batch_idx, batch in enumerate(tqdm(loader, desc="Computing trained-GSOFT delta FIM"), 1):
         if args.num_samples is not None and count >= args.num_samples:
             break
         if batch_idx == 1:
@@ -549,8 +590,8 @@ def compute_one(args, config, base, chart_scale):
                 for name, param in param_iter:
                     if param.grad is None:
                         continue
-                    transported = transport_grad(param.grad.detach(), transport_factors[name], chart_scale)
-                    fisher[name] += upper_triangle_values(transported).pow(2).cpu()
+                    skew_grad = coordinate_grad_to_skew(param.grad.detach(), chart_scale)
+                    fisher[fisher_name_from_delta(name)] += upper_triangle_values(skew_grad).pow(2).cpu()
             count += 1
 
         if batch_idx == 1:
@@ -575,18 +616,21 @@ def compute_one(args, config, base, chart_scale):
         wandb.log({"fim/saved": 1, "fim/num_tensors": len(fisher), "fim/final_samples": count})
         wandb.finish()
         log_stage("DONE final wandb log/finish")
-    print(f"Saved transported OFT Lie-basis diagonal FIM to {output_path}")
+    print(f"Saved trained-GSOFT delta diagonal FIM to {output_path}")
 
 
 def main():
+    """Run diffusion trained-GSOFT delta FIM computation from the CLI."""
     args = parse_args()
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable.")
 
+    # Step 0: verify the OFT geometry used by the Fisher coordinates.
     chart_scale = infer_oft_cayley_scale("cpu")
     run_oft_geometry_checks(chart_scale)
     log_stage(f"OFT Cayley chart scale s={chart_scale:g}")
 
+    # Step 1: load the shared pretrained SDXL components.
     config_path = resolve_repo_path(args.config_path)
     log_stage(f"START load config {config_path}")
     start = time.time()
@@ -599,6 +643,9 @@ def main():
     log_stage(f"Using seed={seed}")
     torch.manual_seed(seed)
     base = load_base_components(args, config, device)
+
+    # Step 2: for each adapter, keep trained MOFT attached, add zero deltas,
+    # convert delta gradients to skew coordinates, and save the FIM.
     for entry in iter_entries(args):
         run_args = argparse.Namespace(**vars(args))
         run_args.entry_type = entry["type"]

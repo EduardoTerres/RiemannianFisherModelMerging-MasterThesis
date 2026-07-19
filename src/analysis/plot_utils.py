@@ -1,14 +1,46 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 import numpy as np
 
+from src.dataset.dataset_3 import DATASET_3_PLOT_LABELS
+
 
 # Interpolation
+
+plt.rcParams.update({
+    "text.usetex": True,
+    "font.family": "serif",
+})
+
+
+def latex_escape(text: str) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(char, char) for char in text)
+
+
+def latex_bold(text: str) -> str:
+    return rf"\textbf{{{latex_escape(text)}}}"
+
+
+def dataset_plot_label(task: str) -> str:
+    return latex_bold(DATASET_3_PLOT_LABELS.get(task, task))
 
 def plot_interpolation_curve(
     alphas: List[float],
@@ -32,6 +64,168 @@ def plot_interpolation_curve(
         plt.close(fig)
     else:
         plt.show()
+
+
+def _spread_positions(values: Sequence[float], low: float, high: float) -> list[float]:
+    values = list(values)
+    vmin = min(values)
+    vmax = max(values)
+    if np.isclose(vmin, vmax):
+        return [(low + high) / 2] * len(values)
+    return [low + (value - vmin) / (vmax - vmin) * (high - low) for value in values]
+
+
+def _positive_log_limits(values: Sequence[float]) -> tuple[float, float]:
+    positive = [value for value in values if value > 0]
+    if not positive:
+        return 1e-3, 1.0
+    vmin = min(positive)
+    vmax = max(positive)
+    if np.isclose(vmin, vmax):
+        return vmin * 0.8, vmax * 1.2
+    return vmin * 0.9, vmax * 1.1
+
+
+def _log_tick_positions(values: Sequence[float], limits: tuple[float, float], min_gap: float = 0.045) -> list[float]:
+    log_low, log_high = np.log10(limits)
+    span = max(log_high - log_low, 1e-12)
+    fractions = [(np.log10(max(value, limits[0])) - log_low) / span for value in values]
+    order = sorted(range(len(fractions)), key=fractions.__getitem__)
+    adjusted = fractions[:]
+    for prev_idx, idx in zip(order, order[1:], strict=False):
+        adjusted[idx] = max(adjusted[idx], adjusted[prev_idx] + min_gap)
+    if max(adjusted) > 1.0:
+        shift = max(adjusted) - 1.0
+        adjusted = [value - shift for value in adjusted]
+        for next_idx, idx in zip(reversed(order), reversed(order[:-1]), strict=False):
+            adjusted[idx] = min(adjusted[idx], adjusted[next_idx] - min_gap)
+    adjusted = [min(max(value, 0.0), 1.0) for value in adjusted]
+    return [float(10 ** (log_low + value * span)) for value in adjusted]
+
+
+def plot_joint_normalized_interpolation_curves(
+    series: Sequence[tuple[str, Sequence[float], Sequence[float]]],
+    alpha_end: float,
+    title: str,
+    save_stem: str,
+    l_min: float = 0.05,
+) -> None:
+    """Joint interpolation plot with each curve normalized to start=1 and min=l_min."""
+    fig, ax = plt.subplots(figsize=(18, 5.4))
+    starts: list[float] = []
+    finetuned_losses: list[float] = []
+    labels: list[str] = []
+    rows: list[tuple[str, np.ndarray, np.ndarray, np.ndarray | None, float, float]] = []
+    regular_values: list[np.ndarray] = []
+
+    for label, alphas_raw, losses_raw in series:
+        if label == "math500":
+            continue
+        alphas = np.asarray(alphas_raw, dtype=float)
+        losses = np.asarray(losses_raw, dtype=float)
+        mask = (alphas >= -1e-9) & (alphas <= alpha_end + 1e-9)
+        if not np.any(mask):
+            continue
+
+        alphas = alphas[mask]
+        losses = losses[mask]
+        start_loss = losses[0]
+        min_loss = losses.min()
+        finetuned_loss = losses[np.argmin(np.abs(alphas - 1.0))]
+        normalized = None
+        if label != "math500":
+            denom = start_loss - min_loss
+            if np.isclose(denom, 0.0):
+                normalized = np.full_like(losses, l_min)
+            else:
+                normalized = l_min + (1.0 - l_min) * (losses - min_loss) / denom
+            regular_values.append(normalized)
+
+        rows.append((label, alphas, losses, normalized, float(start_loss), float(finetuned_loss)))
+
+    if not rows:
+        plt.close(fig)
+        return
+
+    regular_y_values = np.concatenate(regular_values) if regular_values else np.array([l_min, 1.0])
+    ymin = min(-0.05, float(regular_y_values.min()) - 0.05)
+    ymax = max(1.05, float(regular_y_values.max()) + 0.05)
+
+    for label, alphas, losses, normalized, start_loss, finetuned_loss in rows:
+        if label == "math500":
+            denom = start_loss - finetuned_loss
+            if np.isclose(denom, 0.0):
+                normalized = np.full_like(losses, l_min)
+            else:
+                normalized = l_min + (ymax - l_min) * (start_loss - losses) / denom
+
+        assert normalized is not None
+        display_label = dataset_plot_label(label)
+        ax.plot(alphas, normalized, marker="^", linewidth=2.4, markersize=6.4, label=display_label)
+        starts.append(start_loss)
+        finetuned_losses.append(finetuned_loss)
+        labels.append(display_label)
+    ax.set_xlim(0, alpha_end)
+    ax.set_ylim(ymin, ymax)
+    ax.set_xlabel(r"Geodesic parameter $\alpha$", fontsize=16)
+    ax.set_ylabel(r"Normalized loss (start $= 1$, min $= l_{\min}$)", fontsize=16)
+    ax.tick_params(axis="both", labelsize=13)
+    ax.grid(True, linestyle="--", alpha=0.45)
+    label_y = ymax + 0.04 * (ymax - ymin)
+    for x_value, label, ha in (
+        (0.0, r"\textbf{Pretrained} $\alpha=0$", "left"),
+        (1.0, r"\textbf{Finetuned} $\alpha=1$", "center"),
+    ):
+        if x_value <= alpha_end:
+            ax.axvline(x_value, color="red", linestyle="--", linewidth=1.4, alpha=0.85)
+            ax.text(
+                x_value,
+                label_y,
+                label,
+                color="red",
+                ha=ha,
+                va="bottom",
+                fontsize=16,
+                clip_on=False,
+            )
+    ax.legend(fontsize=13, ncol=1, loc="center left", bbox_to_anchor=(1.5, 0.5), frameon=False)
+
+    left_axis = ax.twinx()
+    start_limits = _positive_log_limits(starts)
+    left_axis.set_yscale("log")
+    left_axis.set_ylim(start_limits)
+    left_axis.spines["left"].set_position(("outward", 72))
+    left_axis.spines["left"].set_visible(True)
+    left_axis.spines["right"].set_visible(False)
+    left_axis.yaxis.set_label_position("left")
+    left_axis.yaxis.tick_left()
+    left_axis.set_yticks(
+        _log_tick_positions(starts, start_limits),
+        [rf"{label} {value:.2f}" for label, value in zip(labels, starts, strict=True)],
+        fontsize=15,
+    )
+    left_axis.minorticks_off()
+    left_axis.set_ylabel("Start Loss (log scale)", fontsize=19)
+
+    right_axis = ax.twinx()
+    finetuned_limits = _positive_log_limits(finetuned_losses)
+    right_axis.set_yscale("log")
+    right_axis.set_ylim(finetuned_limits)
+    right_axis.spines["right"].set_position(("outward", 28))
+    right_axis.set_yticks(
+        _log_tick_positions(finetuned_losses, finetuned_limits),
+        [rf"{label} {value:.2f}" for label, value in zip(labels, finetuned_losses, strict=True)],
+        fontsize=15,
+    )
+    right_axis.minorticks_off()
+    right_axis.set_ylabel("Finetuned Loss (log scale)", fontsize=19)
+
+    fig.tight_layout()
+    stem = Path(save_stem)
+    stem.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in (".png", ".pdf"):
+        fig.savefig(stem.with_suffix(suffix), dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 # Visualization

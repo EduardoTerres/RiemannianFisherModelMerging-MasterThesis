@@ -5,23 +5,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import argparse
+import json
 
 import numpy as np
 import torch
 from typing import Dict, List, Optional
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
+from peft import PeftConfig, PeftModel
 from tqdm import tqdm
 
-from src.analysis.plot_utils import plot_interpolation_curve
+from src.analysis.plot_utils import (
+    plot_interpolation_curve,
+    plot_joint_normalized_interpolation_curves,
+)
 from src.geometry import SOnManifold
 from src.merging import OFTMerging
 from src.paths import (
     ROOTDIR,
     MODEL_FAMILIES,
 )
-from src.dataset.dataset_1 import DATASET_1_TRAIN as DATASET_1, build_loader
+from src.dataset.dataset_3 import DATASET_3_TEST, DATASET_3_TRAIN, build_loader
 from src.utils import parse_device
 
 LOSS_SUBDIR = "loss"
@@ -30,6 +34,21 @@ IMG_SUBDIR = "imgs"
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 _manifold = SOnManifold()
 _merging = OFTMerging(device=_device)
+
+
+def load_adapter_config(adapter_path: str, adapter_paths: list[str]) -> PeftConfig | None:
+    """Use a sibling PEFT config when an adapter directory only contains weights."""
+    adapter_dir = Path(adapter_path)
+    if (adapter_dir / "adapter_config.json").exists():
+        return None
+
+    for candidate in adapter_paths:
+        candidate_dir = Path(candidate)
+        if (candidate_dir / "adapter_config.json").exists():
+            print(f"  Reusing adapter config from {candidate_dir}")
+            return PeftConfig.from_pretrained(candidate_dir)
+
+    return None
 
 
 def interpolate(
@@ -174,32 +193,182 @@ def main(args: argparse.Namespace):
         _run(family_name, args)
 
 
+def resolve_device(device: str) -> str:
+    if device.lower().strip() == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return parse_device(device)
+
+
+def save_losses_json(
+    path: Path,
+    task: str,
+    alphas: list[float],
+    losses: list[float],
+    args: argparse.Namespace,
+) -> None:
+    payload = {
+        "task": task,
+        "dataset_split": args.dataset_split,
+        "num_samples": args.num_samples,
+        "batch_size": args.batch_size,
+        "max_length": args.max_length,
+        "alphas": alphas,
+        "losses": losses,
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def load_losses_json(path: Path) -> tuple[list[float], list[float]]:
+    payload = json.loads(path.read_text())
+    return payload["alphas"], payload["losses"]
+
+
+def save_interpolation_outputs(
+    family_name: str,
+    task_tag: str,
+    interpolation_grid: list[float],
+    interpolation_losses: list[float],
+    args: argparse.Namespace,
+) -> None:
+    loss_dir = Path(args.save_path) / family_name / LOSS_SUBDIR
+    img_dir = Path(args.save_path) / family_name / IMG_SUBDIR
+    loss_dir.mkdir(parents=True, exist_ok=True)
+    img_dir.mkdir(parents=True, exist_ok=True)
+
+    loss_path = loss_dir / f"{task_tag}.npy"
+    json_path = loss_dir / f"{task_tag}.json"
+    np.save(loss_path, np.array(interpolation_losses))
+    save_losses_json(json_path, task_tag, interpolation_grid, interpolation_losses, args)
+    print(f"  Saved losses to {loss_path}")
+    print(f"  Saved losses JSON to {json_path}")
+
+    save_interpolation_plot(family_name, task_tag, interpolation_grid, interpolation_losses, args)
+
+
+def save_interpolation_plot(
+    family_name: str,
+    task_tag: str,
+    interpolation_grid: list[float],
+    interpolation_losses: list[float],
+    args: argparse.Namespace,
+) -> None:
+    img_dir = Path(args.save_path) / family_name / IMG_SUBDIR
+    img_dir.mkdir(parents=True, exist_ok=True)
+    img_path = img_dir / f"{task_tag}.png"
+    plot_interpolation_curve(
+        alphas=interpolation_grid,
+        losses=interpolation_losses,
+        title=f"Loss interpolation: pretrained -> {task_tag}",
+        save_path=str(img_path),
+    )
+    print(f"  Saved plot to {img_path}")
+
+
+def save_joint_interpolation_plots(
+    family_name: str,
+    task_tags: list[str],
+    args: argparse.Namespace,
+) -> None:
+    loss_dir = Path(args.save_path) / family_name / LOSS_SUBDIR
+    img_dir = Path(args.save_path) / family_name / IMG_SUBDIR
+    series = []
+    missing = []
+
+    for task_tag in task_tags:
+        json_path = loss_dir / f"{task_tag}.json"
+        if not json_path.exists():
+            missing.append(task_tag)
+            continue
+        alphas, losses = load_losses_json(json_path)
+        series.append((task_tag, alphas, losses))
+
+    if missing:
+        print(f"  Skipping missing tasks in joint plot: {', '.join(missing)}")
+    if not series:
+        return
+
+    family_tag = "llama" if family_name.startswith("llama") else "qwen" if family_name.startswith("qwen") else family_name
+    for alpha_end, suffix in ((1.0, "0_1"), (2.0, "0_2")):
+        save_stem = img_dir / f"loss_interpolation_{family_tag}_{suffix}"
+        plot_joint_normalized_interpolation_curves(
+            series=series,
+            alpha_end=alpha_end,
+            title=f"{family_name} normalized loss interpolation ({alpha_end:g})",
+            save_stem=str(save_stem),
+        )
+        print(f"  Saved joint plots to {save_stem}.png and {save_stem}.pdf")
+
+
 def _run(family_name: str, args: argparse.Namespace):
     model_family = MODEL_FAMILIES[family_name]
     base_model_path = model_family.base_model_path
     adapter_paths = model_family.adapter_paths
+    dataset_specs = DATASET_3_TEST if args.dataset_split == "test" else DATASET_3_TRAIN
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    interpolation_grid = np.linspace(0, 1, args.num_points).tolist()
+    device = args.device
+    interpolation_grid = np.linspace(
+        args.interpolation_start,
+        args.interpolation_end,
+        args.num_points,
+    ).tolist()
+    loss_dir = Path(args.save_path) / family_name / LOSS_SUBDIR
+    task_tags = [spec[0] for spec in dataset_specs]
+    adapter_by_task = {
+        task_tag: adapter_path
+        for (task_tag, *_), adapter_path in zip(dataset_specs, adapter_paths, strict=True)
+    }
+
+    specs_to_compute = []
+    for spec in dataset_specs:
+        task_tag = spec[0]
+        json_path = loss_dir / f"{task_tag}.json"
+        if json_path.exists() and not args.force_compute:
+            print(f"\n---[{task_tag}]--- Found cached losses: {json_path}")
+            if args.plots:
+                alphas, losses = load_losses_json(json_path)
+                save_interpolation_plot(family_name, task_tag, alphas, losses, args)
+            continue
+
+        if json_path.exists() and args.force_compute:
+            print(
+                f"\n---[{task_tag}]--- Recomputing cached losses because "
+                f"--force-compute is set: {json_path}"
+            )
+        specs_to_compute.append(spec)
+
+    if not specs_to_compute:
+        print(f"\n[{family_name}] All interpolation JSON files already exist. Nothing to compute.")
+        save_joint_interpolation_plots(family_name, task_tags, args)
+        return
+
+    dataset_specs = specs_to_compute
+    tasks_to_compute = ", ".join(spec[0] for spec in dataset_specs)
+    print(f"\n[{family_name}] Computing interpolation losses for: {tasks_to_compute}")
 
     tokenizer = AutoTokenizer.from_pretrained(base_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
     base = AutoModelForCausalLM.from_pretrained(
         base_model_path, torch_dtype=torch.float32, device_map=None
     )
 
     start_model = None  # pretrained = Identity on all SO(n) blocks
 
-    for (task_tag, dataset_path, dataset_name, split, doc_to_text), adapter_path in tqdm(
-        zip(DATASET_1, adapter_paths), desc="Interpolating..."
+    for task_tag, dataset_path, dataset_name, split, doc_to_text_fn in tqdm(
+        dataset_specs, desc="Interpolating..."
     ):
+        adapter_path = adapter_by_task[task_tag]
         print(f"\n---[{task_tag}]--- Loading adapter: {adapter_path}")
 
         end_model = load_file(f"{adapter_path}/adapter_model.safetensors", device="cpu")
+        peft_config = load_adapter_config(adapter_path, adapter_paths)
 
-        model = PeftModel.from_pretrained(base, adapter_path, is_trainable=False)
+        model = PeftModel.from_pretrained(
+            base,
+            adapter_path,
+            is_trainable=False,
+            config=peft_config,
+        )
         model.enable_adapter_layers()
         model.to(device)
 
@@ -207,11 +376,13 @@ def _run(family_name: str, args: argparse.Namespace):
             dataset_path=dataset_path,
             dataset_name=dataset_name,
             split=split,
-            doc_to_text=doc_to_text,
+            doc_to_text_fn=doc_to_text_fn,
             tokenizer=tokenizer,
             num_samples=args.num_samples,
             batch_size=args.batch_size,
             max_length=args.max_length,
+            task=task_tag,
+            cache_dir=str(args.dataset_cache_dir) if args.dataset_cache_dir else None,
         )
 
         interpolation_losses = interpolate_model(
@@ -223,24 +394,15 @@ def _run(family_name: str, args: argparse.Namespace):
             device=device,
         )
 
-        # Save losss interpolation to plot
-        LOSS_DIR = Path(args.save_path) / family_name / LOSS_SUBDIR
-        IMG_DIR = Path(args.save_path) / family_name / IMG_SUBDIR
-        LOSS_DIR.mkdir(parents=True, exist_ok=True)
-        IMG_DIR.mkdir(parents=True, exist_ok=True)
-
-        loss_path = LOSS_DIR / f"{task_tag}.npy"
-        np.save(loss_path, np.array(interpolation_losses))
-        print(f"  Saved losses to {loss_path}")
-
-        img_path = IMG_DIR / f"{task_tag}.png"
-        plot_interpolation_curve(
-            alphas=interpolation_grid,
-            losses=interpolation_losses,
-            title=f"Loss interpolation: pretrained -> {task_tag}",
-            save_path=str(img_path),
+        save_interpolation_outputs(
+            family_name,
+            task_tag,
+            interpolation_grid,
+            interpolation_losses,
+            args,
         )
-        print(f"  Saved plot to {img_path}")
+
+    save_joint_interpolation_plots(family_name, task_tags, args)
 
 
 if __name__ == "__main__":
@@ -249,6 +411,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-points", type=int, default=5,
         help="Number of interpolation points between pretrained and adapter.",
+    )
+    parser.add_argument(
+        "--interpolation-start", type=float, default=0.0,
+        help="First alpha value in the interpolation grid.",
+    )
+    parser.add_argument(
+        "--interpolation-end", type=float, default=1.0,
+        help="Last alpha value in the interpolation grid.",
     )
     parser.add_argument(
         "--num-samples", type=int, default=512,
@@ -264,14 +434,34 @@ if __name__ == "__main__":
         help="Directory where interpolation plot PNGs are saved.",
     )
     parser.add_argument(
+        "--dataset-split", choices=["train", "test"], default="test",
+        help="Dataset_3 split specs to use for loss evaluation.",
+    )
+    parser.add_argument(
+        "--dataset-cache-dir",
+        type=Path,
+        default=ROOTDIR / "data" / "hf_cache",
+        help="Hugging Face datasets cache directory.",
+    )
+    parser.add_argument(
+        "--plots",
+        action="store_true",
+        help="Regenerate plots from saved JSON losses when available.",
+    )
+    parser.add_argument(
+        "--force-compute",
+        action="store_true",
+        help="Recompute interpolation losses even when the task JSON already exists.",
+    )
+    parser.add_argument(
         "--model-family", nargs="+", default=list(MODEL_FAMILIES), choices=list(MODEL_FAMILIES),
         help="One or more model families to process.",
     )
     parser.add_argument(
-        "--device", type=str, default="cuda",
-        help="Device to use for interpolation and loss evaluation (e.g., 'gpu', 'cpu').",
+        "--device", type=str, default="auto",
+        help="Device to use for interpolation and loss evaluation (auto, gpu/cuda, cpu, or mps).",
     )
     args = parser.parse_args()
-    args.device = parse_device(args.device)
+    args.device = resolve_device(args.device)
 
     main(args)

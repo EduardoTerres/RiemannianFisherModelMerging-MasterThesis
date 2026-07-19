@@ -181,6 +181,25 @@ def method_info(method, args, pair_name=None):
             fisher_backend="diagonal",
         )
 
+    fisher_fim_match = re.fullmatch(
+        r"(?P<prefix>fisher_kfac|fisher|diagonal_fisher|kfac)_mu_?(?P<mu>[^_]+)_fim_(?P<fim_normalization>none|trace|frobenius|layer-trace|layer-frobenius|kl)",
+        method,
+    )
+    if fisher_fim_match:
+        prefix = fisher_fim_match.group("prefix")
+        backend = "kfac" if prefix in {"fisher_kfac", "kfac"} else "diagonal"
+        display_prefix = "diagonal_fisher_kfac" if backend == "kfac" else "diagonal_fisher"
+        mu = parse_mu(fisher_fim_match.group("mu"), method)
+        fim_normalization = fisher_fim_match.group("fim_normalization")
+        return build(
+            f"{display_prefix}_mu{mu:g}_fim_{fim_normalization}",
+            kind="gradients",
+            merge_mode="fisher",
+            fisher_backend=backend,
+            fisher_correction_mu=mu,
+            fim_normalization=fim_normalization,
+        )
+
     mu_prefixes = (
         ("fisher_kfac_mu_", "kfac", "diagonal_fisher_kfac"),
         ("fisher_kfac_mu", "kfac", "diagonal_fisher_kfac"),
@@ -223,28 +242,23 @@ def method_info(method, args, pair_name=None):
     )
 
 
+def sample_root_variants(root):
+    variants = [root]
+    if root.name in {"samples", "samples_10_prompts"}:
+        variants.extend(sorted(path for path in root.parent.glob(f"{root.name}_*") if path.is_dir()))
+    return tuple(dict.fromkeys(variants))
+
+
 def sample_roots(args, method):
-    roots = [args.samples_dir or args.output_dir / "samples"]
+    roots = list(sample_root_variants(args.samples_dir or args.output_dir / "samples"))
     if args.method_samples_root is not None:
-        roots.extend(
-            (
-                args.method_samples_root / method / "samples",
-                args.method_samples_root / method,
-            )
-        )
-        if args.method_samples_root.name in {"samples", "samples_10_prompts"}:
-            sibling = args.method_samples_root.parent / "samples_10_prompts"
-            roots.extend((sibling / method / "samples", sibling / method))
-    roots.extend(
-        (
-            args.output_dir / "samples" / method / "samples",
-            args.output_dir / "samples" / method,
-            args.output_dir / "samples_10_prompts" / method / "samples",
-            args.output_dir / "samples_10_prompts" / method,
-            args.output_dir / "samples",
-            args.output_dir / "samples_10_prompts",
-        )
-    )
+        for root in sample_root_variants(args.method_samples_root):
+            roots.extend((root / method / "samples", root / method))
+    for root in (
+        *sample_root_variants(args.output_dir / "samples"),
+        *sample_root_variants(args.output_dir / "samples_10_prompts"),
+    ):
+        roots.extend((root / method / "samples", root / method, root))
     return tuple(dict.fromkeys(roots))
 
 

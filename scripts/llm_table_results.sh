@@ -7,6 +7,7 @@ conda activate merge
 
 # Entries should be METHOD or METHOD=DISPLAY_LABEL, where METHOD is the output folder name.
 METHODS=(
+  "pretrained=Pretrained"
   "finetunes=Finetuned"
   "standard_rescaled=OrthoMerge"
   "diagonal_fisher=diagonal fisher"

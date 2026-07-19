@@ -12,7 +12,7 @@ set -e
 
 FISHER_BACKEND="diagonal"  # "diagonal" or "kfac"
 CORRECTION_MU=2
-FIM_NORMALIZATION="layer-trace"  # "none", "trace", "frobenius", "layer-trace", "layer-frobenius", or "kl"
+FIM_NORMALIZATION="none"  # "none", "trace", "frobenius", "layer-trace", "layer-frobenius", or "kl"
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"

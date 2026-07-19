@@ -5,14 +5,14 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=02:00:00
-#SBATCH --array=0-4
+#SBATCH --array=0-11
 #SBATCH --output=outputs/diffusion/slurms/pipe_fisher_%A_%a.out
 
 set -e
 
 MU=4  # Fisher correction mu
 FISHER_BACKEND="diagonal"  # diagonal or kfac
-FIM_NORMALIZATION="frobenius"  # "none", "trace", "frobenius", or "kl"
+FIM_NORMALIZATION="trace"  # "none", "trace", "frobenius", "layer-trace", "layer-frobenius", or "kl"
 
 if [[ "${FISHER_BACKEND}" == "diagonal" ]]; then
   METHOD_NAME="diagonal_fisher_mu_${MU}_fim_${FIM_NORMALIZATION}"
@@ -25,7 +25,7 @@ fi
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
-METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples/${METHOD_NAME}"
+METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples_10_prompts/${METHOD_NAME}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
@@ -38,13 +38,13 @@ export DIFFUSERS_OFFLINE=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 STYLES=(
-  # "01_01"
-  # "01_02"
-  # "01_03"
-  # "01_07"
-  # "01_08"
-  # "02_03"
-  # "03_04"
+  "01_01"
+  "01_02"
+  "01_03"
+  "01_07"
+  "01_08"
+  "02_03"
+  "03_04"
   "dolina"
   "etsy"
   "gondoliers"

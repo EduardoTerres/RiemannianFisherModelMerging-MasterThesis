@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 import os
 import sys
@@ -45,9 +46,11 @@ DEVICE = "cuda:0"
 PLOT_DIR = REPO_ROOT / "outputs/diffusion/analysis/fim"
 MAX_HIST_POINTS = 200_000
 SIGNED_LOG_DIFF_EDGE = 40.0
-STYLE_AVERAGE_NUM_BINS = 80
+STYLE_AVERAGE_NUM_BINS = 1000
 STYLE_AVERAGE_CACHE_DIR = PLOT_DIR / "sdxl_uncharted/style_histograms"
-STYLE_AVERAGE_MODES = ("raw", "frobenius")
+STYLE_AVERAGE_MODES = ("raw", "frobenius", "trace")
+STYLE_AVERAGE_COMBINED_STYLE_INDICES = (1, 2, 3, 4, 7, 8)
+STYLE_AVERAGE_COMBINED_MODES = ("raw", "trace", "frobenius")
 
 
 def kfac_path(entry):
@@ -403,6 +406,12 @@ def style_average_fim_diff_values(concept_tensor, style_tensor, mode):
         concept_blocks = concept_blocks / torch.linalg.vector_norm(concept_blocks, dim=1, keepdim=True).clamp_min(1e-30)
         style_blocks = style_blocks / torch.linalg.vector_norm(style_blocks, dim=1, keepdim=True).clamp_min(1e-30)
         return (concept_blocks - style_blocks).flatten()
+    if mode == "trace":
+        concept_blocks = concept_tensor.reshape(-1, concept_tensor.shape[-1])
+        style_blocks = style_tensor.reshape(-1, style_tensor.shape[-1])
+        concept_blocks = concept_blocks / concept_blocks.sum(dim=1, keepdim=True).clamp_min(1e-30)
+        style_blocks = style_blocks / style_blocks.sum(dim=1, keepdim=True).clamp_min(1e-30)
+        return (concept_blocks - style_blocks).flatten()
     raise ValueError(mode)
 
 
@@ -422,22 +431,41 @@ def fim_pair_hist_counts(concept, style, bins, mode):
     return counts / total
 
 
+def histogram_xlim(heights, bins):
+    total = heights.sum()
+    if total <= 0:
+        return -1.0, 1.0
+
+    cdf = torch.cumsum(heights, dim=0)
+    lower_idx = int(torch.searchsorted(cdf, total * 0.005).clamp(max=heights.numel() - 1).item())
+    upper_idx = int(torch.searchsorted(cdf, total * 0.995).clamp(max=heights.numel() - 1).item())
+    left = min(float(bins[lower_idx]), 0.0)
+    right = max(float(bins[upper_idx + 1]), 0.0)
+    if math.isclose(left, right):
+        left -= 1.0
+        right += 1.0
+
+    pad = max((right - left) * 0.08, 0.25)
+    return max(float(bins[0]), left - pad), min(float(bins[-1]), right + pad)
+
+
 def plot_average_histogram(ax, histograms, bins):
     if not histograms:
         ax.text(0.5, 0.5, r"\textrm{missing}", ha="center", va="center", transform=ax.transAxes)
         ax.set_axis_off()
         return
 
-    heights = torch.stack(histograms).mean(dim=0).numpy()
+    heights = torch.stack(histograms).mean(dim=0)
     widths = bins[1:] - bins[:-1]
     centers = 0.5 * (bins[:-1] + bins[1:])
     colors = ["tab:red" if center < 0 else "tab:green" for center in centers]
-    ax.bar(centers, heights, width=widths, color=colors, alpha=0.78, align="center")
+    ax.bar(centers, heights.numpy(), width=widths, color=colors, alpha=0.78, align="center")
     ax.axvline(0, color="black", linewidth=0.6)
+    ax.set_xlim(*histogram_xlim(heights, torch.tensor(bins)))
 
 
-def style_histogram_cache_path(style, mode):
-    return STYLE_AVERAGE_CACHE_DIR / mode / f"{style['name']}.pt"
+def style_average_json_path(mode):
+    return STYLE_AVERAGE_CACHE_DIR / f"{mode}.json"
 
 
 def style_average_bins():
@@ -457,33 +485,41 @@ def compute_style_average_histogram(style, bins, mode):
     return torch.stack(histograms).mean(dim=0)
 
 
-def compute_style_average_histogram_batch(style_batch_start, style_batch_size, bins, mode):
-    (STYLE_AVERAGE_CACHE_DIR / mode).mkdir(parents=True, exist_ok=True)
-    start = max(0, style_batch_start)
-    end = min(len(STYLE_ADAPTERS), start + style_batch_size)
-    for style in STYLE_ADAPTERS[start:end]:
+def compute_style_average_histograms_json(bins, mode):
+    STYLE_AVERAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    histograms = {}
+    for style in STYLE_ADAPTERS:
         hist = compute_style_average_histogram(style, bins, mode)
-        cache_path = style_histogram_cache_path(style, mode)
-        torch.save({"style": style["name"], "mode": mode, "bins": bins.cpu(), "hist": hist}, cache_path)
+        histograms[style["name"]] = None if hist is None else hist.tolist()
         status = "missing" if hist is None else "ok"
-        print(f"cached {mode} style histogram {style['name']} ({status}) at {cache_path}", flush=True)
+        print(f"computed {mode} style histogram {style['name']} ({status})", flush=True)
+
+    json_path = style_average_json_path(mode)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        json.dumps({"mode": mode, "bins": bins.cpu().tolist(), "histograms": histograms})
+    )
+    print(f"saved metrics {json_path}", flush=True)
 
 
 def load_style_average_histograms(bins, mode):
+    json_path = style_average_json_path(mode)
     histograms_by_style = {}
     missing = []
+    if not json_path.exists():
+        return {style["name"]: None for style in STYLE_ADAPTERS}, [style["name"] for style in STYLE_ADAPTERS]
+
+    payload = json.loads(json_path.read_text())
+    if payload.get("mode") != mode or not torch.equal(torch.tensor(payload["bins"]), bins.cpu()):
+        return {style["name"]: None for style in STYLE_ADAPTERS}, [style["name"] for style in STYLE_ADAPTERS]
+
     for style in STYLE_ADAPTERS:
-        cache_path = style_histogram_cache_path(style, mode)
-        if not cache_path.exists():
+        hist = payload["histograms"].get(style["name"])
+        if hist is None:
             histograms_by_style[style["name"]] = None
             missing.append(style["name"])
-            continue
-        payload = torch.load(cache_path, map_location="cpu")
-        if payload.get("mode") != mode or not torch.equal(payload["bins"], bins.cpu()):
-            histograms_by_style[style["name"]] = None
-            missing.append(style["name"])
-            continue
-        histograms_by_style[style["name"]] = payload["hist"]
+        else:
+            histograms_by_style[style["name"]] = torch.tensor(hist)
     return histograms_by_style, missing
 
 
@@ -500,7 +536,7 @@ def save_style_average_plot(histograms_by_style, bins, mode):
         2,
         6,
         figsize=(17.5, 6.2),
-        sharex=True,
+        sharex=False,
         sharey=True,
         constrained_layout=True,
     )
@@ -523,7 +559,7 @@ def save_style_average_plot(histograms_by_style, bins, mode):
             Patch(facecolor="tab:red", alpha=0.78, label=r"$\Delta < 0$: style larger"),
             Patch(facecolor="tab:green", alpha=0.78, label=r"$\Delta \geq 0$: concept larger"),
         ],
-        loc="outside upper center",
+        loc="outside lower center",
         ncols=2,
         frameon=False,
         fontsize=22,
@@ -533,7 +569,100 @@ def save_style_average_plot(histograms_by_style, bins, mode):
         save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=160, bbox_inches="tight")
         print(f"saved plot {save_path}", flush=True)
+        pdf_path = save_path.with_suffix(".pdf")
+        fig.savefig(pdf_path, bbox_inches="tight")
+        print(f"saved plot {pdf_path}", flush=True)
     plt.close(fig)
+
+
+def save_style_average_combined_plot(histograms_by_mode, bins_by_mode):
+    styles = [STYLE_ADAPTERS[idx - 1] for idx in STYLE_AVERAGE_COMBINED_STYLE_INDICES]
+    fig, axes = plt.subplots(
+        len(STYLE_AVERAGE_COMBINED_MODES),
+        len(styles),
+        figsize=(4.35 * len(styles), 3.9 * len(STYLE_AVERAGE_COMBINED_MODES)),
+        sharex=False,
+        sharey=True,
+        constrained_layout=True,
+    )
+    fig.set_constrained_layout_pads(w_pad=0.18, h_pad=0.18, hspace=0.12, wspace=0.06)
+
+    mode_labels = {
+        "raw": r"\textrm{Raw}",
+        "trace": r"\textrm{Trace}",
+        "frobenius": r"\textrm{Frobenius}",
+    }
+
+    for row, mode in enumerate(STYLE_AVERAGE_COMBINED_MODES):
+        bins_np = bins_by_mode[mode].cpu().numpy()
+        for col, style in enumerate(styles):
+            ax = axes[row, col]
+            hist = histograms_by_mode[mode][style["name"]]
+            plot_average_histogram(ax, [] if hist is None else [hist], bins_np)
+            ax.tick_params(labelsize=30)
+            ax.grid(alpha=0.18)
+
+            if row == 0:
+                ax.set_title(
+                    rf"\textrm{{Style {STYLE_AVERAGE_COMBINED_STYLE_INDICES[col]}}}",
+                    fontsize=42,
+                    pad=16,
+                )
+            if col == 0:
+                ax.set_ylabel(mode_labels[mode], fontsize=42, labelpad=16)
+
+    fig.supxlabel(
+        r"$\operatorname{sign}(\Delta)\log_{10}(|\Delta|)$",
+        fontsize=40,
+        x=0.5,
+    )
+
+    fig.legend(
+        handles=[
+            Patch(facecolor="tab:red", alpha=0.78, label=r"$\Delta < 0$: style larger"),
+            Patch(facecolor="tab:green", alpha=0.78, label=r"$\Delta \geq 0$: concept larger"),
+        ],
+        loc="outside lower center",
+        ncols=2,
+        frameon=False,
+        fontsize=38,
+    )
+
+    save_paths = [
+        PLOT_DIR / "style_averaged_selected_raw_trace_frobenius_diff_grid_fim.png",
+        PLOT_DIR / "sdxl_uncharted" / "matrices_selected_raw_trace_frobenius.png",
+    ]
+    for save_path in save_paths:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=160, bbox_inches="tight")
+        print(f"saved plot {save_path}", flush=True)
+        pdf_path = save_path.with_suffix(".pdf")
+        fig.savefig(pdf_path, bbox_inches="tight")
+        print(f"saved plot {pdf_path}", flush=True)
+    plt.close(fig)
+
+
+def render_style_averaged_selected_mode_stack():
+    histograms_by_mode = {}
+    bins_by_mode = {}
+    missing_by_mode = {}
+    for mode in STYLE_AVERAGE_COMBINED_MODES:
+        bins = style_average_bins()
+        histograms_by_style, missing = load_style_average_histograms(bins, mode)
+        histograms_by_mode[mode] = histograms_by_style
+        bins_by_mode[mode] = bins
+        missing_by_mode[mode] = missing
+
+    missing = {
+        mode: values
+        for mode, values in missing_by_mode.items()
+        if values
+    }
+    if missing:
+        details = "; ".join(f"{mode}: {', '.join(values)}" for mode, values in missing.items())
+        raise FileNotFoundError(f"Missing cached style histograms for combined plot: {details}")
+
+    save_style_average_combined_plot(histograms_by_mode, bins_by_mode)
 
 
 def paired_fim_hist(ax, concept_values, style_values):
@@ -598,17 +727,23 @@ def plot_all_pair_raw_diffs(device):
             print(f"saved plot {save_path}")
 
 
-def plot_style_averaged_fim_diffs(device, style_batch_start=0, style_batch_size=None, render=True, mode="raw"):
+def plot_style_averaged_fim_diffs(device, render=True, mode="raw"):
     PLOT_DIR.mkdir(parents=True, exist_ok=True)
     bins = style_average_bins()
-    if style_batch_size is None:
-        style_batch_size = len(STYLE_ADAPTERS)
 
-    compute_style_average_histogram_batch(style_batch_start, style_batch_size, bins, mode)
+    if not style_average_json_path(mode).exists():
+        compute_style_average_histograms_json(bins, mode)
     if not render:
         return
 
     histograms_by_style, missing = load_style_average_histograms(bins, mode)
+    if missing:
+        print(
+            f"Recomputing style-averaged {mode} FIM histograms; missing or stale cached styles: {', '.join(missing)}",
+            flush=True,
+        )
+        compute_style_average_histograms_json(bins, mode)
+        histograms_by_style, missing = load_style_average_histograms(bins, mode)
     if missing:
         print(f"Skipping style-averaged {mode} FIM diff render; missing cached styles: {', '.join(missing)}")
         return
@@ -849,23 +984,29 @@ def parse_args():
         help="Only render the 2x6 style-averaged raw FIM diff plot from cached style histograms.",
     )
     parser.add_argument(
+        "--render_style_average_selected_mode_stack",
+        action="store_true",
+        help="Only render the selected-style raw/trace/Frobenius FIM diff plot from cached style histograms.",
+    )
+    parser.add_argument(
         "--style_average_mode",
         choices=STYLE_AVERAGE_MODES,
         default="raw",
         help="FIM normalization used for the style-averaged 2x6 diff plot.",
     )
-    parser.add_argument("--style_batch_start", type=int, default=0)
-    parser.add_argument("--style_batch_size", type=int, default=None)
     parser.add_argument(
         "--no_render",
         action="store_true",
-        help="Compute style histogram cache files without assembling the final plot.",
+        help="Compute the style histogram metrics JSON without assembling the final plot.",
     )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.render_style_average_selected_mode_stack:
+        render_style_averaged_selected_mode_stack()
+        return
     if args.render_style_average_raw_fim:
         render_style_averaged_fim_diffs(args.style_average_mode)
         return
@@ -874,8 +1015,6 @@ def main():
     if args.only_style_average_raw_fim:
         plot_style_averaged_fim_diffs(
             device,
-            style_batch_start=args.style_batch_start,
-            style_batch_size=args.style_batch_size,
             render=not args.no_render,
             mode=args.style_average_mode,
         )
@@ -891,6 +1030,7 @@ def main():
     plot_all_pair_raw_diffs(device)
     for mode in STYLE_AVERAGE_MODES:
         plot_style_averaged_fim_diffs(device, mode=mode)
+    render_style_averaged_selected_mode_stack()
     plot_all_pair_fim_and_diff_grids(device)
 
 

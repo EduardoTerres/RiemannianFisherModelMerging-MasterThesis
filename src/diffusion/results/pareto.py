@@ -327,8 +327,8 @@ def plot_style_concept_curves(rows, save_path, title, series_key, label_key=None
             if ax is axes[0]:
                 color_handles.append(Line2D([0], [0], color=color, linewidth=2.0, label=label))
             ax.plot(
-                [row[concept_key] for row in series_rows],
                 [row[style_key] for row in series_rows],
+                [row[concept_key] for row in series_rows],
                 linewidth=2.0,
                 color=color,
                 label="_nolegend_",
@@ -338,8 +338,8 @@ def plot_style_concept_curves(rows, save_path, title, series_key, label_key=None
                     radius = label_radii[row[label_key]]
                     alpha = label_alphas[row[label_key]]
                     ax.scatter(
-                        row[concept_key],
                         row[style_key],
+                        row[concept_key],
                         marker="o",
                         s=radius**2,
                         color=color,
@@ -349,15 +349,15 @@ def plot_style_concept_curves(rows, save_path, title, series_key, label_key=None
                     if float(row[label_key]) <= 0.5:
                         ax.annotate(
                             label_value(row[label_key]),
-                            (row[concept_key], row[style_key]),
+                            (row[style_key], row[concept_key]),
                             fontsize=13,
                             xytext=(4, 4),
                             textcoords="offset points",
                         )
             else:
                 ax.scatter(
-                    [row[concept_key] for row in series_rows],
                     [row[style_key] for row in series_rows],
+                    [row[concept_key] for row in series_rows],
                     marker="x",
                     s=42,
                     color=color,
@@ -366,8 +366,8 @@ def plot_style_concept_curves(rows, save_path, title, series_key, label_key=None
                 )
         ax.set_title(axis_title)
         ax.grid(True, alpha=0.25)
-    fig.supxlabel("Style similarity", y=-0.05, fontsize=200)
-    fig.supylabel("Concept similarity", y=-0.2, fontsize=200)
+    fig.supxlabel("Style similarity", y=0.08, fontsize=32)
+    fig.supylabel("Concept similarity", x=0.035, fontsize=32)
     if color_handles:
         series_title = rf"${series_key}$" if series_key != "mu" else r"$\mu$"
         fig.legend(

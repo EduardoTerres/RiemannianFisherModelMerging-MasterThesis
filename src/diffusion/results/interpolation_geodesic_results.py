@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -46,6 +47,7 @@ def parse_args():
     parser.add_argument("--output_prefix", type=str, default="interpolation_geodesic")
     parser.add_argument("--samples", nargs="+", default=["all_dataset_pairs"])
     parser.add_argument("--methods", nargs="+", default=["fisher_geodesic", "orthofuse"])
+    parser.add_argument("--prompt_templates", nargs="+", default=None)
     parser.add_argument("--t_values", nargs="+", type=float, default=list(DEFAULT_T_VALUES))
     parser.add_argument("--num_images_per_medium_prompt", type=int, default=2)
     parser.add_argument("--num_images_per_base_prompt", type=int, default=0)
@@ -57,6 +59,7 @@ def parse_args():
     parser.add_argument("--fisher_min", type=float, default=1e-14)
     parser.add_argument("--fisher_rescale", type=float, default=1e10)
     parser.add_argument("--fisher_backend", choices=["diagonal", "kfac"], default="diagonal")
+    parser.add_argument("--fisher_correction_mu", type=float, default=None)
     parser.add_argument("--correction_mu", type=float, default=2.0)
     parser.add_argument(
         "--fim_normalization",
@@ -73,6 +76,8 @@ def parse_args():
     parser.add_argument("--orthofuse_postprocessing_method", type=str, default="curve_over_id")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--replace_inference_output", action="store_true")
+    parser.add_argument("--scores_cache_path", type=Path, default=None)
+    parser.add_argument("--replace_scores_cache", action="store_true")
     add_evaluator_args(parser)
     return parser.parse_args()
 
@@ -101,6 +106,17 @@ def method_folder(args, method, pair, t, version):
         )
         run_args.dataset_pair_name = pair["name"]
         return gradients_inference_folder_name(run_args)
+    if method in ("fisher", "fisher_rescaled"):
+        run_args = gradient_args(
+            args,
+            alphas_from_t(t),
+            version,
+            merge_mode=method,
+            use_fishers=True,
+            backend=args.geodesic_backend,
+        )
+        run_args.dataset_pair_name = pair["name"]
+        return gradients_inference_folder_name(run_args)
     if method in ORTHOFUSE_METHODS:
         postprocessing_method = (
             args.orthofuse_postprocessing_method
@@ -119,7 +135,7 @@ def records(args, pairs):
             for step, t in enumerate(args.t_values):
                 folder = method_folder(args, method, pair, t, step)
                 version_root = method_root(args, method) / "samples" / folder / f"version_{step}"
-                for prompt_idx, template in enumerate(merge_test_set):
+                for prompt_idx, template in enumerate(args.prompt_templates or merge_test_set):
                     prompt_dir = version_root / prompt(pair, template, placeholders=True)
                     for image_idx in range(args.num_images_per_medium_prompt):
                         yield {
@@ -136,14 +152,28 @@ def records(args, pairs):
 
 
 def run(args):
-    pairs = selected_pairs(args.samples)
-    reference_root = args.reference_root or args.output_dir / "d1_images"
-    scorer = SimilarityScorer(make_evaluator(args), reference_root)
-    rows = score_records(records(args, pairs), scorer)
+    plot_dir = args.plot_dir or args.output_dir / "tables"
+    cache_path = args.scores_cache_path or plot_dir / f"{args.output_prefix}_raw.json"
+
+    if cache_path.exists() and not args.replace_scores_cache:
+        with cache_path.open("r", encoding="utf-8") as handle:
+            rows = json.load(handle)
+        print(f"[interpolation-geodesic-results] loaded cached scores from {cache_path}", flush=True)
+    else:
+        pairs = selected_pairs(args.samples)
+        reference_root = args.reference_root or args.output_dir / "d1_images"
+        scorer = SimilarityScorer(make_evaluator(args), reference_root)
+        rows = score_records(records(args, pairs), scorer)
+        if not rows:
+            raise RuntimeError("No geodesic interpolation images were found.")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("w", encoding="utf-8") as handle:
+            json.dump(rows, handle)
+        print(f"[interpolation-geodesic-results] wrote {cache_path}", flush=True)
+
     if not rows:
         raise RuntimeError("No geodesic interpolation images were found.")
 
-    plot_dir = args.plot_dir or args.output_dir / "tables"
     metric_keys = (*METRIC_KEYS, "clip_text")
     raw_csv = plot_dir / f"{args.output_prefix}_raw.csv"
     write_csv(

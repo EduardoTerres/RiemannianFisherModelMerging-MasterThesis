@@ -4,7 +4,7 @@
 #SBATCH --job-name=interp_geodesic
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=02:00:00
+#SBATCH --time=05:00:00
 #SBATCH --array=0-11
 #SBATCH --output=outputs/diffusion/slurms/geo_int_%A_%a.out
 
@@ -12,11 +12,12 @@ set -e
 
 FISHER_BACKEND="diagonal"
 CORRECTION_MU="2"
-FISHER_MU="4"
+FISHER_MU="4" # diagonal fisher
+FISHER_MU="0"
 FIM_NORMALIZATION="trace"
 ORTHOFUSE_POSTPROCESSING="curve_over_id"
 
-CONCEPT_NAME="dog3"
+# CONCEPT_NAME="dog3"
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
@@ -68,8 +69,8 @@ T_VALUES=(
 
 METHODS=(
   # "fisher_geodesic"
-  # "fisher"
-  "orthofuse"
+  "fisher"
+  # "orthofuse"
 )
 
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
@@ -88,7 +89,6 @@ python "${REPO_ROOT}/src/diffusion/geodesic_interpolation.py" \
   --config_path="${REPO_ROOT}/src/diffusion/config/config.yaml" \
   --output_dir="${OUTPUT_DIR}" \
   --method_output_root="${METHOD_OUTPUT_ROOT}" \
-  --concept_name="${CONCEPT_NAME}" \
   --style_name="${STYLE}" \
   --methods "${METHOD}" \
   --prompt_templates "a {0} in {1} style" \
@@ -102,3 +102,5 @@ python "${REPO_ROOT}/src/diffusion/geodesic_interpolation.py" \
   --num_images_per_medium_prompt=5 \
   --batch_size_medium=5 \
   --replace_inference_output
+
+  # --concept_name="${CONCEPT_NAME}" \

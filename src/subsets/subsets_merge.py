@@ -282,7 +282,7 @@ def trained_tasks_from_seed(model_family: str, seed: int) -> dict[int, list[str]
 
 
 METHOD_DISPLAY = {
-    "standard_rescaled": r"\textsc{OrthoFuse}",
+    "standard_rescaled": r"\textsc{OrthoMerge}",
     "diagonal_fisher": r"\textsc{Diagonal Fisher}",
 }
 METHOD_COLORS = {
@@ -575,8 +575,8 @@ def save_combined_subset_plot(
             rotation=18,
             ha="right",
         )
-        violin_ax.set_title(r"Stability ($\downarrow$)", fontsize=27, pad=10)
-        violin_ax.set_ylabel(r"Std. across subset sizes")
+        violin_ax.set_title(r"Accuracy change ($\downarrow$)", fontsize=27, pad=10)
+        violin_ax.set_ylabel(r"Std. accuracy across subset sizes")
         std_ymax = max(
             0.12,
             max((max(values) for values in stds_by_method.values()), default=0.1) * 1.12,
@@ -591,6 +591,157 @@ def save_combined_subset_plot(
         plot_dir.mkdir(parents=True, exist_ok=True)
         png_path = plot_dir / "subset_combined.png"
         pdf_path = plot_dir / "subset_combined.pdf"
+        fig.savefig(png_path, dpi=300, bbox_inches="tight")
+        fig.savefig(pdf_path, bbox_inches="tight")
+        plt.close(fig)
+    print(f"Saved {png_path} and {pdf_path}")
+
+
+def save_combined_only_included_plot(
+    rows_by_family: dict[str, list[dict[str, float | int | str]]],
+    evaluation_dirs_by_family: dict[str, Path],
+    tasks_by_size_by_family: dict[str, dict[int, list[str]]],
+) -> None:
+    rows_by_family = {
+        family: rows
+        for family, rows in rows_by_family.items()
+        if rows
+    }
+    if not rows_by_family:
+        print("Skipping combined included-dataset plot: no included-dataset rows available.")
+        return
+
+    stds_by_method = {mode: [] for mode in MERGE_MODES}
+    for family, evaluation_dir in evaluation_dirs_by_family.items():
+        family_stds = collect_dataset_std_distribution(
+            evaluation_dir,
+            tasks_by_size_by_family[family],
+        )
+        for mode, values in family_stds.items():
+            stds_by_method[mode].extend(values)
+    stds_by_method = {
+        mode: values
+        for mode, values in stds_by_method.items()
+        if values
+    }
+
+    with plt.rc_context(COWEB_PLOT_STYLE):
+        fig, (ax, violin_ax) = plt.subplots(
+            1,
+            2,
+            figsize=(13.0, 6.5),
+            gridspec_kw={"width_ratios": [3.0, 1.0]},
+            constrained_layout=True,
+        )
+
+        curve_values = []
+        for family, rows in rows_by_family.items():
+            for mode in MERGE_MODES:
+                selected = [row for row in rows if row["method"] == mode]
+                if not selected:
+                    continue
+                x = [int(row["models"]) for row in selected]
+                means = [float(row["average_accuracy"]) for row in selected]
+                curve_values.extend(means)
+                ax.plot(
+                    x,
+                    means,
+                    color=METHOD_COLORS[mode],
+                    linestyle=FAMILY_LINESTYLES.get(family, "-"),
+                    marker=FAMILY_MARKERS.get(family, "o"),
+                    markersize=7.0,
+                    linewidth=3.0,
+                    label=rf"{FAMILY_DISPLAY.get(family, family)} {METHOD_DISPLAY[mode]}",
+                )
+
+        violin_values = [
+            stds_by_method.get(mode, [])
+            for mode in MERGE_MODES
+        ]
+        non_empty_violin_values = [values for values in violin_values if values]
+        violin_positions = [
+            index
+            for index, values in enumerate(violin_values, start=1)
+            if values
+        ]
+        if non_empty_violin_values:
+            violin_modes = [
+                mode
+                for mode, values in zip(MERGE_MODES, violin_values, strict=True)
+                if values
+            ]
+            parts = violin_ax.violinplot(
+                non_empty_violin_values,
+                positions=violin_positions,
+                widths=0.74,
+                showmeans=True,
+                showmedians=False,
+                showextrema=False,
+            )
+            for body, mode in zip(parts["bodies"], violin_modes, strict=True):
+                color = METHOD_COLORS[mode]
+                body.set_facecolor(color)
+                body.set_edgecolor(color)
+                body.set_alpha(0.42)
+                body.set_linewidth(1.8)
+            parts["cmeans"].set_color("black")
+            parts["cmeans"].set_linewidth(2.4)
+
+        ax.set_title(r"Included-task accuracy", fontsize=27, pad=10)
+        ax.set_xlabel(r"Number of models merged")
+        ax.set_ylabel(r"Average accuracy on included datasets")
+        ax.set_xticks(SUBSET_SIZES)
+        ax.set_xticklabels([rf"{size}" for size in SUBSET_SIZES])
+        ymin = min(curve_values) if curve_values else 0.0
+        ymax = max(curve_values) if curve_values else 1.0
+        padding = max(0.025, (ymax - ymin) * 0.18)
+        ymin = max(0.0, ymin - padding)
+        ymax = min(1.0, ymax + padding)
+        ax.set_ylim(ymin, ymax)
+        yticks = np.linspace(ymin, ymax, 5)
+        ax.set_yticks(yticks)
+        ax.set_yticklabels([rf"{tick:.2f}" for tick in yticks])
+        ax.grid(axis="y", color="#666666", alpha=0.32, linewidth=0.85)
+        ax.grid(axis="x", color="#999999", alpha=0.18, linewidth=0.65)
+        legend = ax.legend(
+            loc="lower right",
+            frameon=True,
+            fancybox=False,
+            framealpha=0.78,
+            facecolor="white",
+            edgecolor="0.4",
+            handlelength=1.4,
+            borderpad=0.4,
+            prop={"weight": "normal", "size": 17},
+        )
+        legend_handles = getattr(legend, "legend_handles", None)
+        if legend_handles is None:
+            legend_handles = legend.legendHandles
+        for handle in legend_handles:
+            handle.set_linewidth(4.0)
+
+        violin_ax.set_xticks(
+            [1, 2],
+            [METHOD_DISPLAY[mode] for mode in MERGE_MODES],
+            rotation=18,
+            ha="right",
+        )
+        violin_ax.set_title(r"Accuracy change ($\downarrow$)", fontsize=27, pad=10)
+        violin_ax.set_ylabel(r"Std. included-task accuracy")
+        std_ymax = max(
+            0.12,
+            max((max(values) for values in stds_by_method.values()), default=0.1) * 1.12,
+        )
+        violin_ax.set_ylim(-0.01, std_ymax)
+        std_ticks = np.linspace(0.0, std_ymax, 6)
+        violin_ax.set_yticks(std_ticks)
+        violin_ax.set_yticklabels([rf"{tick:.2f}" for tick in std_ticks])
+        violin_ax.grid(axis="y", color="#666666", alpha=0.32, linewidth=0.85)
+
+        plot_dir = ROOT / "outputs/subsets/combined"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        png_path = plot_dir / "subset_combined_only_included.png"
+        pdf_path = plot_dir / "subset_combined_only_included.pdf"
         fig.savefig(png_path, dpi=300, bbox_inches="tight")
         fig.savefig(pdf_path, bbox_inches="tight")
         plt.close(fig)
@@ -764,7 +915,7 @@ def report_results(
     models_dir: Path,
     model_family: str,
     seed: int,
-) -> list[dict[str, float | int | str]]:
+) -> tuple[list[dict[str, float | int | str]], dict[int, list[str]]]:
     plot_dir = ROOT / "outputs/subsets" / model_family
     rows = collect_results(evaluation_dir)
     save_dataset_distribution_plot(
@@ -797,7 +948,7 @@ def report_results(
         "Average accuracy on trained datasets",
     )
     save_dataset_metrics_plot(evaluation_dir, plot_dir, tasks_by_size, model_family)
-    return trained_rows
+    return trained_rows, tasks_by_size
 
 
 def save_combined_trained_plot(
@@ -861,10 +1012,11 @@ def main() -> None:
             )
         rows_by_family = {}
         evaluation_dirs_by_family = {}
+        tasks_by_size_by_family = {}
         for model_family in args.model_family:
             models_dir, evaluation_dir = default_dirs(args, model_family)
             evaluation_dirs_by_family[model_family] = evaluation_dir
-            rows_by_family[model_family] = report_results(
+            rows_by_family[model_family], tasks_by_size_by_family[model_family] = report_results(
                 evaluation_dir,
                 models_dir,
                 model_family,
@@ -872,6 +1024,11 @@ def main() -> None:
             )
         if len(rows_by_family) > 1:
             save_combined_subset_plot(evaluation_dirs_by_family)
+            save_combined_only_included_plot(
+                rows_by_family,
+                evaluation_dirs_by_family,
+                tasks_by_size_by_family,
+            )
             save_combined_trained_plot(rows_by_family)
 
 

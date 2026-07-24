@@ -103,9 +103,17 @@ def rotation_plane_angles(Q: torch.Tensor) -> list[float]:
     return rotation_plane_angles_from_phases(torch.angle(torch.linalg.eigvals(Q)))
 
 
-def block_radius_sq_from_phases(phases: torch.Tensor) -> float:
-    angles = rotation_plane_angles_from_phases(phases)
-    return float(sum(angle * angle for angle in angles))
+def block_radius_sq_via_trace(Q: torch.Tensor) -> float:
+    """Return sum_j theta_j^2 for an SO(n) matrix Q via -0.5 * trace(log(Q) @ log(Q)).
+
+    log(Q) = V diag(log eigvals) V^-1 is the (complex) skew generator of Q, and
+    trace is invariant under the similarity transform, so trace(log(Q) @ log(Q))
+    equals sum of squared eigenvalue logs directly -- no need to sort/pair phases.
+    Each conjugate pair exp(+/- i theta) contributes log eigvals +/- i*theta, whose
+    squares sum to -2*theta^2, so -0.5 * trace(...) gives sum_j theta_j^2.
+    """
+    log_eigvals = torch.log(torch.linalg.eigvals(Q))
+    return float((-0.5 * (log_eigvals * log_eigvals).sum()).real.item())
 
 
 def radius_from_angles(angles: list[float]) -> float:
@@ -116,8 +124,7 @@ def mean_block_distance_to_identity(rotations: dict[str, torch.Tensor]) -> float
     radius_sq = 0.0
     num_blocks = 0
     for blocks in rotations.values():
-        phases_by_block = torch.angle(torch.linalg.eigvals(blocks)).cpu()
-        radius_sq += sum(block_radius_sq_from_phases(phases) for phases in phases_by_block)
+        radius_sq += sum(block_radius_sq_via_trace(block) for block in blocks)
         num_blocks += blocks.shape[0]
     if num_blocks == 0:
         raise ValueError("Cannot compute mean block distance for an adapter with zero OFT blocks")
@@ -141,8 +148,7 @@ def mean_block_distance_between(
         if A_blocks.shape != B_blocks.shape:
             raise ValueError(f"Shape mismatch for {key}: {A_blocks.shape} vs {B_blocks.shape}")
         relatives = A_blocks.transpose(-1, -2) @ B_blocks
-        phases_by_block = torch.angle(torch.linalg.eigvals(relatives)).cpu()
-        radius_sq += sum(block_radius_sq_from_phases(phases) for phases in phases_by_block)
+        radius_sq += sum(block_radius_sq_via_trace(relative) for relative in relatives)
         num_blocks += A_blocks.shape[0]
     if num_blocks == 0:
         raise ValueError("Cannot compute mean block distance for adapters with zero shared OFT blocks")

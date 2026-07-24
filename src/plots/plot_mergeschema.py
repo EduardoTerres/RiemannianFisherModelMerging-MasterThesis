@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from matplotlib.lines import Line2D
 from matplotlib.colors import LinearSegmentedColormap
-from peft import PeftModel
+from peft import PeftConfig, PeftModel
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -29,6 +29,14 @@ WATER_CMAP = LinearSegmentedColormap.from_list(
 plt.rcParams.update({
     "text.usetex": True,
     "font.family": "serif",
+    "font.size": 16,
+    "axes.labelsize": 18,
+    "axes.titlesize": 20,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 15,
+    "legend.title_fontsize": 15,
+    "figure.titlesize": 20,
 })
 
 
@@ -59,6 +67,20 @@ def adapter_paths_for_tasks(model_name: str, names: list[str]) -> list[str]:
     return [adapter_by_task[name] for name in names]
 
 
+def peft_config_for_adapter(adapter_path: str, candidate_paths: list[str]) -> PeftConfig | None:
+    adapter_dir = Path(adapter_path)
+    if (adapter_dir / "adapter_config.json").exists():
+        return None
+    for candidate in candidate_paths:
+        candidate_dir = Path(candidate)
+        if (candidate_dir / "adapter_config.json").exists():
+            print(f"Reusing adapter config from {candidate_dir}", flush=True)
+            return PeftConfig.from_pretrained(candidate_dir)
+    raise FileNotFoundError(
+        f"No adapter_config.json found for {adapter_path} or any candidate adapter path."
+    )
+
+
 def apply_weights(model: torch.nn.Module, weights: dict[str, torch.Tensor], device: str) -> None:
     params = dict(model.named_parameters())
     for key, val in weights.items():
@@ -83,9 +105,18 @@ def loss(model: torch.nn.Module, loader, device: str, desc: str | None = None) -
     return total / max(tokens, 1)
 
 
-def merged_at(merger: OFTMerging, weights: list[dict[str, torch.Tensor]], x: float, y: float) -> dict[str, torch.Tensor]:
+def merged_at(
+    merger: OFTMerging,
+    weights: list[dict[str, torch.Tensor]],
+    merge_indices: tuple[int, int],
+    x: float,
+    y: float,
+) -> dict[str, torch.Tensor]:
+    alphas = torch.full((len(weights),), min(x, y), device=merger.device)
+    alphas[merge_indices[0]] = x
+    alphas[merge_indices[1]] = y
     return {
-        key: merger.merge_formula([w[key] for w in weights], mode="standard", alphas=torch.tensor([x, y], device=merger.device))
+        key: merger.merge_formula([w[key] for w in weights], mode="standard", alphas=alphas)
         for key in weights[0]
     }
 
@@ -120,11 +151,6 @@ def task_vector_geometry(weights: list[dict[str, torch.Tensor]]) -> tuple[float,
     return float(np.mean(norms_1)), float(np.mean(norms_2)), float(np.mean(angles))
 
 
-def geometry_from_adapters(args: argparse.Namespace, names: list[str]) -> tuple[float, float, float]:
-    merger = OFTMerging(device="cpu")
-    return task_vector_geometry(merger.load_weights(adapter_paths_for_tasks(args.model_name, names)))
-
-
 def orthomerge_coefficients_from_adapters(args: argparse.Namespace, names: list[str]) -> tuple[float, float]:
     merger = OFTMerging(device="cpu")
     weights = merger.load_weights(adapter_paths_for_tasks(args.model_name, names))
@@ -139,15 +165,21 @@ def require_cuda(device: str) -> str:
     return device
 
 
-def evaluate_grid(args: argparse.Namespace, cache: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
+def evaluate_grid(args: argparse.Namespace, cache: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], list[str]]:
     args.device = require_cuda(args.device)
     family = MODEL_FAMILIES_D3[args.model_name]
     names = args.tasks
-    selected = task_specs(names)
-    adapter_paths = adapter_paths_for_tasks(args.model_name, names)
+    merge_names = [task for task, *_ in DATASET_3_TRAIN]
+    merge_indices = (merge_names.index(names[0]), merge_names.index(names[1]))
+    eval_specs = DATASET_3_TEST
+    eval_names = [task for task, *_ in eval_specs]
+    adapter_paths = adapter_paths_for_tasks(args.model_name, merge_names)
 
     print(f"Using device: {args.device}", flush=True)
-    print(f"Tasks: {names[0]}, {names[1]} | samples per task: {args.num_samples}", flush=True)
+    print(f"Merge axes: {names[0]}, {names[1]} | samples per eval task: {args.num_samples}", flush=True)
+    print(f"Merged tasks ({len(merge_names)}): {', '.join(merge_names)}", flush=True)
+    print("Non-axis merge coefficients use min(x, y).", flush=True)
+    print(f"Loss tasks ({len(eval_names)}): {', '.join(eval_names)}", flush=True)
     print(f"Grid: {args.num_points}x{args.num_points} from {args.min_coeff} to {args.max_coeff}", flush=True)
     print("Loading tokenizer and fixed eval loaders...", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(family.base_model_path, trust_remote_code=True)
@@ -155,30 +187,30 @@ def evaluate_grid(args: argparse.Namespace, cache: Path) -> tuple[np.ndarray, np
         tokenizer.pad_token = tokenizer.eos_token
     loaders = [
         build_loader(path, dset, split, formatter, tokenizer, args.num_samples, args.batch_size, args.max_length, task, str(args.dataset_cache_dir))
-        for task, path, dset, split, formatter in selected
+        for task, path, dset, split, formatter in eval_specs
     ]
 
     print("Loading selected adapters and base model...", flush=True)
-    merger = OFTMerging(alphas=[1.0, 1.0], device=args.device)
+    merger = OFTMerging(alphas=[1.0] * len(merge_names), device=args.device)
     weights = merger.load_weights(adapter_paths)
-    r1, r2, theta = task_vector_geometry(weights)
     merge_x, merge_y = orthomerge_coefficients(weights)
     base = AutoModelForCausalLM.from_pretrained(
         family.base_model_path,
         torch_dtype=torch.bfloat16 if "cuda" in args.device else torch.float32,
         trust_remote_code=True,
     )
-    model = PeftModel.from_pretrained(base, adapter_paths[0], is_trainable=False)
+    peft_config = peft_config_for_adapter(adapter_paths[0], [*adapter_paths, *family.adapter_paths])
+    model = PeftModel.from_pretrained(base, adapter_paths[0], is_trainable=False, config=peft_config)
     model.enable_adapter_layers()
     model.to(args.device).eval()
 
     xs = np.linspace(args.min_coeff, args.max_coeff, args.num_points)
     ys = np.linspace(args.min_coeff, args.max_coeff, args.num_points)
-    task_losses = np.zeros((len(names), len(ys), len(xs)))
+    task_losses = np.zeros((len(eval_names), len(ys), len(xs)))
     grid = [(row, col, x, y) for row, y in enumerate(ys) for col, x in enumerate(xs)]
     for row, col, x, y in tqdm(grid, desc="grid points"):
-        apply_weights(model, merged_at(merger, weights, float(x), float(y)), args.device)
-        for idx, (name, loader) in enumerate(zip(names, loaders, strict=True)):
+        apply_weights(model, merged_at(merger, weights, merge_indices, float(x), float(y)), args.device)
+        for idx, (name, loader) in enumerate(zip(eval_names, loaders, strict=True)):
             task_losses[idx, row, col] = loss(model, loader, args.device, desc=f"{name} loss")
         tqdm.write(f"x={x:.3f}, y={y:.3f}, sum={task_losses[:, row, col].sum():.4f}")
     z = task_losses.sum(axis=0)
@@ -190,33 +222,40 @@ def evaluate_grid(args: argparse.Namespace, cache: Path) -> tuple[np.ndarray, np
         z=z,
         task_losses=task_losses,
         tasks=np.array(names),
-        r1=r1,
-        r2=r2,
-        theta=theta,
+        merge_tasks=np.array(merge_names),
+        merge_indices=np.array(merge_indices),
+        non_axis_alpha_rule=np.array("min(x, y)"),
+        eval_tasks=np.array(eval_names),
         merge_x=merge_x,
         merge_y=merge_y,
     )
     print(f"Saved losses to {cache}", flush=True)
-    return xs, ys, z, task_losses, names
+    return xs, ys, z, task_losses, names, eval_names
 
 
 def marker_handles(tasks: list[str]) -> list[Line2D]:
     return [
-        Line2D([0], [0], color="black", marker="o", linestyle="None", markersize=7, label="Pretrained"),
-        Line2D([0], [0], color="black", marker="^", linestyle="None", markersize=8, label=latex_escape(tasks[0].capitalize())),
-        Line2D([0], [0], color="black", marker="s", linestyle="None", markersize=7, label=latex_escape(tasks[1].capitalize())),
-        Line2D([0], [0], color="black", marker="*", linestyle="None", markersize=12, label="OrthoMerge"),
+        Line2D([0], [0], color="black", marker="o", linestyle="None", markersize=9, label="Pretrained"),
+        Line2D([0], [0], color="black", marker="^", linestyle="None", markersize=10, label=latex_escape(tasks[0].capitalize())),
+        Line2D([0], [0], color="black", marker="s", linestyle="None", markersize=9, label=latex_escape(tasks[1].capitalize())),
+        Line2D([0], [0], color="black", marker="D", linestyle="None", markersize=9, label=r"\textsc{Lie sum}"),
+        Line2D([0], [0], color="black", marker="*", linestyle="None", markersize=14, label=r"\textsc{OrthoMerge}"),
     ]
 
 
 def save_legend(tasks: list[str], output: Path) -> None:
-    fig, ax = plt.subplots(figsize=(2.8, 1.2))
+    fig, ax = plt.subplots(figsize=(4.0, 1.8))
     ax.axis("off")
     ax.legend(handles=marker_handles(tasks), loc="center", frameon=False)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=220, bbox_inches="tight", transparent=True)
+    pdf_output = output.with_suffix(".pdf")
+    if pdf_output != output:
+        fig.savefig(pdf_output, bbox_inches="tight", transparent=True)
     plt.close(fig)
     print(f"Saved {output}")
+    if pdf_output != output:
+        print(f"Saved {pdf_output}")
 
 
 def add_tangent_background(ax, plane_extent: tuple[float, float]) -> None:
@@ -235,6 +274,7 @@ def plot(
     merge_xy: tuple[float, float],
     output: Path,
     plane_extent: tuple[float, float],
+    num_loss_tasks: int,
 ) -> None:
     fig, ax = plt.subplots(figsize=(8.5, 6.6))
     add_tangent_background(ax, plane_extent)
@@ -243,19 +283,20 @@ def plot(
         heatmap,
         ax=ax,
         pad=0.02,
-        label=rf"\texttt{{{latex_escape(tasks[0])}}} loss + \texttt{{{latex_escape(tasks[1])}}} loss",
+        label=rf"sum of {num_loss_tasks} task losses",
     )
     points = {
-        "Pretrained": ((0, 0), "o", 80),
-        latex_escape(tasks[0].capitalize()): ((1, 0), "^", 90),
-        latex_escape(tasks[1].capitalize()): ((0, 1), "s", 80),
-        "OrthoMerge": (merge_xy, "*", 180),
+        "Pretrained": ((0, 0), "o", 110),
+        latex_escape(tasks[0].capitalize()): ((1, 0), "^", 125),
+        latex_escape(tasks[1].capitalize()): ((0, 1), "s", 110),
+        r"\textsc{Gradients} standard": ((1, 1), "D", 115),
+        r"\textsc{OrthoMerge}": (merge_xy, "*", 230),
     }
     for label, (xy, marker, size) in points.items():
         ax.scatter(*xy, s=size, marker=marker, color="black", linewidth=1.2, label=label, zorder=3)
         dx, dy = (0.035, -0.10) if label == "Pretrained" else (0.035, 0.035)
-        ax.text(xy[0] + dx, xy[1] + dy, label, fontsize=10, weight="bold", zorder=4, color="black")
-    for end in [(1, 0), (0, 1), merge_xy]:
+        ax.text(xy[0] + dx, xy[1] + dy, label, fontsize=13, weight="bold", zorder=4, color="white")
+    for end in [(1, 0), (0, 1), (1, 1), merge_xy]:
         ax.annotate("", xy=end, xytext=(0, 0), arrowprops=dict(arrowstyle="->", color="black", lw=2.3))
     ax.set(
         xlabel=rf"\texttt{{{latex_escape(tasks[0])}}} tangent coefficient",
@@ -266,93 +307,13 @@ def plot(
     ax.set_ylim(*plane_extent)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=220, bbox_inches="tight")
+    pdf_output = output.with_suffix(".pdf")
+    if pdf_output != output:
+        fig.savefig(pdf_output, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {output}")
-
-
-def plot_geometry(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    z: np.ndarray,
-    tasks: list[str],
-    geometry: tuple[float, float, float],
-    merge_xy: tuple[float, float],
-    output: Path,
-) -> None:
-    r1, r2, theta = geometry
-    v1 = np.array([r1, 0.0])
-    v2 = np.array([r2 * np.cos(theta), r2 * np.sin(theta)])
-    merge = merge_xy[0] * v1 + merge_xy[1] * v2
-    grid_x, grid_y = np.meshgrid(xs, ys)
-    geom_x = grid_x * v1[0] + grid_y * v2[0]
-    geom_y = grid_x * v1[1] + grid_y * v2[1]
-
-    fig, ax = plt.subplots(figsize=(8.5, 6.6))
-    heatmap = ax.tricontourf(geom_x.ravel(), geom_y.ravel(), z.ravel(), levels=40, cmap=WATER_CMAP)
-    fig.colorbar(
-        heatmap,
-        ax=ax,
-        pad=0.02,
-        label=rf"\texttt{{{latex_escape(tasks[0])}}} loss + \texttt{{{latex_escape(tasks[1])}}} loss",
-    )
-    points = {
-        "pretrained": (np.array([0.0, 0.0]), "o", 80),
-        rf"\texttt{{{latex_escape(tasks[0])}}} finetune": (v1, "^", 90),
-        rf"\texttt{{{latex_escape(tasks[1])}}} finetune": (v2, "s", 80),
-        "OrthoMerge + correction": (merge, "*", 180),
-    }
-    for label, (xy, marker, size) in points.items():
-        ax.scatter(*xy, s=size, marker=marker, color="black", linewidth=1.2, label=label, zorder=3)
-        ax.text(xy[0] + 0.035 * max(r1, r2), xy[1] + 0.035 * max(r1, r2), label, fontsize=10, weight="bold", zorder=4, color="black")
-    for end in [v1, v2, merge]:
-        ax.annotate("", xy=end, xytext=(0, 0), arrowprops=dict(arrowstyle="->", color="black", lw=2.3))
-    ax.set(
-        xlabel="OFT geometry axis 1",
-        ylabel="OFT geometry axis 2",
-    )
-    ax.set_aspect("equal")
-    ax.legend(loc="center left", bbox_to_anchor=(1.18, 0.5), frameon=False)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=220, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved {output}")
-
-
-def plot_manifold_3d(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    image_path: Path,
-    output: Path,
-    tasks: list[str],
-    curvature: float,
-    plane_extent: tuple[float, float],
-) -> None:
-    radius = 1.0 / max(curvature, 1e-6)
-    lo, hi = plane_extent
-    plane_lift = 0.05 * (hi - lo)
-    span = min(abs(hi) * 0.82, radius * 0.45)
-    sx, sy = np.meshgrid(np.linspace(-span, span, 70), np.linspace(-span, span, 70))
-    inside = sx**2 + sy**2 <= radius**2
-    sz = np.where(inside, np.sqrt(radius**2 - sx**2 - sy**2), np.nan)
-
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection="3d")
-    ax.plot_surface(sx, sy, sz, color="white", edgecolor="black", linewidth=0.25, alpha=0.95, shade=False)
-
-    img = plt.imread(image_path)
-    ix = np.linspace(lo, hi, img.shape[1])
-    iy = np.linspace(lo, hi, img.shape[0])
-    img_x, img_y = np.meshgrid(ix, iy)
-    ax.plot_surface(img_x, img_y, np.full_like(img_x, radius + plane_lift + 0.01), facecolors=img[::-1], shade=False)
-
-    ax.set_axis_off()
-    ax.view_init(elev=24, azim=-56)
-    ax.set_box_aspect((1, 1, 0.32))
-    ax.legend(handles=marker_handles(tasks), loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=220, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved {output}")
+    if pdf_output != output:
+        print(f"Saved {pdf_output}")
 
 
 def main() -> None:
@@ -360,21 +321,18 @@ def main() -> None:
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--model-name", default="llama3.1", choices=list(MODEL_FAMILIES_D3))
     parser.add_argument("--tasks", nargs=2, default=["coqa", "triviaqa"])
-    parser.add_argument("--num-samples", type=int, default=64)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--max-length", type=int, default=512)
-    parser.add_argument("--num-points", type=int, default=30)
-    parser.add_argument("--min-coeff", type=float, default=-1.5)
+    parser.add_argument("--num-samples", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--max-length", type=int, default=128)
+    parser.add_argument("--num-points", type=int, default=20)
+    parser.add_argument("--min-coeff", type=float, default=-1.0)
     parser.add_argument("--max-coeff", type=float, default=1.5)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dataset-cache-dir", type=Path, default=REPO_ROOT / "data" / "hf_cache")
     parser.add_argument("--cache", type=Path, default=OUTPUT_DIR / "merge_schema_losses.npz")
     parser.add_argument("--output", type=Path, default=OUTPUT_DIR / "merge_schema.png")
-    parser.add_argument("--geometry-output", type=Path, default=OUTPUT_DIR / "merge_schema_geometry.png")
-    parser.add_argument("--manifold-output", type=Path, default=OUTPUT_DIR / "merge_schema_3d.png")
     parser.add_argument("--plane-min", type=float, default=-1.5)
     parser.add_argument("--plane-max", type=float, default=1.5)
-    parser.add_argument("--curvature", type=float, default=0.06)
     parser.add_argument("--recompute", action="store_true")
     parser.add_argument("--from-saved", action="store_true", help="Only plot from --cache; error if it is missing.")
     args = parser.parse_args()
@@ -386,21 +344,18 @@ def main() -> None:
         print(f"Loading saved losses from {args.cache}", flush=True)
         data = np.load(args.cache, allow_pickle=True)
         xs, ys, z, tasks = data["xs"], data["ys"], data["z"], data["tasks"].tolist()
-        if {"r1", "r2", "theta"}.issubset(data.files):
-            geometry = (float(data["r1"]), float(data["r2"]), float(data["theta"]))
+        eval_tasks = data["eval_tasks"].tolist() if "eval_tasks" in data.files else tasks
+        if {"merge_x", "merge_y"}.issubset(data.files):
+            merge_xy = (float(data["merge_x"]), float(data["merge_y"]))
         else:
-            geometry = geometry_from_adapters(args, tasks)
-        merge_xy = orthomerge_coefficients_from_adapters(args, tasks)
+            merge_xy = orthomerge_coefficients_from_adapters(args, tasks)
     else:
         print("Evaluating loss grid...", flush=True)
-        xs, ys, z, _, tasks = evaluate_grid(args, args.cache)
+        xs, ys, z, _, tasks, eval_tasks = evaluate_grid(args, args.cache)
         data = np.load(args.cache, allow_pickle=True)
-        geometry = (float(data["r1"]), float(data["r2"]), float(data["theta"]))
         merge_xy = (float(data["merge_x"]), float(data["merge_y"]))
     plane_extent = (args.plane_min, args.plane_max)
-    plot(xs, ys, z, tasks, merge_xy, args.output, plane_extent)
-    plot_geometry(xs, ys, z, tasks, geometry, merge_xy, args.geometry_output)
-    plot_manifold_3d(xs, ys, args.output, args.manifold_output, tasks, args.curvature, plane_extent)
+    plot(xs, ys, z, tasks, merge_xy, args.output, plane_extent, len(eval_tasks))
 
 
 if __name__ == "__main__":

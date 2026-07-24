@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -35,6 +36,13 @@ from src.diffusion.results.pareto import (
 
 DEFAULT_T_VALUES = (0.0, 0.2, 0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 1.0)
 DEFAULT_RESULTS_FOLDER = "samples_interpolation_geodesic"
+
+# Method aliases that pin --fisher_correction_mu to a fixed value, so both
+# variants can be compared side by side in the same run/plot.
+FISHER_MU_METHODS = {
+    "fisher_mu0": 0.0,
+    "fisher_mu4": 4.0,
+}
 
 
 def parse_args():
@@ -88,13 +96,23 @@ def prompt(pair, template, placeholders=True):
     return template.format(pair["concept"][concept_key], pair["style"][style_key])
 
 
+def resolve_fisher_mu_method(args, method):
+    if method not in FISHER_MU_METHODS:
+        return method, args
+    resolved_args = copy.copy(args)
+    resolved_args.fisher_correction_mu = FISHER_MU_METHODS[method]
+    return "fisher", resolved_args
+
+
 def method_root(args, method):
+    method, args = resolve_fisher_mu_method(args, method)
     if args.method_output_root is None:
         return args.output_dir / args.results_folder
     return Path(args.method_output_root) / method_output_name(args, method)
 
 
 def method_folder(args, method, pair, t, version):
+    method, args = resolve_fisher_mu_method(args, method)
     if method == "fisher_geodesic":
         run_args = gradient_args(
             args,

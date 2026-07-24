@@ -17,8 +17,8 @@ EVAL_ROOT="${OUTPUT_DIR}/eval_runs"
 TABLES_DIR="${OUTPUT_DIR}/tables"
 
 METHODS=(
-  # orthofuse
-  # fisher_geodesic_diagonal_corr_2_fim_frobenius
+  orthofuse
+  fisher_geodesic_diagonal_corr_2_fim_frobenius
   fisher_geodesic_diagonal_corr_2_fim_trace
   # fisher_geodesic_diagonal_corr_2_fim_kl
   fisher_geodesic_diagonal_corr_2_fim_none

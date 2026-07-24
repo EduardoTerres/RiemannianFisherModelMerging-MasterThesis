@@ -5,22 +5,17 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=05:00:00
-#SBATCH --array=0-11
+#SBATCH --array=0-23
 #SBATCH --output=outputs/diffusion/slurms/geo_int_%A_%a.out
 
 set -e
-
-FISHER_BACKEND="diagonal"
-CORRECTION_MU="2"
-FISHER_MU="4" # diagonal fisher
-FISHER_MU="0"
-FIM_NORMALIZATION="trace"
-ORTHOFUSE_POSTPROCESSING="curve_over_id"
 
 # CONCEPT_NAME="dog3"
 
 REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
+OUTPUT_DIR="/scratch-shared/eterres/MasterThesis/outputs/diffusion"
+mkdir -p "${OUTPUT_DIR}/slurms" "${OUTPUT_DIR}/samples_interpolation_geodesic"
 METHOD_OUTPUT_ROOT="${OUTPUT_DIR}/samples_interpolation_geodesic"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -68,9 +63,12 @@ T_VALUES=(
 )
 
 METHODS=(
-  # "fisher_geodesic"
-  "fisher"
-  # "orthofuse"
+  # Format for fisher methods: "method:fisher_backend:fisher_mu:correction_mu:fim_normalization"
+  # "fisher_geodesic:diagonal::2:trace"
+  # "fisher:diagonal:4::trace"
+  "fisher:diagonal:0::trace"
+  "orthofuse_geodesic"
+  # "orthofuse_geodesic_curve_over_id"
 )
 
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
@@ -78,11 +76,16 @@ METHOD_COUNT="${#METHODS[@]}"
 STYLE_INDEX=$((TASK_ID / METHOD_COUNT))
 METHOD_INDEX=$((TASK_ID % METHOD_COUNT))
 STYLE="${STYLES[${STYLE_INDEX}]}"
-METHOD="${METHODS[${METHOD_INDEX}]}"
+METHOD_SPEC="${METHODS[${METHOD_INDEX}]}"
+IFS=":" read -r METHOD FISHER_BACKEND FISHER_MU CORRECTION_MU FIM_NORMALIZATION <<< "${METHOD_SPEC}"
 
-echo "[interpolation-geodesic] array_task=${TASK_ID} style=${STYLE} method=${METHOD}"
-echo "[interpolation-geodesic] fisher_backend=${FISHER_BACKEND} correction_mu=${CORRECTION_MU} fim_normalization=${FIM_NORMALIZATION}"
-echo "[interpolation-geodesic] fisher_mu=${FISHER_MU}"
+METHOD_FLAGS=()
+[[ -n "${FISHER_BACKEND}" ]] && METHOD_FLAGS+=(--fisher_backend="${FISHER_BACKEND}")
+[[ -n "${FISHER_MU}" ]] && METHOD_FLAGS+=(--fisher_correction_mu="${FISHER_MU}")
+[[ -n "${CORRECTION_MU}" ]] && METHOD_FLAGS+=(--correction_mu="${CORRECTION_MU}")
+[[ -n "${FIM_NORMALIZATION}" ]] && METHOD_FLAGS+=(--fim_normalization="${FIM_NORMALIZATION}")
+
+echo "[interpolation-geodesic] array_task=${TASK_ID} style=${STYLE} method=${METHOD} spec=${METHOD_SPEC}"
 echo "[interpolation-geodesic] t_values=${T_VALUES[*]}"
 
 python "${REPO_ROOT}/src/diffusion/geodesic_interpolation.py" \
@@ -94,13 +97,9 @@ python "${REPO_ROOT}/src/diffusion/geodesic_interpolation.py" \
   --prompt_templates "a {0} in {1} style" \
   --t_values "${T_VALUES[@]}" \
   --geodesic_backend=cayley \
-  --fisher_backend="${FISHER_BACKEND}" \
-  --fisher_correction_mu="${FISHER_MU}" \
-  --correction_mu="${CORRECTION_MU}" \
-  --fim_normalization="${FIM_NORMALIZATION}" \
-  --orthofuse_postprocessing_method="${ORTHOFUSE_POSTPROCESSING}" \
   --num_images_per_medium_prompt=5 \
   --batch_size_medium=5 \
-  --replace_inference_output
+  --replace_inference_output \
+  "${METHOD_FLAGS[@]}"
 
   # --concept_name="${CONCEPT_NAME}" \

@@ -2,26 +2,52 @@
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --job-name=mergeschema
+#SBATCH --array=0-4
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=02:00:00
+#SBATCH --time=00:30:00
+#SBATCH --chdir=/gpfs/home6/eterres/MasterThesis
 #SBATCH --output=/gpfs/home6/eterres/MasterThesis/outputs/mergeschema/slurm/mergeschema_%A_%a.out
 
 set -e
 
-REPO_ROOT="/home/eterres/MasterThesis"
+REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/mergeschema"
 export MPLCONFIGDIR="${REPO_ROOT}/.matplotlib"
 export XDG_CACHE_HOME="${REPO_ROOT}/.cache"
 
-mkdir -p "${MPLCONFIGDIR}" "${XDG_CACHE_HOME}" "${OUTPUT_DIR}"
+mkdir -p "${MPLCONFIGDIR}" "${XDG_CACHE_HOME}" "${OUTPUT_DIR}" "${OUTPUT_DIR}/slurm"
+
+TASK_A_LIST=(coqa nq_open meddialog_qsumm cnn_dailymail squadv2)
+TASK_B_LIST=(triviaqa xsum wmt16-en-de babi mbpp)
+
+if [[ "$#" -eq 2 ]]; then
+    TASK_A="$1"
+    TASK_B="$2"
+else
+    IDX="${SLURM_ARRAY_TASK_ID:-0}"
+    TASK_A="${TASK_A_LIST[${IDX}]:-}"
+    TASK_B="${TASK_B_LIST[${IDX}]:-}"
+    if [[ -z "${TASK_A}" || -z "${TASK_B}" ]]; then
+        echo "No task pair configured for array index ${IDX}." >&2
+        exit 1
+    fi
+fi
+
+PAIR_NAME="${TASK_A}__${TASK_B}"
+CACHE_PATH="${OUTPUT_DIR}/${PAIR_NAME}_losses.npz"
+PLOT_PATH="${OUTPUT_DIR}/merge_schema_${PAIR_NAME}.png"
+PDF_PATH="${OUTPUT_DIR}/merge_schema_${PAIR_NAME}.pdf"
+
+echo "Running merge schema for tasks: ${TASK_A}, ${TASK_B}"
+echo "Cache: ${CACHE_PATH}"
+echo "Plot: ${PLOT_PATH}"
+echo "PDF: ${PDF_PATH}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate merge
 python "${REPO_ROOT}/src/plots/plot_mergeschema.py" \
     --repo-root "${REPO_ROOT}" \
-    --cache "${OUTPUT_DIR}/mergeschema_drop_triviaqa_larger_losses.npz" \
-    --output "${OUTPUT_DIR}/merge_schema.png" \
-    --geometry-output "${OUTPUT_DIR}/merge_schema_geometry.png" \
-    --manifold-output "${OUTPUT_DIR}/merge_schema_3d.png" \
-    --from-saved
+    --tasks "${TASK_A}" "${TASK_B}" \
+    --cache "${CACHE_PATH}" \
+    --output "${PLOT_PATH}"

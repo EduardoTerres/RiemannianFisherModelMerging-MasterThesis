@@ -1,7 +1,7 @@
 from itertools import product
 
 
-FISHER_ROOT = "/scratch-shared/eterres/fishers/sdxl_correct"
+FISHER_ROOT = "/scratch-shared/eterres/fishers/sdxl_decharted"
 
 
 def _concept(name, class_name):

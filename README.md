@@ -71,29 +71,24 @@ on a SLURM cluster; strip the `#SBATCH` header and set `CUDA_VISIBLE_DEVICES` yo
 
 ## Experiments
 
-The sections below follow the thesis chapter on experiments (`TFM-4/inputs/experiments/exps.tex`).
-
 ### 1. Loss & weight-space analysis of the finetuned LLMs
 
-Sanity checks on the 12-task-per-backbone finetunes before merging them (Sections "Assumption 1" and
-"Assumption 2" of the manuscript).
+Sanity checks on the 12-task-per-backbone finetunes before merging them.
 
-**Assumption 1 — same loss basin** (geodesic loss interpolation between pretrained and each finetune,
-Figure `loss_interpolation_{qwen,llama}_0_2.pdf`):
+**Same loss basin** (geodesic loss interpolation between pretrained and each finetune):
 ```bash
 sbatch scripts/analysis/loss_interpolation.sh
 ```
 This already produces the plots (`--plots` flag); the underlying plotting code is
 [`src/analysis/loss_interpolation.py`](src/analysis/loss_interpolation.py).
 
-**Assumption 2 — convex normal neighborhood** (per-block geodesic distances + MDS embedding,
-Figure `combined_max_block_distance_mds.pdf`):
+**Convex normal neighborhood** (per-block geodesic distances + MDS embedding):
 ```bash
 sbatch scripts/analysis/oft_neighborhood_certificate.sh
 ```
 Runs [`src/analysis/oft_neighborhood_certificate.py`](src/analysis/oft_neighborhood_certificate.py).
 
-### 2. Merging LLM orthogonal adapters (main experiment, Table `llm_results`)
+### 2. Merging LLM orthogonal adapters (main experiment)
 
 Merges the 12 finetuned OFT adapters of Llama 3.1 8B / Qwen 2.5 3B with the diagonal Fisher method against
 five baselines (Lie sum, OrthoMerge, TIES, TSVM, Wudi), then evaluates every merge on all 12 tasks.
@@ -126,12 +121,12 @@ of the diagonal Fisher formula with $\widetilde{\mathcal I}_t \equiv I$).
 sbatch scripts/loss/compute_eval_loss.sh      # src/loss/compute_eval_loss.py
 ```
 
-**Step 4 — build the results table** (`_tables/llm_results.tex`):
+**Step 4 — build the results table**:
 ```bash
 bash scripts/llm_table_results.sh             # src/analysis/performance_table.py
 ```
 
-**Step 5 — cobweb plots** (Figure `coweb_eval_performance_eval_loss_*.pdf`):
+**Step 5 — cobweb plots**:
 ```bash
 bash scripts/plots/plot_cowebs_all.sh         # performance + loss, both backbones
 bash scripts/plots/plot_cowebs_performance.sh # performance only
@@ -139,8 +134,7 @@ bash scripts/plots/plot_cowebs_loss.sh        # loss only
 ```
 All three call [`src/plots/plot_cowebs.py`](src/plots/plot_cowebs.py).
 
-**Step 6 — KL divergence / geodesic distance comparison against OrthoMerge** (Figure
-`compare_kl_geodesic_paired_xy_*.pdf`, `compare_mixed_violin_*.pdf`, and the KL/performance-ratio
+**Step 6 — KL divergence / geodesic distance comparison against OrthoMerge** (and the KL/performance-ratio
 correlation table):
 ```bash
 sbatch scripts/analysis/compare_kl_geodist.sh        # approximate KL via the diagonal FIM
@@ -148,7 +142,7 @@ sbatch scripts/analysis/compare_kl_geodist_exact.sh  # exact KL (more expensive,
 ```
 Both run [`src/analysis/compare_kl_geodist.py`](src/analysis/compare_kl_geodist.py).
 
-#### Robustness to the number of merged tasks (subsets experiment, Figure `subset_combined_only_included.pdf`)
+#### Robustness to the number of merged tasks (subsets experiment)
 
 Merges nested task subsets of size 2, 4, 6, 8, 10, 12 with the diagonal Fisher method and OrthoMerge:
 ```bash
@@ -166,7 +160,7 @@ sbatch scripts/diffusion/compute_fim.sh       # diagonal FIM, src/diffusion/comp
 sbatch scripts/diffusion/compute_fim_kfac.sh  # K-FAC FIM variant
 ```
 
-#### Multiple prompts benchmark (Table `sdxl_table`/`sdxl_table_short`, Figure `style_averaged_*_diff_grid_fim.pdf`)
+#### Multiple prompts benchmark
 
 Merges each style/concept pair at $t=0.6$ with the anchored Fisher formulation (three FIM normalizations)
 and the geodesic formulation, against the OrthoFuse baseline, then scores CLIP/DINO similarity over 10
@@ -177,24 +171,24 @@ sbatch scripts/diffusion/pipe_orthofuse.sh        # OrthoFuse baseline, array ov
 sbatch scripts/diffusion/pipe_all.sh              # everything above end-to-end for every concept/style pair
 sbatch scripts/diffusion/eval_10_prompts.sh       # CLIP/DINO scoring -> src/diffusion/eval/table.py
 ```
-FIM-normalization dominance analysis behind Figure `style_averaged_*_diff_grid_fim.pdf`:
+FIM-normalization dominance analysis:
 ```bash
 sbatch scripts/diffusion/analysis/fim_contributions.sh
 sbatch scripts/diffusion/analysis/fim_orthofuse_correlation.sh
 sbatch scripts/diffusion/analysis/correction_tangent_visualization.sh
 ```
-Similarity/statistics table behind `_tables/sdxl_table*.tex`:
+Similarity/statistics table:
 ```bash
 sbatch scripts/diffusion/analysis/stats_sdxl.sh   # src/diffusion/analysis/sdxl_merge_stats.py
 ```
 
-Preliminary ablation of the correction parameter $\mu$ in $1+\mu t(1-t)$ (Appendix, confirms $\mu=4$):
+Preliminary ablation of the correction parameter $\mu$ in $1+\mu t(1-t)$ (confirms $\mu=4$):
 ```bash
 sbatch scripts/diffusion/correction_hyperparam_search.sh
 bash scripts/diffusion/plots/plot_correction_hyperparam_search.sh
 ```
 
-#### Pareto frontier (Figure `interpolation_geodesic_pareto_frontier*.pdf`)
+#### Pareto frontier
 
 Sweeps the interpolation parameter $t \in [0,1]$ for every method, with and without the correction, and
 plots style similarity against concept similarity:

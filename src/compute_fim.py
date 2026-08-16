@@ -1,18 +1,20 @@
 """Fisher Information Matrix computations and entrypoint to compute and save FIMs."""
 import argparse
+import copy
 import os
 import sys
 from pathlib import Path
+from types import MethodType
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.merging import OFTMerging
 import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from safetensors.torch import save_file
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
+from peft import PeftConfig, PeftModel, get_peft_model
+from peft.tuners.oft.layer import OFTLayer
 
 from src.paths import FISHERS_DIR as FIM_OUTPUT_ROOT, MODEL_FAMILIES_D3 as MODEL_FAMILIES
 from src.dataset.dataset_3 import DATASET_3_TRAIN as TASKS, build_loader
@@ -23,9 +25,280 @@ WANDB_ENTITY = None
 WANDB_MODE = os.environ.get("WANDB_MODE", "online")
 WANDB_LOG_EVERY_BATCH = 1
 WANDB_METRIC_MAX_ENTRIES = 200_000
+DEFAULT_MATERIALIZED_ADAPTERS_DIR = Path("/scratch-shared/eterres/materialized_adapters")
 
-_merging = OFTMerging()
-_manifold = _merging.manifold
+
+def infer_oft_block_size(so_dimension: int) -> int:
+    """Solve d = n(n-1)/2 for the OFT block size n."""
+    block_size = int((1 + (1 + 8 * so_dimension) ** 0.5) / 2)
+    if block_size * (block_size - 1) // 2 != so_dimension:
+        raise ValueError(
+            f"Invalid so(n) dimension {so_dimension}; expected n(n-1)/2."
+        )
+    return block_size
+
+
+def oft_coordinates_to_skew(coordinates: torch.Tensor) -> torch.Tensor:
+    """Expand upper-triangle OFT coordinates into skew-symmetric blocks."""
+    if coordinates.ndim != 2:
+        raise ValueError(
+            "OFT coordinates must have shape (num_blocks, n(n-1)/2), "
+            f"got {tuple(coordinates.shape)}."
+        )
+    block_size = infer_oft_block_size(coordinates.shape[-1])
+    row, col = torch.triu_indices(
+        block_size,
+        block_size,
+        offset=1,
+        device=coordinates.device,
+    )
+    skew = coordinates.new_zeros(coordinates.shape[0], block_size, block_size)
+    skew[:, row, col] = coordinates
+    return skew - skew.transpose(-1, -2)
+
+
+def skew_to_oft_coordinates(skew: torch.Tensor) -> torch.Tensor:
+    """Extract strict upper-triangle OFT coordinates from skew blocks."""
+    row, col = torch.triu_indices(
+        skew.shape[-1],
+        skew.shape[-1],
+        offset=1,
+        device=skew.device,
+    )
+    return skew[:, row, col]
+
+
+def unnormalized_cayley(skew: torch.Tensor) -> torch.Tensor:
+    """Cayley(Omega) = (I - Omega)^-1 (I + Omega)."""
+    eye = torch.eye(
+        skew.shape[-1],
+        dtype=skew.dtype,
+        device=skew.device,
+    ).expand_as(skew)
+    return torch.linalg.solve(eye - skew, eye + skew)
+
+
+@torch.no_grad()
+def principal_rotation_sqrt(rotation: torch.Tensor) -> torch.Tensor:
+    """Compute the principal square root of each SO(n) block once via a polar factor."""
+    eye = torch.eye(
+        rotation.shape[-1],
+        dtype=rotation.dtype,
+        device=rotation.device,
+    ).expand_as(rotation)
+    left, singular_values, right_h = torch.linalg.svd(eye + rotation)
+    if torch.any(singular_values[..., -1] < 1e-6):
+        raise ValueError(
+            "Cannot stably compute theta_t^(1/2): a trained OFT rotation "
+            "has an eigenvalue too close to -1."
+        )
+    rotation_half = left @ right_h
+    residual = (rotation_half @ rotation_half - rotation).norm(dim=(-2, -1))
+    if torch.any(residual > 2e-4 * rotation.shape[-1]):
+        raise ValueError(
+            "Principal rotation square-root validation failed; "
+            f"maximum residual is {residual.max().item():.3e}."
+        )
+    return rotation_half
+
+
+def local_oft_forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    """
+    Apply a fresh Cayley chart on the right of the materialized rotation.
+
+    PEFT normally applies a fresh input rotation before the rotation already
+    absorbed in the base weight, which would compose as Cayley(Omega) theta_t.
+    Conjugating the fresh input rotation makes the effective model rotation
+    theta_t Cayley(Omega), while retaining Omega=0 as the materialized model.
+    """
+    required_dtype = inputs.dtype
+    coordinates = self.weight
+    rotation_delta = unnormalized_cayley(
+        oft_coordinates_to_skew(coordinates)
+    )
+    theta = self._fim_materialized_rotation
+    input_rotation = theta @ rotation_delta @ theta.transpose(-1, -2)
+
+    rank = self.in_features // self.block_size
+    if self.block_share:
+        input_rotation = input_rotation.expand(rank, -1, -1)
+    input_blocks = inputs.to(coordinates.dtype).reshape(
+        *inputs.shape[:-1],
+        rank,
+        self.block_size,
+    )
+    rotated = torch.einsum(
+        "...rk,rkc->...rc",
+        input_blocks,
+        input_rotation,
+    )
+    return rotated.reshape_as(inputs).to(required_dtype)
+
+
+@torch.no_grad()
+def materialize_trained_oft(
+    model: PeftModel,
+    rotation_path: Path,
+) -> tuple[torch.nn.Module, dict[str, torch.Tensor]]:
+    """
+    Materialize the trained OFT rotations blockwise and unload the adapter.
+
+    Only the (num_blocks, n, n) rotations are saved. No full model-width
+    rotation, Fisher, or coordinate transport matrix is formed.
+    """
+    rotations_by_parameter = {}
+    rotations_to_save = {}
+
+    for module_name, module in model.named_modules():
+        if not isinstance(module, OFTLayer):
+            continue
+        active_adapters = [
+            name for name in module.active_adapters if name in module.oft_R
+        ]
+        if len(active_adapters) != 1:
+            raise ValueError(
+                f"Expected one active OFT adapter in {module_name}, "
+                f"found {active_adapters}."
+            )
+
+        adapter_name = active_adapters[0]
+        rotation_module = module.oft_R[adapter_name]
+        coordinates = rotation_module.weight.detach().float()
+        rotation = unnormalized_cayley(oft_coordinates_to_skew(coordinates))
+
+        base_weight = module.get_base_layer().weight
+        block_size = rotation.shape[-1]
+        rank = module.in_features // block_size
+        block_rotation = (
+            rotation.expand(rank, -1, -1)
+            if rotation_module.block_share
+            else rotation
+        )
+        if block_rotation.shape[0] != rank:
+            raise ValueError(
+                f"OFT block count mismatch in {module_name}: "
+                f"rotation has {block_rotation.shape[0]} blocks, expected {rank}."
+            )
+
+        weight_blocks = base_weight.detach().float().reshape(
+            base_weight.shape[0],
+            rank,
+            block_size,
+        )
+        # PEFT applies x @ theta before the linear layer, hence W_t = W @ theta^T.
+        materialized = torch.einsum(
+            "orb,rab->ora",
+            weight_blocks,
+            block_rotation,
+        ).reshape_as(base_weight)
+        base_weight.copy_(materialized.to(base_weight.dtype))
+
+        parameter_name = f"{module_name}.oft_R.{adapter_name}.weight"
+        rotations_by_parameter[parameter_name] = rotation.cpu()
+        rotations_to_save[f"{parameter_name}.rotation"] = rotation.cpu().contiguous()
+
+    if not rotations_by_parameter:
+        raise ValueError("The trained model contains no active OFT layers.")
+
+    rotation_path.parent.mkdir(parents=True, exist_ok=True)
+    save_file(
+        rotations_to_save,
+        str(rotation_path),
+        metadata={
+            "format": "blockwise_oft_rotations",
+            "cayley": "(I-Omega)^-1(I+Omega)",
+        },
+    )
+    print(f"Materialized OFT rotations saved to {rotation_path}", flush=True)
+
+    # The base weights above already contain the rotations, so unload without merging.
+    base_model = model.unload()
+    # PEFT leaves this marker on some base nn.Module implementations. Remove it
+    # before attaching the genuinely fresh adapter.
+    if hasattr(base_model, "peft_config"):
+        delattr(base_model, "peft_config")
+    return base_model, rotations_by_parameter
+
+
+def attach_fresh_zero_oft(
+    base_model: torch.nn.Module,
+    adapter_config: PeftConfig,
+    device: str,
+    rotations_by_parameter: dict[str, torch.Tensor] | None,
+) -> tuple[PeftModel, dict[str, torch.Tensor]]:
+    """Attach a trainable zero OFT chart and precompute theta_t^(1/2) per block."""
+    fresh_config = copy.deepcopy(adapter_config)
+    fresh_config.inference_mode = False
+    fresh_config.init_weights = True
+    fresh_config.module_dropout = 0.0
+    # The PEFT Neumann implementation has d Cayley_0 = 2 id, as required here.
+    fresh_config.use_cayley_neumann = True
+
+    model = get_peft_model(base_model, fresh_config)
+    model.enable_adapter_layers()
+    model.to(device)
+    model.eval()
+
+    named_params = {
+        name: parameter
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    if not named_params:
+        raise ValueError("Fresh OFT attachment produced no trainable parameters.")
+
+    rotation_modules = {}
+    for module_name, module in model.named_modules():
+        if not isinstance(module, OFTLayer):
+            continue
+        for adapter_name in module.active_adapters:
+            if adapter_name in module.oft_R:
+                parameter_name = f"{module_name}.oft_R.{adapter_name}.weight"
+                rotation_modules[parameter_name] = module.oft_R[adapter_name]
+
+    theta_halves = {}
+    rotations_by_parameter = rotations_by_parameter or {}
+    for name, parameter in named_params.items():
+        if ".oft_R." not in name or not name.endswith(".weight"):
+            raise ValueError(f"Unexpected non-OFT trainable parameter: {name}.")
+        if torch.count_nonzero(parameter.detach()).item():
+            raise ValueError(f"Fresh OFT coordinates are not zero: {name}.")
+
+        block_size = infer_oft_block_size(parameter.shape[-1])
+        rotation = rotations_by_parameter.get(name)
+        if rotation is None:
+            if rotations_by_parameter:
+                raise KeyError(f"No materialized trained rotation found for {name}.")
+            rotation = torch.eye(
+                block_size,
+                dtype=torch.float32,
+            ).expand(parameter.shape[0], block_size, block_size).clone()
+        expected_shape = (parameter.shape[0], block_size, block_size)
+        if tuple(rotation.shape) != expected_shape:
+            raise ValueError(
+                f"Rotation shape mismatch for {name}: got {tuple(rotation.shape)}, "
+                f"expected {expected_shape}."
+            )
+        rotation = rotation.to(device=parameter.device, dtype=torch.float32)
+        theta_halves[name] = principal_rotation_sqrt(rotation)
+
+        rotation_module = rotation_modules.get(name)
+        if rotation_module is None:
+            raise KeyError(f"No fresh OFT rotation module found for {name}.")
+        rotation_module.register_buffer(
+            "_fim_materialized_rotation",
+            rotation,
+            persistent=False,
+        )
+        rotation_module.forward = MethodType(local_oft_forward, rotation_module)
+
+    unexpected = set(rotations_by_parameter) - set(named_params)
+    if unexpected:
+        raise KeyError(
+            "Materialized rotations did not match fresh OFT parameters: "
+            + ", ".join(sorted(unexpected)[:5])
+        )
+    return model, theta_halves
 
 
 def log_fisher_convergence_metrics(
@@ -103,36 +376,24 @@ def compute_empirical_diagonal_transported_fisher(
     model: torch.nn.Module,
     loader: DataLoader,
     device: str,
+    theta_halves: dict[str, torch.Tensor] | None,
     metric_prefix: str | None = None,
     wandb_step_offset: int = 0,
+    transport: bool = True,
 ) -> dict:
     """
-    Compute the diagonal empirical Fisher: E[grad log p]^2.
+    Compute E[u_t,x**2] after Cayley correction and, optionally, blockwise transport.
 
-    For OFT parameters stored in upper-triangle coordinates, this computes the
-    transported diagonal Fisher
-
-        diag(P_t F_t P_t^T)
-
-    by transporting each per-sample gradient before squaring:
-
-        g_tilde = P_t g
-        fisher += g_tilde^2
-
-    Assumes the following objects already exist globally or in scope:
-
-        _merging.oft_params_to_skew_matrix(...)
-        _manifold.compute_Pt(...)
-
-    Args:
-        model:  an already-loaded, eval-mode CausalLM
-        loader: DataLoader yielding dicts with 'input_ids' and 'attention_mask'
-        device: torch device string
-
-    Returns:
-        dict mapping parameter name -> diagonal Fisher tensor on CPU
+    For every sample and OFT parameter, the raw coordinate gradient G is first
+    converted to the left-trivialized gradient W = G/2. If `transport` is set,
+    each skew block is then transported as U = theta_t^(1/2) W theta_t^(-1/2)
+    before being converted back to the OFT upper-triangle basis and squared;
+    at the pretrained chart theta_t is the identity, so transport is skipped
+    entirely rather than applying a no-op matmul. This never constructs a
+    d-by-d Fisher or coordinate transport matrix.
     """
-
+    if transport and theta_halves is None:
+        raise ValueError("theta_halves must be provided when transport=True.")
     model.eval()
     model.to(device)
 
@@ -142,108 +403,31 @@ def compute_empirical_diagonal_transported_fisher(
         if p.requires_grad
     }
 
-    fisher = {
-        name: torch.zeros_like(p, device="cpu")
-        for name, p in named_params.items()
-    }
-
-    def infer_block_size_from_son_dimension(son_dimension: int) -> int:
-        """
-        Solve d = n(n-1)/2 for n.
-        """
-        block_size = int((1 + (1 + 8 * son_dimension) ** 0.5) / 2)
-
-        if block_size * (block_size - 1) // 2 != son_dimension:
-            raise ValueError(
-                f"Invalid so(n) dimension: {son_dimension}. "
-                "Expected d = n(n-1)/2."
-            )
-
-        return block_size
-
-    def is_oft_coordinate_parameter(p: torch.Tensor) -> bool:
-        """
-        OFT coordinates are expected to have shape:
-
-            (num_blocks, son_dimension)
-
-        where son_dimension = block_size * (block_size - 1) // 2.
-
-        This check is intentionally conservative.
-        """
-        if p.ndim != 2:
-            return False
-
-        son_dimension = p.shape[-1]
-
-        try:
-            infer_block_size_from_son_dimension(son_dimension)
-            return True
-        except ValueError:
-            return False
-
-    @torch.no_grad()
-    def precompute_transport_matrices() -> dict:
-        """
-        Precompute P_t for each OFT parameter tensor.
-
-        For each OFT parameter tensor A_t with shape
-
-            (num_blocks, son_dimension),
-
-        we construct the skew matrix Omega_t and then compute
-
-            P_t = P_{theta_t -> theta_LLM}.
-        """
-        transport_matrices = {}
-
-        for name, p in named_params.items():
-            if not is_oft_coordinate_parameter(p):
-                continue
-
-            son_dimension = p.shape[-1]
-            block_size = infer_block_size_from_son_dimension(son_dimension)
-
-            skew_matrix = _merging.oft_params_to_skew_matrix(
-                p.detach(),
-                son_dimension,
-            )
-
-            Pt = _manifold.compute_Pt(
-                skew_matrix=skew_matrix,
-                block_size=block_size,
-            )
-
-            transport_matrices[name] = Pt.detach()
-
-        return transport_matrices
-
-    transport_matrices = precompute_transport_matrices()
-
-    def sequence_nll(logits, input_ids, attention_mask):
-        """
-        CausalLM negative log-likelihood for one sample.
-
-        Since Fisher uses grad log p squared, we can use the gradient of
-        negative log-likelihood because the sign disappears after squaring.
-        """
-        shift_logits = logits[:, :-1, :].contiguous()
-        shift_labels = input_ids[:, 1:].contiguous()
-        shift_mask = attention_mask[:, 1:].contiguous()
-
-        vocab_size = shift_logits.shape[-1]
-
-        token_losses = F.cross_entropy(
-            shift_logits.view(-1, vocab_size),
-            shift_labels.view(-1),
-            reduction="none",
+    if transport and set(named_params) != set(theta_halves):
+        missing = set(named_params) - set(theta_halves)
+        extra = set(theta_halves) - set(named_params)
+        raise KeyError(
+            f"theta_t^(1/2) map does not match trainable OFT parameters; "
+            f"missing={sorted(missing)[:5]}, extra={sorted(extra)[:5]}."
         )
 
-        token_losses = token_losses.view_as(shift_labels)
+    fisher = {
+        name: torch.zeros_like(parameter, dtype=torch.float32, device="cpu")
+        for name, parameter in named_params.items()
+    }
 
-        nll = (token_losses * shift_mask).sum()
-
-        return nll
+    def sequence_nll(logits, labels):
+        """Summed target-token NLL for one sample."""
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        valid = shift_labels != -100
+        safe_labels = shift_labels.masked_fill(~valid, 0)
+        token_losses = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.shape[-1]),
+            safe_labels.view(-1),
+            reduction="none",
+        ).view_as(shift_labels)
+        return (token_losses * valid).sum()
 
     previous_fishers = None
 
@@ -264,6 +448,7 @@ def compute_empirical_diagonal_transported_fisher(
     for batch_idx, batch in enumerate(tqdm(loader, desc="Computing transported diagonal FIM"), 1):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
 
         batch_size = input_ids.shape[0]
 
@@ -272,6 +457,7 @@ def compute_empirical_diagonal_transported_fisher(
 
             sample_input_ids = input_ids[b:b + 1]
             sample_attention_mask = attention_mask[b:b + 1]
+            sample_labels = labels[b:b + 1]
 
             outputs = model(
                 input_ids=sample_input_ids,
@@ -280,8 +466,7 @@ def compute_empirical_diagonal_transported_fisher(
 
             loss = sequence_nll(
                 logits=outputs.logits,
-                input_ids=sample_input_ids,
-                attention_mask=sample_attention_mask,
+                labels=sample_labels,
             )
 
             loss.backward()
@@ -291,29 +476,25 @@ def compute_empirical_diagonal_transported_fisher(
                     if p.grad is None:
                         continue
 
-                    grad = p.grad.detach()
-
-                    if name in transport_matrices:
-                        Pt = transport_matrices[name]
-
-                        # grad has shape:
-                        #   (num_blocks, son_dimension)
-                        #
-                        # Pt has shape:
-                        #   (num_blocks, son_dimension, son_dimension)
-                        #
-                        # transported_grad[b] = Pt[b] @ grad[b]
-                        transported_grad = torch.einsum(
-                            "bij,bj->bi",
-                            Pt,
-                            grad,
+                    # d Cayley_0 = 2 id, hence W = G/2 before transport.
+                    left_trivialized = oft_coordinates_to_skew(
+                        0.5 * p.grad.detach().float()
+                    )
+                    if transport:
+                        theta_half = theta_halves[name]
+                        transported = (
+                            theta_half
+                            @ left_trivialized
+                            @ theta_half.transpose(-1, -2)
                         )
-
-                        fisher[name] += transported_grad.pow(2).cpu()
-
+                        transported = 0.5 * (
+                            transported - transported.transpose(-1, -2)
+                        )
                     else:
-                        # Fallback: ordinary diagonal empirical Fisher.
-                        fisher[name] += grad.pow(2).cpu()
+                        # theta_t is the identity at the pretrained chart.
+                        transported = left_trivialized
+                    transported_coordinates = skew_to_oft_coordinates(transported)
+                    fisher[name].add_(transported_coordinates.square().cpu())
 
             num_samples += 1
         log_convergence_metrics(batch_idx, num_samples)
@@ -324,274 +505,6 @@ def compute_empirical_diagonal_transported_fisher(
     for name in fisher:
         fisher[name] /= num_samples
 
-    return fisher
-
-def compute_empirical_diagonal_fisher(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: str,
-    metric_prefix: str | None = None,
-    wandb_step_offset: int = 0,
-) -> dict:
-    """
-    Compute the diagonal empirical Fisher: E[grad log p]^2.
-    Args:
-        model:  an already-loaded, eval-mode CausalLM
-        loader: DataLoader yielding dicts with 'input_ids' and 'attention_mask'
-        device: torch device string
-    Returns:
-        dict mapping parameter name -> diagonal Fisher tensor (on CPU)
-    """
-    fisher = {}
-    for n, p in model.named_parameters():
-        if p.requires_grad:
-            fisher[n] = torch.zeros_like(p, device=device)
-
-    model.eval()
-    count = 0
-    previous_fishers = None
-
-    def log_convergence_metrics(num_batches: int) -> None:
-        nonlocal previous_fishers
-        if metric_prefix is None or num_batches % WANDB_LOG_EVERY_BATCH:
-            return
-        previous_fishers = log_fisher_convergence_metrics(
-            fisher=fisher,
-            normalizer=num_batches,
-            metric_prefix=metric_prefix,
-            previous_fishers=previous_fishers,
-            metric_step=wandb_step_offset + num_batches,
-        )
-
-    for batch in tqdm(loader, desc="Computing Diagonal FIM"):
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = batch["labels"].to(device)
-
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        shift_logits = outputs.logits[:, :-1, :]
-        shift_labels = labels[:, 1:]
-        label_mask = (shift_labels != -100).float()
-
-        # Clamp -100 to 0 so nll_loss doesn't index out of bounds; masked out below
-        shift_labels_safe = shift_labels.clone()
-        shift_labels_safe[shift_labels == -100] = 0
-
-        log_probs = F.log_softmax(shift_logits, dim=-1)
-        token_nll = F.nll_loss(
-            log_probs.view(-1, log_probs.size(-1)),
-            shift_labels_safe.reshape(-1),
-            reduction="none",
-        ).view(shift_labels.shape)
-
-        loss = (token_nll * label_mask).sum() / label_mask.sum().clamp(min=1)
-
-        # if count == 0 and tokenizer is not None:
-        #     for b in range(input_ids.shape[0]):
-        #         prompt = tokenizer.decode(input_ids[b], skip_special_tokens=False)
-        #         fisher_ids = shift_labels[b][label_mask[b].bool()].tolist()
-        #         print(f"\n--- Sample {b} ---")
-        #         print(f"Prompt: {prompt!r}")
-        #         decoded = tokenizer.decode(fisher_ids, skip_special_tokens=False)
-        #         print(f"Loss tokens ({len(fisher_ids)}): ids={fisher_ids}  text={decoded!r}")
-
-        model.zero_grad()
-        loss.backward()
-
-        for n, p in model.named_parameters():
-            if p.requires_grad and p.grad is not None:
-                fisher[n] += p.grad.data ** 2
-
-        count += 1
-        log_convergence_metrics(count)
-
-    if count == 0:
-        raise ValueError("The DataLoader produced zero batches.")
-
-    for n in fisher:
-        fisher[n] /= count
-        fisher[n] = fisher[n].cpu()
-
-    return fisher
-
-def compute_diagonal_fisher(model, loader, device, tokenizer=None):
-    """
-    Compute the empirical diagonal Fisher for the trainable parameters
-    of a causal LM / PEFT model.
-
-    Returns
-    -------
-    fisher : dict[str, torch.Tensor]
-        Diagonal Fisher tensors on CPU, same shapes as the parameters.
-    """
-    model.eval()
-
-    named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
-    if not named_params:
-        raise ValueError("No trainable parameters with requires_grad=True were found.")
-
-    param_names, params = zip(*named_params)
-    fisher = [torch.zeros_like(p, dtype=torch.float32, device="cpu") for p in params]
-    n_sequences = 0
-
-    for batch in tqdm(loader):
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch.get("attention_mask")
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(device)
-        labels = batch["labels"].to(device)
-
-        answer_mask = (labels[:, 1:] != -100).float()  # (B, T-1)
-
-        with torch.no_grad():
-            logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
-            sampled = torch.multinomial(
-                F.softmax(logits[:, :-1, :].reshape(-1, logits.shape[-1]), dim=-1), 1
-            ).reshape(input_ids.shape[0], -1)  # (B, T-1)
-
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        log_probs = F.log_softmax(outputs.logits[:, :-1, :], dim=-1)
-        token_log_probs = log_probs.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)
-        token_log_probs = token_log_probs * answer_mask
-
-        seq_log_probs = token_log_probs.sum(dim=-1)   # (B,)
-        batch_size = seq_log_probs.shape[0]
-
-        if n_sequences == 0 and tokenizer is not None:
-            for b in range(batch_size):
-                prompt = tokenizer.decode(input_ids[b], skip_special_tokens=False)
-                ans_mask_b = answer_mask[b].bool()
-                backprop_ids = sampled[b][ans_mask_b].tolist()
-                backprop_text = tokenizer.decode(backprop_ids, skip_special_tokens=False)
-                print(f"\n--- Sample {b} ---")
-                print(f"Prompt:  {prompt!r}")
-                print(f"Backprop: {backprop_text!r}")
-
-        for i in range(batch_size):
-            model.zero_grad(set_to_none=True)
-            grads = torch.autograd.grad(
-                seq_log_probs[i],
-                params,
-                retain_graph=(i < batch_size - 1),
-                create_graph=False,
-                allow_unused=True,
-            )
-            for j, g in enumerate(grads):
-                if g is not None:
-                    fisher[j] += g.detach().float().cpu() ** 2
-            n_sequences += 1
-
-    if n_sequences == 0:
-        raise ValueError("No sequences were processed.")
-
-    return {n: f / n_sequences for n, f in zip(param_names, fisher)}
-
-def compute_true_fisher(model, loader, device):
-    """
-    True diagonal Fisher: sample labels from the model's own distribution
-    instead of using observed labels (avoids empirical Fisher bias).
-    """
-    model.eval()
-    named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
-    if not named_params:
-        raise ValueError("No trainable parameters found.")
-
-    param_names, params = zip(*named_params)
-    accum = [torch.zeros_like(p, dtype=torch.float32, device="cpu") for p in params]
-    n_sequences = 0
-
-    for batch in tqdm(loader):
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch.get("attention_mask")
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(device)
-
-        with torch.no_grad():
-            logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
-            sampled = torch.multinomial(
-                F.softmax(logits[:, :-1, :].reshape(-1, logits.shape[-1]), dim=-1), 1
-            ).reshape(input_ids.shape[0], -1)
-
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        log_probs = F.log_softmax(outputs.logits[:, :-1, :], dim=-1)
-        token_log_probs = log_probs.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)
-        if attention_mask is not None:
-            token_log_probs = token_log_probs * attention_mask[:, 1:].to(token_log_probs.dtype)
-        seq_log_probs = token_log_probs.sum(dim=-1)
-
-        for i in range(seq_log_probs.shape[0]):
-            model.zero_grad(set_to_none=True)
-            grads = torch.autograd.grad(
-                seq_log_probs[i], params,
-                retain_graph=(i < seq_log_probs.shape[0] - 1),
-                create_graph=False, allow_unused=True,
-            )
-            for j, g in enumerate(grads):
-                if g is not None:
-                    accum[j] += g.detach().float().cpu() ** 2
-            n_sequences += 1
-
-    if n_sequences == 0:
-        raise ValueError("No sequences processed.")
-    return {n: f / n_sequences for n, f in zip(param_names, accum)}
-
-def compute_empirical_fisher(model, loader, device):
-    """
-    Compute the diagonal empirical Fisher Information Matrix, layerwise.
-
-    The empirical Fisher is approximated as:
-        F_theta = E_{(x,y) ~ data} [ (grad log p(y|x; theta))^2 ]
-
-    We use the true labels from the loader (empirical Fisher), computing
-    per-sample gradients of the log-likelihood and averaging their squares.
-
-    Args:
-        model:  nn.Module. Output assumed to be logits for classification.
-        loader: DataLoader yielding (inputs, targets).
-        device: torch device.
-
-    Returns:
-        dict[str, Tensor]: {param_name: fisher_tensor} with the same shape
-        as each parameter. Only parameters with requires_grad=True are included.
-    """
-    model.eval()
-    model.to(device)
-
-    # Initialize Fisher accumulators (same shape as each trainable parameter)
-    fisher = {
-        name: torch.zeros_like(p)
-        for name, p in model.named_parameters()
-        if p.requires_grad
-    }
-
-    n_samples = 0
-
-    for batch in tqdm(loader, desc="Computing Empirical FIM"):
-        batch = {k: v.to(device) for k, v in batch.items()}
-        batch_size = batch["input_ids"].size(0)
-
-        # Process one sample at a time to get true per-sample gradients.
-        # (Batch gradients would give grad of the *sum*, whose square is not
-        # the same as the sum of squared per-sample gradients.)
-        for i in range(batch_size):
-            model.zero_grad(set_to_none=True)
-
-            sample = {k: v[i:i + 1] for k, v in batch.items()}
-            loss = model(**sample, labels=sample["input_ids"]).loss
-
-            loss.backward()
-
-            for name, p in model.named_parameters():
-                if p.requires_grad and p.grad is not None:
-                    fisher[name] += p.grad.detach() ** 2
-
-            n_samples += 1
-
-    # Average over the dataset
-    for name in fisher:
-        fisher[name] /= max(n_samples, 1)
-
-    model.zero_grad(set_to_none=True)
     return fisher
 
 
@@ -624,35 +537,64 @@ def maybe_init_wandb(
         },
     )
     for model_state in ("pretrained", "finetuned"):
-        step_metric = f"fim/{model_state}/step"
-        wandb.define_metric(step_metric)
-        wandb.define_metric(f"fim/{model_state}/*", step_metric=step_metric)
+        wandb.define_metric(f"fim/{model_state}/step")
+        wandb.define_metric(f"fim/{model_state}/*", step_metric=f"fim/{model_state}/step")
 
 
-def zero_trainable_adapter_parameters(model: torch.nn.Module) -> None:
-    with torch.no_grad():
-        for _, param in model.named_parameters():
-            if param.requires_grad:
-                param.zero_()
-
-
-def load_adapter_model(
+def load_materialized_adapter_model(
     base_model_path: str,
     adapter_path: str,
     device: str,
-    zero_adapter: bool,
-) -> torch.nn.Module:
+    materialized_rotation_path: Path,
+) -> tuple[torch.nn.Module, dict[str, torch.Tensor]]:
+    """Materialize a trained adapter and attach a fresh zero OFT chart."""
     base = AutoModelForCausalLM.from_pretrained(
         base_model_path, torch_dtype=torch.float32, device_map=None
     )
-    model = PeftModel.from_pretrained(base, adapter_path, is_trainable=True)
-    # If the model is pretrained we still want the OFT for backpropagating for FIM computation,
-    # but we want to zero out the adapter parameters so they don't contribute to the FIM.
-    if zero_adapter:
-        zero_trainable_adapter_parameters(model)
-    model.enable_adapter_layers()
-    model.to(device)
-    model.eval()
+    adapter_config = PeftConfig.from_pretrained(adapter_path)
+
+    trained_model = PeftModel.from_pretrained(
+        base,
+        adapter_path,
+        is_trainable=False,
+    )
+    base, rotations_by_parameter = materialize_trained_oft(
+        trained_model,
+        materialized_rotation_path,
+    )
+
+    return attach_fresh_zero_oft(
+        base_model=base,
+        adapter_config=adapter_config,
+        device=device,
+        rotations_by_parameter=rotations_by_parameter,
+    )
+
+
+def load_pretrained_model(
+    base_model_path: str,
+    adapter_path: str,
+    device: str,
+) -> torch.nn.Module:
+    """Attach a fresh zero OFT chart directly to the pretrained base model.
+
+    The adapter's config is only used to determine which modules the OFT
+    chart targets; no trained rotation is applied, so the model output
+    matches the pretrained model exactly. Since theta_t is the identity here,
+    gradients are used untransported (see `transport` in
+    `compute_empirical_diagonal_transported_fisher`).
+    """
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model_path, torch_dtype=torch.float32, device_map=None
+    )
+    adapter_config = PeftConfig.from_pretrained(adapter_path)
+
+    model, _theta_halves = attach_fresh_zero_oft(
+        base_model=base,
+        adapter_config=adapter_config,
+        device=device,
+        rotations_by_parameter=None,
+    )
     return model
 
 
@@ -669,57 +611,65 @@ def compute_and_save_fim(
     num_samples: int = 512,
     batch_size: int = 4,
     max_length: int = 512,
-    model_state: str = "finetuned",
     log_to_wandb: bool = False,
     dataset_cache_dir: str | None = None,
     wandb_step_offset: int = 0,
+    materialized_rotation_path: Path | None = None,
+    repeat_to_num_samples: bool = False,
+    model_state: str = "finetuned",
 ) -> None:
+    if model_state not in ("finetuned", "pretrained"):
+        raise ValueError(f"Unknown model_state: {model_state}.")
+
     tokenizer = AutoTokenizer.from_pretrained(base_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = load_adapter_model(
-        base_model_path=base_model_path,
-        adapter_path=adapter_path,
-        device=device,
-        zero_adapter=(model_state == "pretrained"),
-    )
+    theta_halves = None
+    if model_state == "finetuned":
+        if materialized_rotation_path is None:
+            raise ValueError("materialized_rotation_path must be provided.")
+        model, theta_halves = load_materialized_adapter_model(
+            base_model_path=base_model_path,
+            adapter_path=adapter_path,
+            device=device,
+            materialized_rotation_path=materialized_rotation_path,
+        )
+    else:
+        model = load_pretrained_model(
+            base_model_path=base_model_path,
+            adapter_path=adapter_path,
+            device=device,
+        )
 
     loader = build_loader(
         dataset_path, dataset_name, split, doc_to_text,
         tokenizer, num_samples, batch_size, max_length, task=task_tag,
         cache_dir=dataset_cache_dir,
+        repeat_to_num_samples=repeat_to_num_samples,
     )
 
     metric_prefix = f"fim/{model_state}" if log_to_wandb else None
-    if model_state == "pretrained":
-        fisher = compute_empirical_diagonal_fisher(
-            model,
-            loader,
-            device,
-            metric_prefix=metric_prefix,
-            wandb_step_offset=wandb_step_offset,
-        )
-    elif model_state == "finetuned":
-        fisher = compute_empirical_diagonal_transported_fisher(
-            model,
-            loader,
-            device,
-            metric_prefix=metric_prefix,
-            wandb_step_offset=wandb_step_offset,
-        )
-    else:
-        raise ValueError(f"Unsupported model_state: {model_state}")
+    fisher = compute_empirical_diagonal_transported_fisher(
+        model,
+        loader,
+        device,
+        theta_halves=theta_halves,
+        metric_prefix=metric_prefix,
+        wandb_step_offset=wandb_step_offset,
+        transport=(model_state == "finetuned"),
+    )
 
     fisher = {name: value.clamp_min(1e-6) for name, value in fisher.items()}
     save_file(fisher, str(save_path))
     print(f"[{task_tag}] {model_state} Fisher saved to {save_path}", flush=True)
 
 
-def compute_task_fishers(
+def compute_task_fisher(
     base_model_path: str,
     adapter_path: str,
-    fisher_paths_by_state: dict[str, str],
+    fisher_finetuned_path: str,
+    fisher_pretrained_path: str,
     model_family: str,
     task_index: int,
     device: str,
@@ -730,29 +680,54 @@ def compute_task_fishers(
     debug: bool,
     log_to_wandb: bool,
     force_compute: bool,
+    materialized_adapters_dir: Path,
+    repeat_to_num_samples: bool,
+    model_states: tuple[str, ...] = ("pretrained", "finetuned"),
 ) -> None:
     task_tag, dataset_path, dataset_name, split, doc_to_text = TASKS[task_index]
     adapter_tag = os.path.basename(adapter_path.rstrip("/"))
     output_dir = FIM_OUTPUT_ROOT / model_family / task_tag
     output_dir.mkdir(parents=True, exist_ok=True)
+    materialized_rotation_path = (
+        materialized_adapters_dir
+        / model_family
+        / adapter_tag
+        / "oft_rotations.safetensors"
+    )
+    fisher_paths = {
+        "finetuned": fisher_finetuned_path,
+        "pretrained": fisher_pretrained_path,
+    }
 
     print(f"Dataset: {task_tag}", flush=True)
     print(f"Adapter model: {adapter_tag}", flush=True)
     print(f"Task index: {task_index}", flush=True)
     print(f"Debug: {debug}", flush=True)
+    print(f"Materialized rotations: {materialized_rotation_path}", flush=True)
 
     maybe_init_wandb(model_family, task_tag, adapter_tag, debug, log_to_wandb)
 
-    for model_state in ("pretrained", "finetuned"):
-        save_path = Path(fisher_paths_by_state[model_state])
+    for model_state in model_states:
+        save_path = Path(fisher_paths[model_state])
         save_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"\nComputing {model_state} FIM", flush=True)
         print(f"Save: {save_path}", flush=True)
-        if save_path.exists() and not force_compute:
+
+        materialization_missing = (
+            model_state == "finetuned" and not materialized_rotation_path.exists()
+        )
+        if save_path.exists() and not force_compute and not materialization_missing:
             print("[WARNING] Already exists, skipping.", flush=True)
             continue
+        if materialization_missing and save_path.exists():
+            print(
+                "[WARNING] Fisher exists but materialized rotations are missing; "
+                "recomputing the fine-tuned Fisher.",
+                flush=True,
+            )
         if save_path.exists() and force_compute:
             print("[WARNING] Already exists, recomputing due to --force-compute.", flush=True)
+
         compute_and_save_fim(
             base_model_path=base_model_path,
             adapter_path=adapter_path,
@@ -766,13 +741,15 @@ def compute_task_fishers(
             num_samples=num_samples,
             batch_size=batch_size,
             max_length=max_length,
-            model_state=model_state,
             log_to_wandb=log_to_wandb,
             dataset_cache_dir=dataset_cache_dir,
             wandb_step_offset=0,
+            materialized_rotation_path=materialized_rotation_path,
+            repeat_to_num_samples=repeat_to_num_samples,
+            model_state=model_state,
         )
 
-    print(f"FIMs saved to {output_dir}/", flush=True)
+        print(f"{model_state.capitalize()} FIM saved to {output_dir}/", flush=True)
 
 
 if __name__ == "__main__":
@@ -782,10 +759,16 @@ if __name__ == "__main__":
         dest="model_family", help="Model family to use.",
     )
     parser.add_argument("--task-index", type=int, required=True, choices=range(len(TASKS)))
-    parser.add_argument("--num-samples", type=int, default=2048)  # 1024
+    parser.add_argument("--num-samples", type=int, default=4096)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--max-length", type=int, default=1024)  # 1024
+    parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--dataset-cache-dir", type=str, default=str(Path(__file__).resolve().parents[1] / "data" / "hf_cache"))
+    parser.add_argument(
+        "--materialized-adapters-dir",
+        type=Path,
+        default=DEFAULT_MATERIALIZED_ADAPTERS_DIR,
+        help="Root directory for saved materialized OFT rotation tensors.",
+    )
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument(
@@ -794,8 +777,20 @@ if __name__ == "__main__":
         help="Recompute and overwrite existing FIM files instead of skipping them.",
     )
     parser.add_argument(
+        "--repeat-to-num-samples",
+        action="store_true",
+        help="Cycle through short datasets until exactly --num-samples examples are used.",
+    )
+    parser.add_argument(
         "--device", type=str, default="cuda",
         help="Device to use for FIM computation (e.g., 'gpu', 'cpu').",
+    )
+    parser.add_argument(
+        "--model-states",
+        nargs="+",
+        default=["pretrained", "finetuned"],
+        choices=["pretrained", "finetuned"],
+        help="Which model state(s) to compute the FIM for.",
     )
     args = parser.parse_args()
     args.device = parse_device(args.device)
@@ -807,15 +802,14 @@ if __name__ == "__main__":
     model_family = MODEL_FAMILIES[args.model_family]
     base_model_path = model_family.base_model_path
     adapter_path = model_family.adapter_paths[args.task_index]
-    fisher_paths_by_state = {
-        "pretrained": model_family.fisher_pretrained_paths[args.task_index],
-        "finetuned": model_family.fisher_finetuned_paths[args.task_index],
-    }
+    fisher_finetuned_path = model_family.fisher_finetuned_paths[args.task_index]
+    fisher_pretrained_path = model_family.fisher_pretrained_paths[args.task_index]
 
-    compute_task_fishers(
+    compute_task_fisher(
         base_model_path=base_model_path,
         adapter_path=adapter_path,
-        fisher_paths_by_state=fisher_paths_by_state,
+        fisher_finetuned_path=fisher_finetuned_path,
+        fisher_pretrained_path=fisher_pretrained_path,
         model_family=args.model_family,
         task_index=args.task_index,
         device=args.device,
@@ -826,4 +820,7 @@ if __name__ == "__main__":
         debug=args.debug,
         log_to_wandb=not args.no_wandb,
         force_compute=args.force_compute,
+        materialized_adapters_dir=args.materialized_adapters_dir,
+        repeat_to_num_samples=args.repeat_to_num_samples,
+        model_states=tuple(args.model_states),
     )

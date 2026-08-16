@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=05:00:00
-#SBATCH --array=0-23
+#SBATCH --array=0-11
 #SBATCH --output=outputs/diffusion/slurms/geo_int_%A_%a.out
 
 set -e
@@ -63,10 +63,10 @@ T_VALUES=(
 )
 
 METHODS=(
-  # Format for fisher methods: "method:fisher_backend:fisher_mu:correction_mu:fim_normalization"
-  # "fisher_geodesic:diagonal::2:trace"
+  # "fisher_geodesic:diagonal::0:trace"
+  # "fisher_geodesic:diagonal::4:trace"
   # "fisher:diagonal:4::trace"
-  "fisher:diagonal:0::trace"
+  # "fisher:diagonal:0::trace"
   "orthofuse_geodesic"
   # "orthofuse_geodesic_curve_over_id"
 )
@@ -97,8 +97,8 @@ python "${REPO_ROOT}/src/diffusion/geodesic_interpolation.py" \
   --prompt_templates "a {0} in {1} style" \
   --t_values "${T_VALUES[@]}" \
   --geodesic_backend=cayley \
-  --num_images_per_medium_prompt=5 \
-  --batch_size_medium=5 \
+  --num_images_per_medium_prompt=2 \
+  --batch_size_medium=2 \
   --replace_inference_output \
   "${METHOD_FLAGS[@]}"
 

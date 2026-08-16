@@ -24,7 +24,7 @@ from src.merging import (
     WudiOFTMerging,
 )
 from src.utils import parse_device
-from src.paths import MODEL_FAMILIES_D3_FISHER_PRETRAINED as MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
+from src.paths import MODEL_FAMILIES_D3_FISHER_FINETUNES as MODEL_FAMILIES, ModelFamily, WANDB_PROJECT
 # from src.dataset.dataset_1 import DATASET_1_TEST, build_loader
 from src.dataset.dataset_3 import DATASET_3_TEST, build_loader
 

@@ -55,6 +55,7 @@ def parse_args():
     parser.add_argument("--output_prefix", type=str, default="interpolation_geodesic")
     parser.add_argument("--samples", nargs="+", default=["all_dataset_pairs"])
     parser.add_argument("--methods", nargs="+", default=["fisher_geodesic", "orthofuse"])
+    parser.add_argument("--legend_names", nargs="+", default=None)
     parser.add_argument("--prompt_templates", nargs="+", default=None)
     parser.add_argument("--t_values", nargs="+", type=float, default=list(DEFAULT_T_VALUES))
     parser.add_argument("--num_images_per_medium_prompt", type=int, default=2)
@@ -96,23 +97,27 @@ def prompt(pair, template, placeholders=True):
     return template.format(pair["concept"][concept_key], pair["style"][style_key])
 
 
-def resolve_fisher_mu_method(args, method):
-    if method not in FISHER_MU_METHODS:
-        return method, args
-    resolved_args = copy.copy(args)
-    resolved_args.fisher_correction_mu = FISHER_MU_METHODS[method]
-    return "fisher", resolved_args
+def resolve_method(args, method):
+    if method.startswith("fisher_geodesic_corr"):
+        resolved_args = copy.copy(args)
+        resolved_args.correction_mu = float(method.removeprefix("fisher_geodesic_corr"))
+        return "fisher_geodesic", resolved_args
+    if method in FISHER_MU_METHODS:
+        resolved_args = copy.copy(args)
+        resolved_args.fisher_correction_mu = FISHER_MU_METHODS[method]
+        return "fisher", resolved_args
+    return method, args
 
 
 def method_root(args, method):
-    method, args = resolve_fisher_mu_method(args, method)
+    method, args = resolve_method(args, method)
     if args.method_output_root is None:
         return args.output_dir / args.results_folder
     return Path(args.method_output_root) / method_output_name(args, method)
 
 
 def method_folder(args, method, pair, t, version):
-    method, args = resolve_fisher_mu_method(args, method)
+    method, args = resolve_method(args, method)
     if method == "fisher_geodesic":
         run_args = gradient_args(
             args,
@@ -172,6 +177,14 @@ def records(args, pairs):
 def run(args):
     plot_dir = args.plot_dir or args.output_dir / "tables"
     cache_path = args.scores_cache_path or plot_dir / f"{args.output_prefix}_raw.json"
+    if args.legend_names is not None and len(args.legend_names) != len(set(args.methods)):
+        raise ValueError("--legend_names must match the number of plotted methods")
+    # --legend_names is positional w.r.t. --methods (as passed on the CLI), so pair
+    # them up explicitly rather than relying on the order series end up plotted in
+    # (which is determined by the sorted/aggregated rows and need not match).
+    legend_name_map = (
+        dict(zip(args.methods, args.legend_names, strict=False)) if args.legend_names is not None else None
+    )
 
     if cache_path.exists() and not args.replace_scores_cache:
         with cache_path.open("r", encoding="utf-8") as handle:
@@ -188,6 +201,9 @@ def run(args):
         with cache_path.open("w", encoding="utf-8") as handle:
             json.dump(rows, handle)
         print(f"[interpolation-geodesic-results] wrote {cache_path}", flush=True)
+
+    requested_methods = set(args.methods)
+    rows = [row for row in rows if row["method"] in requested_methods]
 
     if not rows:
         raise RuntimeError("No geodesic interpolation images were found.")
@@ -215,7 +231,10 @@ def run(args):
 
     group_keys = ("method", "step", "t")
     aggregate = aggregate_rows(rows, group_keys, metric_keys)
-    aggregate = sorted(aggregate, key=lambda row: (row["method"], row["step"]))
+    # Sort by position in --methods (not alphabetically) so the legend order
+    # follows the order methods are listed in the .sh script.
+    method_order = {method: idx for idx, method in enumerate(args.methods)}
+    aggregate = sorted(aggregate, key=lambda row: (method_order.get(row["method"], len(method_order)), row["step"]))
     add_pareto_flags(aggregate)
 
     csv_path = plot_dir / f"{args.output_prefix}_pareto_frontier.csv"
@@ -241,10 +260,27 @@ def run(args):
         "Geodesic interpolation",
         series_key="method",
         label_key="t",
+        series_labels=legend_name_map,
+        legend_fontsize=26,
+        legend_title_fontsize=28,
+        series_legend_anchor=(0.5, -0.1),
+        series_legend_ncol=max(1, (len(set(args.methods)) + 1) // 2),
+        label_legend_anchor=(0.935, 0.44),
+        label_legend_ncol=1,
+        label_alpha=1.0,
+        save_pdf=True,
+        save_individual=True,
+        individual_zoom_t=0.6,
+        individual_zoom_window=0.0,
     )
     print(f"[interpolation-geodesic-results] wrote {csv_path}", flush=True)
     print(f"[interpolation-geodesic-results] wrote {raw_csv}", flush=True)
     print(f"[interpolation-geodesic-results] wrote {png_path}", flush=True)
+    print(f"[interpolation-geodesic-results] wrote {png_path.with_suffix('.pdf')}", flush=True)
+    for metric in ("clip", "dino"):
+        metric_path = png_path.with_name(f"{png_path.stem}_{metric}{png_path.suffix}")
+        print(f"[interpolation-geodesic-results] wrote {metric_path}", flush=True)
+        print(f"[interpolation-geodesic-results] wrote {metric_path.with_suffix('.pdf')}", flush=True)
 
 
 def main():

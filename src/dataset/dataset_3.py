@@ -223,6 +223,7 @@ def build_loader(
     max_length: int,
     task: str | None = None,
     cache_dir: str | None = None,
+    repeat_to_num_samples: bool = False,
 ) -> DataLoader:
     from datasets import load_dataset
     from torch.utils.data import DataLoader
@@ -235,7 +236,12 @@ def build_loader(
         cache_dir=cache_dir,
     )
     if num_samples is not None:
-        dataset = dataset.select(range(min(num_samples, len(dataset))))
+        if repeat_to_num_samples and num_samples > len(dataset):
+            if len(dataset) == 0:
+                raise ValueError("Cannot repeat an empty dataset.")
+            dataset = dataset.select([i % len(dataset) for i in range(num_samples)])
+        else:
+            dataset = dataset.select(range(min(num_samples, len(dataset))))
 
     def join_prompt_and_target(prompt: str, target: str) -> tuple[list[int], list[int], list[int]]:
         prompt_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]

@@ -22,60 +22,24 @@ if str(ROOTDIR) not in sys.path:
 
 from src.dataset.dataset_3 import DATASET_3_PLOT_LABELS, DATASET_3_TRAIN
 from src.geometry import SOnManifold
+from src.paths import MODEL_FAMILIES
 from src.plots.plot_cowebs import collect_metrics, latex_bold
 
 
 MERGE_MODES = ("diagonal_fisher", "standard_rescaled")
 XY_PLOT_MODES = ("standard_rescaled", "diagonal_fisher")
 TASKS = [tag for tag, *_ in DATASET_3_TRAIN]
-FAMILIES = ("llama3.1", "qwen2.5")
-FISHERS_DIR = Path("/scratch-shared/eterres/fishers")
-DATA_DIR = ROOTDIR / "outputs" / "analysis" / "data"
-EVAL_DIR = ROOTDIR / "outputs" / "evaluation"
+FAMILIES = tuple(MODEL_FAMILIES)
 MANIFOLD = SOnManifold()
 VIOLIN_COLORS = ("black", "#7B2CBF")
 
 
-def _adapter_task_name(task: str) -> str:
-    return {
-        "social_iqa": "socialiqa",
-        "commonsense_qa": "commonsense",
-        "science_qa": "scienceqa",
-    }.get(task, task)
-
-
-def _adapter_prefix(family_name: str) -> str:
-    return {
-        "llama3.1": "llama3-1_8b_finetune",
-        "qwen2.5": "qwen2.5_3b_finetune",
-    }[family_name]
-
-
-def _adapter_root(family_name: str) -> Path:
-    folder = {
-        "llama3.1": "Llama-3.1-8B_OFT_dataset2_adapters",
-        "qwen2.5": "Qwen-2.5-3B_OFT_dataset2_adapters",
-    }[family_name]
-    return ROOTDIR / "data" / "models" / folder
-
-
 def _task_adapter_paths(family_name: str) -> list[Path]:
-    prefix = _adapter_prefix(family_name)
-    return [
-        _adapter_root(family_name) / f"{prefix}_{_adapter_task_name(task)}"
-        for task in TASKS
-    ]
+    return [Path(path) for path in MODEL_FAMILIES[family_name].adapter_paths]
 
 
 def _finetuned_fisher_paths(family_name: str) -> list[Path]:
-    prefix = _adapter_prefix(family_name)
-    return [
-        FISHERS_DIR
-        / family_name
-        / task
-        / f"{prefix}_{_adapter_task_name(task)}_finetuned.safetensors"
-        for task in TASKS
-    ]
+    return [Path(path) for path in MODEL_FAMILIES[family_name].fisher_finetuned_paths]
 
 
 def _load_state(path: Path) -> dict[str, torch.Tensor]:
@@ -85,8 +49,12 @@ def _load_state(path: Path) -> dict[str, torch.Tensor]:
     return {key.replace(".default", ""): value.float() for key, value in state.items()}
 
 
-def _merged_adapter_path(mode: str, family_name: str) -> Path:
-    return ROOTDIR / "outputs" / "models" / mode / family_name / "merged_model" / "merged_adapter"
+def _merged_adapter_path(
+    mode: str,
+    family_name: str,
+    merged_models_dir: Path,
+) -> Path:
+    return merged_models_dir / mode / family_name / "merged_model" / "merged_adapter"
 
 
 def fisher_kl(
@@ -567,9 +535,12 @@ def _performance_plot_label(task: str) -> str:
     return latex_bold(DATASET_3_PLOT_LABELS.get(task_name, task_name))
 
 
-def _performance_metrics(family_name: str) -> dict[str, dict[str, float]]:
+def _performance_metrics(
+    family_name: str,
+    eval_dir: Path,
+) -> dict[str, dict[str, float]]:
     return {
-        mode: collect_metrics(EVAL_DIR / mode / family_name, "eval_performance")
+        mode: collect_metrics(eval_dir / mode / family_name, "eval_performance")
         for mode in ("finetunes", "standard_rescaled", "diagonal_fisher")
     }
 
@@ -578,13 +549,14 @@ def save_performance_ratio_kl_plot(
     kl_rows: dict[str, list[float]],
     family_name: str,
     save_path: Path,
+    eval_dir: Path,
 ) -> dict[str, float]:
     import matplotlib.pyplot as plt
     from matplotlib.ticker import LogFormatterSciNotation, LogLocator
     from matplotlib.lines import Line2D
 
     _configure_latex_plot(plt)
-    metrics = _performance_metrics(family_name)
+    metrics = _performance_metrics(family_name, eval_dir)
     fig, ax = plt.subplots(figsize=(3.8, 3.3))
     xs, ys, labels = [], [], []
     for task, ortho_kl, fisher_kl_value in zip(
@@ -722,11 +694,12 @@ def save_performance_over_kl_by_method_plot(
     kl_rows: dict[str, list[float]],
     family_name: str,
     save_path: Path,
+    eval_dir: Path,
 ) -> None:
     import matplotlib.pyplot as plt
 
     _configure_latex_plot(plt)
-    metrics = _performance_metrics(family_name)
+    metrics = _performance_metrics(family_name, eval_dir)
     xs, ys, labels = [], [], []
 
     for task_idx, task in enumerate(TASKS):
@@ -808,11 +781,12 @@ def save_performance_kl_distribution_plot(
     kl_rows: dict[str, list[float]],
     family_name: str,
     save_path: Path,
+    eval_dir: Path,
 ) -> None:
     import matplotlib.pyplot as plt
 
     _configure_latex_plot(plt)
-    metrics = _performance_metrics(family_name)
+    metrics = _performance_metrics(family_name, eval_dir)
     fig, ax = plt.subplots(figsize=(4.5, 3.4))
 
     style_by_mode = {
@@ -914,14 +888,20 @@ def print_correlation_stats(family_name: str, stats: dict[str, dict[str, float]]
         )
 
 
-def compare_family(family_name: str) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
+def compare_family(
+    family_name: str,
+    merged_models_dir: Path,
+) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
     task_states = [_load_state(path / "adapter_model.safetensors") for path in _task_adapter_paths(family_name)]
     finetuned_fishers = [_load_state(path) for path in _finetuned_fisher_paths(family_name)]
 
     kl_rows: dict[str, list[float]] = {}
     geodesic_rows: dict[str, list[float]] = {}
     for mode in MERGE_MODES:
-        merged = _load_state(_merged_adapter_path(mode, family_name) / "adapter_model.safetensors")
+        merged = _load_state(
+            _merged_adapter_path(mode, family_name, merged_models_dir)
+            / "adapter_model.safetensors"
+        )
         kl_rows[mode] = [
             fisher_kl(merged=merged, task=task, fisher=fisher)
             for task, fisher in tqdm(zip(task_states, finetuned_fishers, strict=True), total=len(TASKS))
@@ -933,22 +913,24 @@ def compare_family(family_name: str) -> tuple[dict[str, list[float]], dict[str, 
     return kl_rows, geodesic_rows
 
 
-def _cache_path(family_name: str) -> Path:
-    return DATA_DIR / f"compare_kl_geodist_relative_fisher_{family_name}.pt"
+def _cache_path(family_name: str, data_dir: Path) -> Path:
+    return data_dir / f"compare_kl_geodist_relative_fisher_{family_name}.pt"
 
 
 def load_or_compute_family(
     family_name: str,
+    data_dir: Path,
+    merged_models_dir: Path,
     force_compute: bool = False,
 ) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
-    cache_path = _cache_path(family_name)
+    cache_path = _cache_path(family_name, data_dir)
     if cache_path.exists() and not force_compute:
         print(f"Loading computed data from {cache_path}")
         payload = torch.load(cache_path, weights_only=False)
         return payload["kl_rows"], payload["geodesic_rows"]
 
     print(f"Computing data for {family_name}; cache path is {cache_path}")
-    kl_rows, geodesic_rows = compare_family(family_name)
+    kl_rows, geodesic_rows = compare_family(family_name, merged_models_dir)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -973,12 +955,17 @@ def main() -> None:
         choices=FAMILIES,
     )
     parser.add_argument("--plot_dir", type=Path, default=ROOTDIR / "outputs" / "analysis")
+    parser.add_argument("--data-dir", type=Path, default=ROOTDIR / "outputs" / "analysis" / "data")
+    parser.add_argument("--eval-dir", type=Path, default=ROOTDIR / "outputs" / "evaluation")
+    parser.add_argument("--merged-models-dir", type=Path, default=ROOTDIR / "outputs" / "models")
     parser.add_argument("--force-compute", action="store_true")
     args = parser.parse_args()
 
     results = {
         family_name: load_or_compute_family(
             family_name,
+            data_dir=args.data_dir,
+            merged_models_dir=args.merged_models_dir,
             force_compute=args.force_compute,
         )
         for family_name in args.families
@@ -1049,11 +1036,13 @@ def main() -> None:
             kl_rows,
             family_name,
             performance_kl_path,
+            args.eval_dir,
         )
         save_performance_ratio_kl_plot(
             kl_rows,
             family_name,
             performance_kl_path.with_suffix(".pdf"),
+            args.eval_dir,
         )
         print(
             f"Saved performance-ratio/KL plot to {performance_kl_path} "
@@ -1069,11 +1058,17 @@ def main() -> None:
         performance_over_kl_path = (
             args.plot_dir / f"compare_performance_over_kl_by_method_{family_name}.png"
         )
-        save_performance_over_kl_by_method_plot(kl_rows, family_name, performance_over_kl_path)
+        save_performance_over_kl_by_method_plot(
+            kl_rows,
+            family_name,
+            performance_over_kl_path,
+            args.eval_dir,
+        )
         save_performance_over_kl_by_method_plot(
             kl_rows,
             family_name,
             performance_over_kl_path.with_suffix(".pdf"),
+            args.eval_dir,
         )
         print(
             f"Saved performance/KL by-method plot to {performance_over_kl_path} "
@@ -1087,11 +1082,13 @@ def main() -> None:
             kl_rows,
             family_name,
             performance_kl_distribution_path,
+            args.eval_dir,
         )
         save_performance_kl_distribution_plot(
             kl_rows,
             family_name,
             performance_kl_distribution_path.with_suffix(".pdf"),
+            args.eval_dir,
         )
         print(
             f"Saved performance/KL distribution plot to {performance_kl_distribution_path} "

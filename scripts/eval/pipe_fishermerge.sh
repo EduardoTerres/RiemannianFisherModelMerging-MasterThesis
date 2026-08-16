@@ -5,29 +5,39 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=00:10:00
-#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/diagonal_fisher_avg/slurm/pipe_fishermerge_%A.out
+#SBATCH --output=/gpfs/home6/eterres/MasterThesis/outputs/evaluation/diagonal_fisher/slurm/pipe_fishermerge_%A.out
 
 set -e
 
 # MODEL_NAME="llama3.1"  # "llama3.1" or "qwen2.5"
 MODEL_NAME="qwen2.5"
+MODEL_NAME="llama3.1"
 
 MERGE_METHOD="gradients"
 MERGE_MODE="diagonal_fisher"
-SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
-REPO_ROOT="/home/eterres/MasterThesis"
+SCRIPT_DIR="/gpfs/home6/eterres/MasterThesis/scripts/eval"
+REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+MODELS_ROOT="/scratch-shared/eterres/models"
+SAVE_DIR="/scratch-shared/eterres"
+
 
 if [[ "${MODEL_NAME}" == "llama3.1" ]]; then
-    BASE_MODEL_PATH="${REPO_ROOT}/data/models/Llama-3.1-8B"
+    BASE_MODEL_PATH="${MODELS_ROOT}/Llama-3.1-8B"
 elif [[ "${MODEL_NAME}" == "qwen2.5" ]]; then
-    BASE_MODEL_PATH="${REPO_ROOT}/data/models/Qwen-2.5-3B"
+    BASE_MODEL_PATH="${MODELS_ROOT}/Qwen-2.5-3B"
 else
     echo "Unknown model name: ${MODEL_NAME}"
     exit 1
 fi
 
-MODEL_DIR="${REPO_ROOT}/outputs/models/${MERGE_MODE}/${MODEL_NAME}/merged_model"
+if [[ ! -d "${BASE_MODEL_PATH}" ]]; then
+    echo "Base model path does not exist: ${BASE_MODEL_PATH}"
+    exit 1
+fi
+
+MODEL_DIR="${SAVE_DIR}/models/${MERGE_MODE}/${MODEL_NAME}/merged_model"
 MERGED_ADAPTER_PATH="${MODEL_DIR}/merged_adapter"
+
 EVAL_DIR="${REPO_ROOT}/outputs/evaluation/${MERGE_MODE}/${MODEL_NAME}"
 SLURM_DIR="${REPO_ROOT}/outputs/evaluation/${MERGE_MODE}/slurm"
 
@@ -37,14 +47,14 @@ mkdir -p "${SLURM_DIR}"
 
 conda activate merge
 
-python "${REPO_ROOT}/src/scripts/perform_merging.py" \
-    --model_family "${MODEL_NAME}" \
-    --merge_method "${MERGE_METHOD}" \
-    --merge_mode "${MERGE_MODE}" \
-    --output_dir "${MODEL_DIR}" \
-    --save_merged_model \
-    --lam 0.0 \
-    --device gpu
+# python "${REPO_ROOT}/src/scripts/perform_merging.py" \
+#     --model_family "${MODEL_NAME}" \
+#     --merge_method "${MERGE_METHOD}" \
+#     --merge_mode "${MERGE_MODE}" \
+#     --output_dir "${MODEL_DIR}" \
+#     --save_merged_model \
+#     --lam 0.0 \
+#     --device gpu
 
 sbatch \
     --output="${SLURM_DIR}/eval_model_%A_%a.out" \

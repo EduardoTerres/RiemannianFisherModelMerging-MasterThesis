@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=loss_interpolation
+#SBATCH --job-name=oft_neighborhood
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=010:00:00

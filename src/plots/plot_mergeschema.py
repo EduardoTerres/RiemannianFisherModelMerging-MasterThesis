@@ -67,6 +67,24 @@ def adapter_paths_for_tasks(model_name: str, names: list[str]) -> list[str]:
     return [adapter_by_task[name] for name in names]
 
 
+def fisher_path_for_backend(path: str, backend: str) -> str:
+    if backend == "diagonal":
+        return path
+    if backend != "kfac":
+        raise ValueError(f"Unsupported Fisher backend: {backend!r}")
+    if "_oft_lie_fim.safetensors" in path:
+        return path.replace("_oft_lie_fim.safetensors", "_oft_lie_kfac.safetensors")
+    if "_fim.safetensors" in path:
+        return path.replace("_fim.safetensors", "_kfac.safetensors")
+    return path.replace(".safetensors", "_kfac.safetensors")
+
+
+def fisher_paths_for_tasks(model_name: str, names: list[str], backend: str = "diagonal") -> list[str]:
+    family = MODEL_FAMILIES_D3[model_name]
+    fisher_by_task = {task: family.fisher_paths[i] for i, (task, *_) in enumerate(DATASET_3_TRAIN)}
+    return [fisher_path_for_backend(fisher_by_task[name], backend) for name in names]
+
+
 def peft_config_for_adapter(adapter_path: str, candidate_paths: list[str]) -> PeftConfig | None:
     adapter_dir = Path(adapter_path)
     if (adapter_dir / "adapter_config.json").exists():
@@ -133,6 +151,115 @@ def orthomerge_coefficients(weights: list[dict[str, torch.Tensor]]) -> tuple[flo
     return alpha, alpha
 
 
+def fisher_merged_weights(
+    merger: OFTMerging,
+    weights: list[dict[str, torch.Tensor]],
+    fishers: list[dict[str, torch.Tensor]],
+    mode: str,
+) -> dict[str, torch.Tensor]:
+    if len(fishers) != len(weights):
+        raise ValueError(f"Expected {len(weights)} Fisher files, got {len(fishers)}.")
+
+    merged = {}
+    for key in weights[0]:
+        fisher_layer = [merger._layer_fisher(fisher, key) for fisher in fishers]
+        merged[key] = merger.merge_formula(
+            [weight[key] for weight in weights],
+            fisher_list=fisher_layer,
+            mode=mode,
+        )
+    return merged
+
+
+def fit_two_vector_lstsq(
+    first: torch.Tensor,
+    second: torch.Tensor,
+    target: torch.Tensor,
+) -> tuple[float, float]:
+    gram = torch.tensor(
+        [
+            [torch.dot(first, first), torch.dot(first, second)],
+            [torch.dot(first, second), torch.dot(second, second)],
+        ],
+        dtype=torch.float64,
+    )
+    rhs = torch.tensor(
+        [torch.dot(first, target), torch.dot(second, target)],
+        dtype=torch.float64,
+    )
+    try:
+        solution = torch.linalg.solve(gram, rhs)
+    except RuntimeError:
+        solution = torch.linalg.lstsq(gram, rhs).solution
+    return float(solution[0]), float(solution[1])
+
+
+def project_weights_to_merge_plane(
+    weights: list[dict[str, torch.Tensor]],
+    merge_indices: tuple[int, int],
+    target_weights: dict[str, torch.Tensor],
+) -> tuple[float, float, float]:
+    keys = list(weights[0])
+    vecs = [flatten_weights(weight, keys).float() for weight in weights]
+    target = flatten_weights(target_weights, keys).float()
+    task_scale = float(len(vecs))
+    first_idx, second_idx = merge_indices
+    total = sum(vecs)
+
+    candidates: list[tuple[float, float, float]] = []
+
+    def prediction(x: float, y: float) -> torch.Tensor:
+        if x <= y:
+            return task_scale * (x * (total - vecs[second_idx]) + y * vecs[second_idx])
+        return task_scale * (x * vecs[first_idx] + y * (total - vecs[first_idx]))
+
+    def add_candidate(x: float, y: float) -> None:
+        if not (np.isfinite(x) and np.isfinite(y)):
+            return
+        residual = torch.linalg.vector_norm(prediction(x, y) - target).item()
+        candidates.append((residual, x, y))
+
+    x, y = fit_two_vector_lstsq(
+        task_scale * (total - vecs[second_idx]),
+        task_scale * vecs[second_idx],
+        target,
+    )
+    if x <= y:
+        add_candidate(x, y)
+
+    x, y = fit_two_vector_lstsq(
+        task_scale * vecs[first_idx],
+        task_scale * (total - vecs[first_idx]),
+        target,
+    )
+    if y <= x:
+        add_candidate(x, y)
+
+    boundary = task_scale * total
+    boundary_coeff = torch.dot(boundary, target) / torch.dot(boundary, boundary).clamp(min=1e-8)
+    add_candidate(float(boundary_coeff), float(boundary_coeff))
+
+    residual, x, y = min(candidates, key=lambda candidate: candidate[0])
+    return x, y, residual
+
+
+def fisher_projection(
+    args: argparse.Namespace,
+    merge_names: list[str],
+    merge_indices: tuple[int, int],
+    mode: str,
+    backend: str = "diagonal",
+    weights: list[dict[str, torch.Tensor]] | None = None,
+) -> tuple[float, float, float]:
+    device = args.device if weights is not None else "cpu"
+    merger = OFTMerging(lam=args.lam, device=device, fisher_backend=backend)
+    if weights is None:
+        weights = merger.load_weights(adapter_paths_for_tasks(args.model_name, merge_names))
+    fishers = merger.load_fishers(fisher_paths_for_tasks(args.model_name, merge_names, backend))
+    merged = fisher_merged_weights(merger, weights, fishers, mode=mode)
+    return project_weights_to_merge_plane(weights, merge_indices, merged)
+
+
 def task_vector_geometry(weights: list[dict[str, torch.Tensor]]) -> tuple[float, float, float]:
     norms_1, norms_2, angles = [], [], []
     for key in weights[0]:
@@ -165,7 +292,19 @@ def require_cuda(device: str) -> str:
     return device
 
 
-def evaluate_grid(args: argparse.Namespace, cache: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], list[str]]:
+def evaluate_grid(
+    args: argparse.Namespace,
+    cache: Path,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    list[str],
+    list[str],
+    tuple[float, float] | None,
+    tuple[float, float] | None,
+]:
     args.device = require_cuda(args.device)
     family = MODEL_FAMILIES_D3[args.model_name]
     names = args.tasks
@@ -194,6 +333,47 @@ def evaluate_grid(args: argparse.Namespace, cache: Path) -> tuple[np.ndarray, np
     merger = OFTMerging(alphas=[1.0] * len(merge_names), device=args.device)
     weights = merger.load_weights(adapter_paths)
     merge_x, merge_y = orthomerge_coefficients(weights)
+    diagonal_fisher_xy = None
+    if not args.skip_diagonal_fisher:
+        fisher_x, fisher_y, fisher_residual = fisher_projection(
+            args,
+            merge_names,
+            merge_indices,
+            mode="diagonal_fisher",
+            backend="diagonal",
+            weights=weights,
+        )
+        diagonal_fisher_xy = (fisher_x, fisher_y)
+        print(
+            "Diagonal Fisher projection: "
+            f"x={fisher_x:.4f}, y={fisher_y:.4f}, residual={fisher_residual:.4g}",
+            flush=True,
+        )
+        if args.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+    fisher_xy = None
+    if not args.skip_fisher:
+        if args.fisher_backend == "diagonal" and diagonal_fisher_xy is not None:
+            fisher_xy = diagonal_fisher_xy
+            print("Fisher projection reuses Diagonal Fisher projection for diagonal backend.", flush=True)
+        else:
+            fisher_x, fisher_y, fisher_residual = fisher_projection(
+                args,
+                merge_names,
+                merge_indices,
+                mode="fisher",
+                backend=args.fisher_backend,
+                weights=weights,
+            )
+            fisher_xy = (fisher_x, fisher_y)
+            backend_label = "" if args.fisher_backend == "diagonal" else f" ({args.fisher_backend})"
+            print(
+                f"Fisher{backend_label} projection: "
+                f"x={fisher_x:.4f}, y={fisher_y:.4f}, residual={fisher_residual:.4g}",
+                flush=True,
+            )
+            if args.device.startswith("cuda"):
+                torch.cuda.empty_cache()
     base = AutoModelForCausalLM.from_pretrained(
         family.base_model_path,
         torch_dtype=torch.bfloat16 if "cuda" in args.device else torch.float32,
@@ -228,9 +408,14 @@ def evaluate_grid(args: argparse.Namespace, cache: Path) -> tuple[np.ndarray, np
         eval_tasks=np.array(eval_names),
         merge_x=merge_x,
         merge_y=merge_y,
+        diagonal_fisher_x=np.nan if diagonal_fisher_xy is None else diagonal_fisher_xy[0],
+        diagonal_fisher_y=np.nan if diagonal_fisher_xy is None else diagonal_fisher_xy[1],
+        fisher_x=np.nan if fisher_xy is None else fisher_xy[0],
+        fisher_y=np.nan if fisher_xy is None else fisher_xy[1],
+        fisher_backend=np.array(args.fisher_backend),
     )
     print(f"Saved losses to {cache}", flush=True)
-    return xs, ys, z, task_losses, names, eval_names
+    return xs, ys, z, task_losses, names, eval_names, diagonal_fisher_xy, fisher_xy
 
 
 def marker_handles(tasks: list[str]) -> list[Line2D]:
@@ -239,6 +424,8 @@ def marker_handles(tasks: list[str]) -> list[Line2D]:
         Line2D([0], [0], color="black", marker="^", linestyle="None", markersize=10, label=latex_escape(tasks[0].capitalize())),
         Line2D([0], [0], color="black", marker="s", linestyle="None", markersize=9, label=latex_escape(tasks[1].capitalize())),
         Line2D([0], [0], color="black", marker="D", linestyle="None", markersize=9, label=r"\textsc{Lie sum}"),
+        Line2D([0], [0], color="black", marker="P", linestyle="None", markersize=10, label=r"\textsc{Diagonal Fisher}"),
+        Line2D([0], [0], color="black", marker="X", linestyle="None", markersize=10, label=r"\textsc{Fisher}"),
         Line2D([0], [0], color="black", marker="*", linestyle="None", markersize=14, label=r"\textsc{OrthoMerge}"),
     ]
 
@@ -272,6 +459,8 @@ def plot(
     z: np.ndarray,
     tasks: list[str],
     merge_xy: tuple[float, float],
+    diagonal_fisher_xy: tuple[float, float] | None,
+    fisher_xy: tuple[float, float] | None,
     output: Path,
     plane_extent: tuple[float, float],
     num_loss_tasks: int,
@@ -292,11 +481,22 @@ def plot(
         r"\textsc{Gradients} standard": ((1, 1), "D", 115),
         r"\textsc{OrthoMerge}": (merge_xy, "*", 230),
     }
+    if diagonal_fisher_xy is not None:
+        points[r"\textsc{Diagonal Fisher}"] = (diagonal_fisher_xy, "P", 150)
+    if fisher_xy is not None:
+        points[r"\textsc{Fisher}"] = (fisher_xy, "X", 150)
     for label, (xy, marker, size) in points.items():
         ax.scatter(*xy, s=size, marker=marker, color="black", linewidth=1.2, label=label, zorder=3)
         dx, dy = (0.035, -0.10) if label == "Pretrained" else (0.035, 0.035)
+        if label == r"\textsc{Fisher}" and diagonal_fisher_xy is not None and np.allclose(xy, diagonal_fisher_xy):
+            dx, dy = (0.035, -0.15)
         ax.text(xy[0] + dx, xy[1] + dy, label, fontsize=13, weight="bold", zorder=4, color="white")
-    for end in [(1, 0), (0, 1), (1, 1), merge_xy]:
+    arrow_ends = [(1, 0), (0, 1), (1, 1), merge_xy]
+    if diagonal_fisher_xy is not None:
+        arrow_ends.append(diagonal_fisher_xy)
+    if fisher_xy is not None:
+        arrow_ends.append(fisher_xy)
+    for end in arrow_ends:
         ax.annotate("", xy=end, xytext=(0, 0), arrowprops=dict(arrowstyle="->", color="black", lw=2.3))
     ax.set(
         xlabel=rf"\texttt{{{latex_escape(tasks[0])}}} tangent coefficient",
@@ -333,8 +533,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=OUTPUT_DIR / "merge_schema.png")
     parser.add_argument("--plane-min", type=float, default=-1.5)
     parser.add_argument("--plane-max", type=float, default=1.5)
+    parser.add_argument("--lam", type=float, default=0.0, help="Regularisation coefficient for Fisher merge markers.")
+    parser.add_argument("--fisher-backend", choices=["diagonal", "kfac"], default="diagonal")
     parser.add_argument("--recompute", action="store_true")
     parser.add_argument("--from-saved", action="store_true", help="Only plot from --cache; error if it is missing.")
+    parser.add_argument("--skip-diagonal-fisher", action="store_true", help="Do not compute or plot the diagonal Fisher merge marker.")
+    parser.add_argument("--skip-fisher", action="store_true", help="Do not compute or plot the Fisher merge marker.")
     args = parser.parse_args()
 
     if args.from_saved and not args.cache.exists():
@@ -349,13 +553,61 @@ def main() -> None:
             merge_xy = (float(data["merge_x"]), float(data["merge_y"]))
         else:
             merge_xy = orthomerge_coefficients_from_adapters(args, tasks)
+        if args.skip_diagonal_fisher:
+            diagonal_fisher_xy = None
+        elif {"diagonal_fisher_x", "diagonal_fisher_y"}.issubset(data.files) and not np.isnan(data["diagonal_fisher_x"]):
+            diagonal_fisher_xy = (float(data["diagonal_fisher_x"]), float(data["diagonal_fisher_y"]))
+        else:
+            merge_names = [task for task, *_ in DATASET_3_TRAIN]
+            merge_indices = (merge_names.index(tasks[0]), merge_names.index(tasks[1]))
+            fisher_x, fisher_y, fisher_residual = fisher_projection(
+                args,
+                merge_names,
+                merge_indices,
+                mode="diagonal_fisher",
+                backend="diagonal",
+            )
+            diagonal_fisher_xy = (fisher_x, fisher_y)
+            print(
+                "Diagonal Fisher projection: "
+                f"x={fisher_x:.4f}, y={fisher_y:.4f}, residual={fisher_residual:.4g}",
+                flush=True,
+            )
+        if args.skip_fisher:
+            fisher_xy = None
+        elif args.fisher_backend == "diagonal" and diagonal_fisher_xy is not None:
+            fisher_xy = diagonal_fisher_xy
+            print("Fisher projection reuses Diagonal Fisher projection for diagonal backend.", flush=True)
+        elif (
+            {"fisher_x", "fisher_y", "fisher_backend"}.issubset(data.files)
+            and str(data["fisher_backend"]) == args.fisher_backend
+            and not np.isnan(data["fisher_x"])
+        ):
+            fisher_xy = (float(data["fisher_x"]), float(data["fisher_y"]))
+        else:
+            merge_names = [task for task, *_ in DATASET_3_TRAIN]
+            merge_indices = (merge_names.index(tasks[0]), merge_names.index(tasks[1]))
+            fisher_x, fisher_y, fisher_residual = fisher_projection(
+                args,
+                merge_names,
+                merge_indices,
+                mode="fisher",
+                backend=args.fisher_backend,
+            )
+            fisher_xy = (fisher_x, fisher_y)
+            backend_label = "" if args.fisher_backend == "diagonal" else f" ({args.fisher_backend})"
+            print(
+                f"Fisher{backend_label} projection: "
+                f"x={fisher_x:.4f}, y={fisher_y:.4f}, residual={fisher_residual:.4g}",
+                flush=True,
+            )
     else:
         print("Evaluating loss grid...", flush=True)
-        xs, ys, z, _, tasks, eval_tasks = evaluate_grid(args, args.cache)
+        xs, ys, z, _, tasks, eval_tasks, diagonal_fisher_xy, fisher_xy = evaluate_grid(args, args.cache)
         data = np.load(args.cache, allow_pickle=True)
         merge_xy = (float(data["merge_x"]), float(data["merge_y"]))
     plane_extent = (args.plane_min, args.plane_max)
-    plot(xs, ys, z, tasks, merge_xy, args.output, plane_extent, len(eval_tasks))
+    plot(xs, ys, z, tasks, merge_xy, diagonal_fisher_xy, fisher_xy, args.output, plane_extent, len(eval_tasks))
 
 
 if __name__ == "__main__":

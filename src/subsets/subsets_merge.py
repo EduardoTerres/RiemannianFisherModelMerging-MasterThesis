@@ -25,7 +25,7 @@ from src.paths import MODEL_FAMILIES_D3_FISHER_PRETRAINED as MODEL_FAMILIES
 from src.utils import parse_device
 
 SUBSET_SIZES = [2, 4, 6, 8, 10, 12]
-MERGE_MODES = ("standard_rescaled", "diagonal_fisher")
+MERGE_MODES = ("standard", "standard_rescaled", "diagonal_fisher")
 TASK_ALIASES = {"cnn_dailymail": "cnn_dailymail_abisee", "math500": "minerva_math500"}
 METRIC_ALIASES = {("xsum", "rougeL,none"): "rouge,none"}
 TRAIN_TO_EVAL = {"numinamath": "math500"}
@@ -282,10 +282,12 @@ def trained_tasks_from_seed(model_family: str, seed: int) -> dict[int, list[str]
 
 
 METHOD_DISPLAY = {
+    "standard": r"\textsc{Standard}",
     "standard_rescaled": r"\textsc{OrthoMerge}",
     "diagonal_fisher": r"\textsc{Diagonal Fisher}",
 }
 METHOD_COLORS = {
+    "standard": "#4c78a8",
     "standard_rescaled": "black",
     "diagonal_fisher": "#ef7f5f",
 }
@@ -432,7 +434,7 @@ def save_dataset_distribution_plot(
             handle.set_linewidth(4.0)
 
         violin_ax.set_xticks(
-            [1, 2],
+            list(range(1, len(MERGE_MODES) + 1)),
             [METHOD_DISPLAY[mode] for mode in MERGE_MODES],
             rotation=18,
             ha="right",
@@ -570,7 +572,7 @@ def save_combined_subset_plot(
             handle.set_linewidth(4.0)
 
         violin_ax.set_xticks(
-            [1, 2],
+            list(range(1, len(MERGE_MODES) + 1)),
             [METHOD_DISPLAY[mode] for mode in MERGE_MODES],
             rotation=18,
             ha="right",
@@ -721,7 +723,7 @@ def save_combined_only_included_plot(
             handle.set_linewidth(4.0)
 
         violin_ax.set_xticks(
-            [1, 2],
+            list(range(1, len(MERGE_MODES) + 1)),
             [METHOD_DISPLAY[mode] for mode in MERGE_MODES],
             rotation=18,
             ha="right",
@@ -812,13 +814,14 @@ def save_dataset_metrics_plot(
     with plt.rc_context(COWEB_PLOT_STYLE):
         fig, axes = plt.subplots(
             1,
-            2,
-            figsize=(17.0, 6.5),
+            len(MERGE_MODES),
+            figsize=(8.5 * len(MERGE_MODES), 6.5),
             sharey=True,
             constrained_layout=True,
         )
         colors = plt.cm.tab20(np.linspace(0, 1, len(DATASET_3_PLOT_METRICS)))
 
+        axes = np.atleast_1d(axes)
         for ax, mode in zip(axes, MERGE_MODES, strict=True):
             for color, task in zip(colors, DATASET_3_PLOT_METRICS, strict=True):
                 metrics = []
@@ -862,7 +865,7 @@ def save_dataset_metrics_plot(
             ax.grid(axis="x", color="#999999", alpha=0.18, linewidth=0.65)
 
         axes[0].set_ylabel(r"Evaluation metric")
-        dataset_handles, dataset_labels = axes[1].get_legend_handles_labels()
+        dataset_handles, dataset_labels = axes[-1].get_legend_handles_labels()
         marker_handles = [
             Line2D(
                 [],
@@ -963,7 +966,6 @@ def save_combined_trained_plot(
         print("Skipping combined trained-dataset plot: no trained-dataset rows available.")
         return
 
-    mode_colors = dict(zip(MERGE_MODES, ("tab:blue", "tab:orange"), strict=True))
     markers = ("o", "^", "s", "D")
 
     for family_index, (family, rows) in enumerate(rows_by_family.items()):
@@ -973,13 +975,13 @@ def save_combined_trained_plot(
             mean = [row["average_accuracy"] for row in selected]
             lower = [row["lower_quartile"] for row in selected]
             upper = [row["upper_quartile"] for row in selected]
-            color = mode_colors[mode]
+            color = METHOD_COLORS[mode]
             plt.plot(
                 x,
                 mean,
                 color=color,
                 marker=markers[family_index],
-                label=f"{family} — {mode}",
+                label=f"{family} {METHOD_DISPLAY[mode]}",
             )
             plt.fill_between(x, lower, upper, color=color, alpha=0.1)
 

@@ -19,27 +19,23 @@ from src.paths import MODEL_FAMILIES, ROOTDIR
 
 RADIUS_THRESHOLD = math.pi / 2.0
 RADIUS_THRESHOLD_LABEL = r"$\pi/2$"
+RADIUS_MARGIN_FIELD = "margin_to_radius_threshold"
 PAIRWISE_THRESHOLD = math.pi
 ANGLE_TOL = 1e-10
-FONT_SCALE = 1.5
-
-
-def scaled_fontsize(size: float) -> float:
-    return size * FONT_SCALE
 
 
 plt.rcParams.update({
     "text.usetex": True,
     "font.family": "serif",
     "font.weight": "bold",
-    "font.size": scaled_fontsize(10),
-    "axes.labelsize": scaled_fontsize(10),
+    "font.size": 10,
+    "axes.labelsize": 10,
     "axes.labelweight": "bold",
-    "axes.titlesize": scaled_fontsize(12),
+    "axes.titlesize": 12,
     "axes.titleweight": "bold",
-    "xtick.labelsize": scaled_fontsize(10),
-    "ytick.labelsize": scaled_fontsize(10),
-    "legend.fontsize": scaled_fontsize(10),
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "legend.fontsize": 10,
 })
 
 
@@ -66,6 +62,10 @@ def performance_task_name(task: str) -> str:
 def performance_plot_label(task: str) -> str:
     task_name = performance_task_name(task)
     return DATASET_3_PLOT_LABELS.get(task_name, task_name)
+
+
+def model_family_plot_title(family_name: str) -> str:
+    return family_name[:1].upper() + family_name[1:]
 
 
 def is_oft_key(key: str) -> bool:
@@ -120,21 +120,30 @@ def radius_from_angles(angles: list[float]) -> float:
     return float(math.sqrt(sum(angle * angle for angle in angles)))
 
 
-def mean_block_distance_to_identity(rotations: dict[str, torch.Tensor]) -> float:
+def manifold_distance_to_identity(rotations: dict[str, torch.Tensor]) -> float:
+    """Product-manifold geodesic distance from the identity: sqrt(Sum_i r_i^2) over all blocks.
+
+    Unnormalized -- this is the true distance on the product manifold SO(n) x SO(n) x ...
+    (one factor per OFT block), not an average, so it scales with sqrt(num_blocks).
+    """
     radius_sq = 0.0
     num_blocks = 0
     for blocks in rotations.values():
         radius_sq += sum(block_radius_sq_via_trace(block) for block in blocks)
         num_blocks += blocks.shape[0]
     if num_blocks == 0:
-        raise ValueError("Cannot compute mean block distance for an adapter with zero OFT blocks")
-    return math.sqrt(radius_sq / num_blocks)
+        raise ValueError("Cannot compute manifold distance for an adapter with zero OFT blocks")
+    return math.sqrt(radius_sq)
 
 
-def mean_block_distance_between(
+def manifold_distance_between(
     rotations_a: dict[str, torch.Tensor],
     rotations_b: dict[str, torch.Tensor],
 ) -> float:
+    """Product-manifold geodesic distance between two adapters: sqrt(Sum_i r_i^2) over shared blocks.
+
+    Unnormalized, see manifold_distance_to_identity.
+    """
     radius_sq = 0.0
     num_blocks = 0
     shared_keys = sorted(set(rotations_a) & set(rotations_b))
@@ -151,8 +160,56 @@ def mean_block_distance_between(
         radius_sq += sum(block_radius_sq_via_trace(relative) for relative in relatives)
         num_blocks += A_blocks.shape[0]
     if num_blocks == 0:
-        raise ValueError("Cannot compute mean block distance for adapters with zero shared OFT blocks")
-    return math.sqrt(radius_sq / num_blocks)
+        raise ValueError("Cannot compute manifold distance for adapters with zero shared OFT blocks")
+    return math.sqrt(radius_sq)
+
+
+def max_block_distance_to_identity(rotations: dict[str, torch.Tensor]) -> float:
+    """Max single-block geodesic distance from the identity: max_i r_i over all blocks.
+
+    A maxwise aggregate rather than a whole-adapter geodesic distance: reports the
+    single most-rotated block's radius, on the same per-block scale as RADIUS_THRESHOLD,
+    instead of the product-manifold distance summed over blocks (see
+    manifold_distance_to_identity).
+    """
+    max_radius_sq = 0.0
+    num_blocks = 0
+    for blocks in rotations.values():
+        for block in blocks:
+            max_radius_sq = max(max_radius_sq, block_radius_sq_via_trace(block))
+        num_blocks += blocks.shape[0]
+    if num_blocks == 0:
+        raise ValueError("Cannot compute max block distance for an adapter with zero OFT blocks")
+    return math.sqrt(max_radius_sq)
+
+
+def max_block_distance_between(
+    rotations_a: dict[str, torch.Tensor],
+    rotations_b: dict[str, torch.Tensor],
+) -> float:
+    """Max single-block geodesic distance between two adapters: max_i r_i over shared blocks.
+
+    See max_block_distance_to_identity.
+    """
+    max_radius_sq = 0.0
+    num_blocks = 0
+    shared_keys = sorted(set(rotations_a) & set(rotations_b))
+    if set(rotations_a) != set(rotations_b):
+        missing_a = sorted(set(rotations_b) - set(rotations_a))
+        missing_b = sorted(set(rotations_a) - set(rotations_b))
+        raise ValueError(f"OFT key mismatch: missing_a={missing_a[:3]} missing_b={missing_b[:3]}")
+    for key in shared_keys:
+        A_blocks = rotations_a[key]
+        B_blocks = rotations_b[key]
+        if A_blocks.shape != B_blocks.shape:
+            raise ValueError(f"Shape mismatch for {key}: {A_blocks.shape} vs {B_blocks.shape}")
+        relatives = A_blocks.transpose(-1, -2) @ B_blocks
+        for relative in relatives:
+            max_radius_sq = max(max_radius_sq, block_radius_sq_via_trace(relative))
+        num_blocks += A_blocks.shape[0]
+    if num_blocks == 0:
+        raise ValueError("Cannot compute max block distance for adapters with zero shared OFT blocks")
+    return math.sqrt(max_radius_sq)
 
 
 def load_oft_rotations(adapter_path: str, merger: OFTMerging) -> dict[str, torch.Tensor]:
@@ -202,7 +259,7 @@ def summarize_block(
         "schur_angles_json": json.dumps([float(x) for x in angles]),
         "max_angle": max_angle,
         "radius": radius,
-        "margin_to_pi_over_2": margin,
+        RADIUS_MARGIN_FIELD: margin,
         "status": "pass" if radius < RADIUS_THRESHOLD else "fail",
     }
 
@@ -241,7 +298,7 @@ def summarize_tensor_blocks(
                 "schur_angles_json": json.dumps([float(x) for x in angles]),
                 "max_angle": max_angle,
                 "radius": radius,
-                "margin_to_pi_over_2": margin,
+                RADIUS_MARGIN_FIELD: margin,
                 "status": "pass" if radius < RADIUS_THRESHOLD else "fail",
             }
         )
@@ -251,14 +308,38 @@ def summarize_tensor_blocks(
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(newline="") as handle:
-        return list(csv.DictReader(handle))
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        if "radius" in row:
+            radius = float(row["radius"])
+            row[RADIUS_MARGIN_FIELD] = RADIUS_THRESHOLD - radius
+            row["status"] = "pass" if radius < RADIUS_THRESHOLD else "fail"
+        elif RADIUS_MARGIN_FIELD not in row and "margin_to_pi_over_2" in row:
+            row[RADIUS_MARGIN_FIELD] = row["margin_to_pi_over_2"]
+    return rows
+
+
+def block_cache_needs_refresh(path: Path, expected_fields: list[str]) -> bool:
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames or []
+        first_row = next(reader, None)
+
+    if fieldnames != expected_fields:
+        return True
+    if first_row is None or "radius" not in first_row or RADIUS_MARGIN_FIELD not in first_row:
+        return False
+
+    cached_margin = float(first_row[RADIUS_MARGIN_FIELD])
+    current_margin = RADIUS_THRESHOLD - float(first_row["radius"])
+    return not math.isclose(cached_margin, current_margin, rel_tol=0.0, abs_tol=1e-12)
 
 
 def plot_margins(rows: list[dict[str, object]], output_dir: Path, family_name: str) -> None:
@@ -333,8 +414,8 @@ def radial_tick_specs(min_radius: float, max_radius: float) -> list[tuple[float,
     for exponent in range(min_exponent, max_exponent + 1):
         major = 10.0**exponent
         if lo <= major <= hi:
-            ticks.append((major, format_power_of_ten(exponent) if exponent < 0 else None, True))
-        for mantissa in (2.0, 3.0, 5.0, 7.0):
+            ticks.append((major, format_power_of_ten(exponent) if exponent <= 0 else None, True))
+        for mantissa in range(2, 10):
             minor = mantissa * 10.0**exponent
             if lo <= minor <= hi:
                 ticks.append((minor, None, False))
@@ -360,25 +441,25 @@ def add_radial_marks(ax, center: tuple[float, float], min_radius: float, max_rad
                 center,
                 plot_radius,
                 fill=False,
-                color="#777777" if label is not None else "#aaaaaa",
-                linestyle="--" if label is not None else ":",
-                linewidth=0.8 if label is not None else 0.55,
-                alpha=0.58 if label is not None else 0.28,
+                color="#4f4f4f" if is_major else "#858585",
+                linestyle=(0, (3.0, 3.0)) if is_major else (0, (1.2, 3.2)),
+                linewidth=1.05 if is_major else 0.68,
+                alpha=0.78 if is_major else 0.54,
                 zorder=0,
             )
         )
         tick_height = transformed_max_radius * 0.018
         if label is not None:
-            label_angle = math.radians(-20.0)
+            label_angle = math.radians(120.0)  # 11 o'clock
             label_radius = plot_radius + 0.9 * tick_height
             ax.text(
                 cx + label_radius * math.cos(label_angle),
                 cy + label_radius * math.sin(label_angle),
                 label,
-                fontsize=scaled_fontsize(14),
+                fontsize=18,
                 fontweight="bold",
                 color="#333333",
-                ha="left",
+                ha="right",
                 va="center",
             )
 
@@ -425,16 +506,10 @@ def write_distance_matrix_long(path: Path, labels: list[str], distances: torch.T
     write_csv(path, rows, ["source", "target", "distance"])
 
 
-def render_distance_mds(
-    family_name: str,
-    labels: list[str],
-    distances: torch.Tensor,
-    output_dir: Path,
-) -> dict[str, object]:
+def distance_mds_layout(labels: list[str], distances: torch.Tensor) -> dict[str, object] | None:
     if not labels:
         return None
 
-    n = len(labels)
     pretrained_index = labels.index("pretrained") if "pretrained" in labels else 0
     coords = classical_mds(distances)
     coords = coords - coords[pretrained_index]
@@ -442,18 +517,51 @@ def render_distance_mds(
     positive_radii = radii[radii > 0]
     min_radius = float(positive_radii.min().item()) if positive_radii.numel() else RADIUS_THRESHOLD
     max_radius = float(max(radii.max().item(), RADIUS_THRESHOLD))
-    plot_coords, plot_threshold, transform_floor = log_radial_transform(coords, pretrained_index, RADIUS_THRESHOLD)
+    plot_coords, plot_threshold, transform_floor = log_radial_transform(
+        coords, pretrained_index, RADIUS_THRESHOLD
+    )
+    plot_limit = math.log1p(max(max_radius, RADIUS_THRESHOLD) / transform_floor)
+    reconstructed = torch.cdist(coords, coords)
+    stress_num = float(((reconstructed - distances) ** 2).sum().item())
+    stress_den = float((distances.square()).sum().item())
+    return {
+        "pretrained_index": pretrained_index,
+        "coords": coords,
+        "plot_coords": plot_coords,
+        "plot_threshold": plot_threshold,
+        "plot_limit": plot_limit,
+        "transform_floor": transform_floor,
+        "min_radius": min_radius,
+        "max_radius": max_radius,
+        "mds_stress": math.sqrt(stress_num / stress_den) if stress_den else 0.0,
+    }
 
-    plt.figure(figsize=(8, 8))
-    ax = plt.gca()
+
+def draw_distance_mds_panel(
+    ax,
+    family_name: str,
+    labels: list[str],
+    layout: dict[str, object],
+    *,
+    show_legend: bool,
+) -> None:
+    pretrained_index = int(layout["pretrained_index"])
+    plot_coords = layout["plot_coords"]
+    plot_threshold = float(layout["plot_threshold"])
+    plot_limit = float(layout["plot_limit"])
+    transform_floor = float(layout["transform_floor"])
+    min_radius = float(layout["min_radius"])
+    max_radius = float(layout["max_radius"])
+
     add_radial_marks(ax, (0.0, 0.0), min_radius, max_radius, transform_floor)
     circle = plt.Circle(
         (0.0, 0.0),
         plot_threshold,
         fill=False,
         color="red",
-        linestyle="--",
-        linewidth=1.5,
+        linestyle="-",
+        linewidth=2.2,
+        alpha=0.9,
         zorder=1,
     )
     ax.add_patch(circle)
@@ -480,26 +588,26 @@ def render_distance_mds(
         y = float(plot_coords[idx, 1])
         x0 = float(plot_coords[pretrained_index, 0])
         y0 = float(plot_coords[pretrained_index, 1])
-        ax.plot([x0, x], [y0, y], color="#777777", linewidth=0.8, alpha=0.75)
+        ax.plot([x0, x], [y0, y], color="#555555", linewidth=1.15, alpha=0.9)
         offset_x, offset_y = next(label_offsets)
         ax.annotate(
             performance_plot_label(task),
             xy=(x, y),
             xytext=(offset_x, offset_y),
             textcoords="offset points",
-            fontsize=scaled_fontsize(12),
+            fontsize=15,
             fontweight="bold",
             ha="left" if offset_x >= 0 else "right",
             va="bottom" if offset_y >= 0 else "top",
         )
 
-    limit = plot_threshold * 1.14 if plot_threshold else 1.0
+    limit = plot_limit * 1.14 if plot_limit else 1.0
     ax.text(
         plot_threshold + 0.018 * limit,
         0.035 * limit,
         RADIUS_THRESHOLD_LABEL,
         color="red",
-        fontsize=scaled_fontsize(14),
+        fontsize=28,
         fontweight="bold",
         ha="left",
         va="bottom",
@@ -508,14 +616,52 @@ def render_distance_mds(
     ax.set_ylim(-limit, limit)
     ax.set_aspect("equal", adjustable="box")
     hide_cartesian_axes(ax)
-    ax.legend(loc="best", prop={"size": scaled_fontsize(13), "weight": "bold"})
+    # Axes-fraction placement (not data coordinates) so the title always sits above the
+    # plotted points, regardless of how the threshold radius compares to the data spread.
+    ax.text(
+        0.5,
+        0.94,
+        model_family_plot_title(family_name),
+        transform=ax.transAxes,
+        fontsize=30,
+        fontweight="bold",
+        ha="center",
+        va="bottom",
+        clip_on=False,
+    )
+    if show_legend:
+        ax.legend(loc="best", prop={"size": 20, "weight": "bold"})
+
+
+def render_distance_mds(
+    family_name: str,
+    labels: list[str],
+    distances: torch.Tensor,
+    output_dir: Path,
+    *,
+    metric_slug: str = "manifold_distance",
+    distance_kind: str = "product_manifold_block_geodesic_distance",
+) -> dict[str, object]:
+    layout = distance_mds_layout(labels, distances)
+    if layout is None:
+        return None
+
+    n = len(labels)
+    pretrained_index = int(layout["pretrained_index"])
+    coords = layout["coords"]
+    plot_coords = layout["plot_coords"]
+
+    plt.figure(figsize=(8, 8))
+    ax = plt.gca()
+    draw_distance_mds_panel(ax, family_name, labels, layout, show_legend=True)
     plt.tight_layout(pad=0.25)
-    png_path = output_dir / f"{family_name}_mean_block_distance_mds.png"
-    pdf_path = output_dir / f"{family_name}_mean_block_distance_mds.pdf"
+    png_path = output_dir / f"{family_name}_{metric_slug}_mds.png"
+    pdf_path = output_dir / f"{family_name}_{metric_slug}_mds.pdf"
     plt.savefig(png_path, dpi=220, bbox_inches="tight", pad_inches=0.02)
     plt.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02)
     plt.close()
 
+    distance_field = f"{metric_slug}_to_pretrained"
     embedded = []
     for i, label in enumerate(labels):
         embedded.append(
@@ -525,13 +671,13 @@ def render_distance_mds(
                 "y": float(coords[i, 1]),
                 "plot_x_log_radial": float(plot_coords[i, 0]),
                 "plot_y_log_radial": float(plot_coords[i, 1]),
-                "mean_block_distance_to_pretrained": float(distances[pretrained_index, i]),
+                distance_field: float(distances[pretrained_index, i]),
             }
         )
     write_csv(
-        output_dir / "mean_block_distance_mds_coordinates.csv",
+        output_dir / f"{metric_slug}_mds_coordinates.csv",
         embedded,
-        ["label", "x", "y", "plot_x_log_radial", "plot_y_log_radial", "mean_block_distance_to_pretrained"],
+        ["label", "x", "y", "plot_x_log_radial", "plot_y_log_radial", distance_field],
     )
 
     reconstructed = torch.cdist(coords, coords)
@@ -541,9 +687,9 @@ def render_distance_mds(
         "distance_plot": str(png_path),
         "distance_plot_pdf": str(pdf_path),
         "num_mds_points": n,
-        "mds_stress": math.sqrt(stress_num / stress_den) if stress_den else 0.0,
-        "max_mean_block_distance_to_pretrained": float(distances[pretrained_index].max().item()),
-        "distance_kind": "root_mean_square_block_geodesic_distance",
+        "mds_stress": float(layout["mds_stress"]),
+        f"max_{distance_field}": float(distances[pretrained_index].max().item()),
+        "distance_kind": distance_kind,
         "display_transform": "log_radial_about_pretrained",
         "block_radius_threshold": RADIUS_THRESHOLD,
     }
@@ -553,12 +699,20 @@ def plot_distance_mds(
     family_name: str,
     rotations_by_task: dict[str, dict[str, torch.Tensor]],
     output_dir: Path,
+    *,
+    metric_slug: str = "manifold_distance",
+    distance_kind: str = "product_manifold_block_geodesic_distance",
+    distance_to_identity_fn=manifold_distance_to_identity,
+    distance_between_fn=manifold_distance_between,
 ) -> dict[str, object] | None:
-    distance_csv = output_dir / "mean_block_distance_matrix_long.csv"
+    distance_csv = output_dir / f"{metric_slug}_matrix_long.csv"
     if distance_csv.exists():
         print(f"[{family_name}] loading cached MDS distance matrix: {distance_csv}", flush=True)
         labels, distances = distance_matrix_from_long_csv(distance_csv)
-        return render_distance_mds(family_name, labels, distances, output_dir)
+        return render_distance_mds(
+            family_name, labels, distances, output_dir,
+            metric_slug=metric_slug, distance_kind=distance_kind,
+        )
 
     tasks = sorted(rotations_by_task)
     if not tasks:
@@ -568,12 +722,12 @@ def plot_distance_mds(
     n = len(labels)
     distances = torch.zeros((n, n), dtype=torch.float64)
 
-    print(f"[{family_name}] computing mean block distance matrix for MDS plot", flush=True)
+    print(f"[{family_name}] computing {metric_slug.replace('_', ' ')} matrix for MDS plot", flush=True)
     for i, task in tqdm(
         list(enumerate(tasks, start=1)),
         desc=f"[{family_name}] pretrained distances",
     ):
-        distances[0, i] = distances[i, 0] = mean_block_distance_to_identity(
+        distances[0, i] = distances[i, 0] = distance_to_identity_fn(
             rotations_by_task[task]
         )
 
@@ -582,11 +736,14 @@ def plot_distance_mds(
         task_pairs,
         desc=f"[{family_name}] finetune pair distances",
     ):
-        dist = mean_block_distance_between(rotations_by_task[task_a], rotations_by_task[task_b])
+        dist = distance_between_fn(rotations_by_task[task_a], rotations_by_task[task_b])
         distances[i, j] = distances[j, i] = dist
 
     write_distance_matrix_long(distance_csv, labels, distances)
-    return render_distance_mds(family_name, labels, distances, output_dir)
+    return render_distance_mds(
+        family_name, labels, distances, output_dir,
+        metric_slug=metric_slug, distance_kind=distance_kind,
+    )
 
     plt.figure(figsize=(9, 4))
     plt.scatter(range(len(radii)), radii, s=4)
@@ -599,20 +756,83 @@ def plot_distance_mds(
     plt.close()
 
 
+def plot_combined_distance_mds(
+    family_names: list[str],
+    output_dir: Path,
+    *,
+    metric_slug: str = "manifold_distance",
+) -> dict[str, object] | None:
+    panels: list[tuple[str, list[str], dict[str, object]]] = []
+    for family_name in family_names:
+        distance_csv = output_dir / family_name / f"{metric_slug}_matrix_long.csv"
+        if not distance_csv.exists():
+            continue
+        labels, distances = distance_matrix_from_long_csv(distance_csv)
+        layout = distance_mds_layout(labels, distances)
+        if layout is not None:
+            panels.append((family_name, labels, layout))
+
+    if not panels:
+        return None
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(8 * len(panels), 8), squeeze=False)
+    for index, (family_name, labels, layout) in enumerate(panels):
+        draw_distance_mds_panel(
+            axes[0, index],
+            family_name,
+            labels,
+            layout,
+            show_legend=False,
+        )
+    handles, legend_labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            legend_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.88),
+            prop={"size": 20, "weight": "bold"},
+        )
+    plt.tight_layout(pad=0.35, w_pad=2.0)
+    png_path = output_dir / f"combined_{metric_slug}_mds.png"
+    pdf_path = output_dir / f"combined_{metric_slug}_mds.pdf"
+    plt.savefig(png_path, dpi=220, bbox_inches="tight", pad_inches=0.02)
+    plt.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    return {
+        "distance_plot": str(png_path),
+        "distance_plot_pdf": str(pdf_path),
+        "num_panels": len(panels),
+        "model_families": [family_name for family_name, _, _ in panels],
+    }
+
+
 def run_positive_control(block_size: int) -> dict[str, object]:
-    theta = RADIUS_THRESHOLD + 1e-3
+    plane_count = block_size // 2
+    if plane_count < 3:
+        raise ValueError(
+            "The positive control needs block_size >= 6 to exceed the "
+            f"{RADIUS_THRESHOLD_LABEL} radius with principal rotation angles."
+        )
+    target_radius = RADIUS_THRESHOLD + 1e-3
+    theta = target_radius / math.sqrt(plane_count)
     Q = torch.eye(block_size, dtype=torch.float64)
-    Q[0, 0] = math.cos(theta)
-    Q[0, 1] = -math.sin(theta)
-    Q[1, 0] = math.sin(theta)
-    Q[1, 1] = math.cos(theta)
+    for plane in range(plane_count):
+        i = 2 * plane
+        j = i + 1
+        Q[i, i] = math.cos(theta)
+        Q[i, j] = -math.sin(theta)
+        Q[j, i] = math.sin(theta)
+        Q[j, j] = math.cos(theta)
     angles = rotation_plane_angles(Q)
     radius = radius_from_angles(angles)
     return {
         "block_size": block_size,
-        "target_angle": theta,
+        "num_rotation_planes": plane_count,
+        "target_radius": target_radius,
+        "target_plane_angle": theta,
         "measured_radius": radius,
-        "margin_to_pi_over_2": RADIUS_THRESHOLD - radius,
+        RADIUS_MARGIN_FIELD: RADIUS_THRESHOLD - radius,
         "status": "pass" if radius < RADIUS_THRESHOLD else "expected_fail",
     }
 
@@ -665,7 +885,8 @@ def certify_family(family_name: str, args: argparse.Namespace) -> dict[str, obje
     block_csv = output_dir / "blockwise_identity_certificate.csv"
     missing_csv = output_dir / "missing_adapters.csv"
     pairwise_csv = output_dir / "pairwise_finetune_uniqueness.csv"
-    distance_csv = output_dir / "mean_block_distance_matrix_long.csv"
+    distance_csv = output_dir / "manifold_distance_matrix_long.csv"
+    max_block_distance_csv = output_dir / "max_block_distance_matrix_long.csv"
     block_fields = [
         "model_family",
         "task",
@@ -679,7 +900,7 @@ def certify_family(family_name: str, args: argparse.Namespace) -> dict[str, obje
         "schur_angles_json",
         "max_angle",
         "radius",
-        "margin_to_pi_over_2",
+        RADIUS_MARGIN_FIELD,
         "status",
     ]
 
@@ -690,11 +911,20 @@ def certify_family(family_name: str, args: argparse.Namespace) -> dict[str, obje
     needs_block_csv = not block_csv.exists()
     needs_pairwise_csv = args.pairwise and not pairwise_csv.exists()
     needs_distance_csv = not args.skip_distance_plot and not distance_csv.exists()
-    needs_rotations = needs_block_csv or needs_pairwise_csv or needs_distance_csv
+    needs_max_block_distance_csv = not args.skip_distance_plot and not max_block_distance_csv.exists()
+    needs_rotations = (
+        needs_block_csv or needs_pairwise_csv or needs_distance_csv or needs_max_block_distance_csv
+    )
 
+    refresh_block_csv = False
     if block_csv.exists():
         print(f"[{family_name}] loading cached blockwise certificate: {block_csv}", flush=True)
+        refresh_block_csv = block_cache_needs_refresh(block_csv, block_fields)
         block_rows = read_csv(block_csv)
+        if not block_rows:
+            needs_block_csv = True
+            needs_rotations = True
+            refresh_block_csv = False
 
     if missing_csv.exists():
         missing_rows = read_csv(missing_csv)
@@ -734,7 +964,7 @@ def certify_family(family_name: str, args: argparse.Namespace) -> dict[str, obje
                         )
                     )
                 block_rows.extend(task_rows)
-                task_delta_min = min(float(row["margin_to_pi_over_2"]) for row in task_rows)
+                task_delta_min = min(float(row[RADIUS_MARGIN_FIELD]) for row in task_rows)
                 print(
                     f"[{family_name}] finished {task}: "
                     f"tensors={len(rotations)} blocks={len(task_rows)} "
@@ -742,7 +972,7 @@ def certify_family(family_name: str, args: argparse.Namespace) -> dict[str, obje
                     flush=True,
                 )
 
-    if needs_block_csv:
+    if needs_block_csv or refresh_block_csv:
         write_csv(block_csv, block_rows, block_fields)
 
     if missing_rows and (needs_rotations or not missing_csv.exists()):
@@ -761,17 +991,39 @@ def certify_family(family_name: str, args: argparse.Namespace) -> dict[str, obje
         plot_margins(block_rows, output_dir, family_name)
 
     distance_plot_summary = None
+    max_block_distance_plot_summary = None
     if not args.skip_distance_plot:
         distance_plot_summary = plot_distance_mds(family_name, rotations_by_task, output_dir)
+        # Maxwise aggregate experiment: instead of the product-manifold distance summed
+        # over blocks, report the single most-rotated block's radius per adapter. This
+        # stays on the same per-block scale as RADIUS_THRESHOLD, so pi/2 remains a
+        # meaningful reference circle on this plot (unlike on the manifold-distance one).
+        max_block_distance_plot_summary = plot_distance_mds(
+            family_name,
+            rotations_by_task,
+            output_dir,
+            metric_slug="max_block_distance",
+            distance_kind="max_block_geodesic_distance",
+            distance_to_identity_fn=max_block_distance_to_identity,
+            distance_between_fn=max_block_distance_between,
+        )
 
     positive_control = run_positive_control(args.positive_control_block_size)
     write_csv(
         output_dir / "positive_control.csv",
         [positive_control],
-        ["block_size", "target_angle", "measured_radius", "margin_to_pi_over_2", "status"],
+        [
+            "block_size",
+            "num_rotation_planes",
+            "target_radius",
+            "target_plane_angle",
+            "measured_radius",
+            RADIUS_MARGIN_FIELD,
+            "status",
+        ],
     )
 
-    margins = [float(row["margin_to_pi_over_2"]) for row in block_rows]
+    margins = [float(row[RADIUS_MARGIN_FIELD]) for row in block_rows]
     pair_margins = [float(row["margin_to_pi"]) for row in pair_rows]
     failed_blocks = [row for row in block_rows if row["status"] == "fail"]
     failed_pairs = [row for row in pair_rows if row["status"] == "fail"]
@@ -797,6 +1049,7 @@ def certify_family(family_name: str, args: argparse.Namespace) -> dict[str, obje
         "num_pairwise_violations": len(failed_pairs),
         "positive_control_status": positive_control["status"],
         "distance_plot": distance_plot_summary,
+        "max_block_distance_plot": max_block_distance_plot_summary,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
@@ -806,6 +1059,13 @@ def main(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     summaries = [certify_family(family_name, args) for family_name in args.model_family]
+    combined_plot_summary = None
+    combined_max_block_distance_plot_summary = None
+    if not args.skip_distance_plot:
+        combined_plot_summary = plot_combined_distance_mds(args.model_family, output_dir)
+        combined_max_block_distance_plot_summary = plot_combined_distance_mds(
+            args.model_family, output_dir, metric_slug="max_block_distance"
+        )
     (output_dir / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n")
 
     for summary in summaries:
@@ -815,6 +1075,10 @@ def main(args: argparse.Namespace) -> None:
             f"blocks={summary['num_blocks']} "
             f"missing={summary['num_missing_finetunes']}"
         )
+    if combined_plot_summary is not None:
+        print(f"combined distance plot: {combined_plot_summary['distance_plot']}")
+    if combined_max_block_distance_plot_summary is not None:
+        print(f"combined max-block distance plot: {combined_max_block_distance_plot_summary['distance_plot']}")
 
 
 if __name__ == "__main__":
@@ -848,7 +1112,7 @@ if __name__ == "__main__":
         "--positive-control-block-size",
         type=int,
         default=32,
-        help="SO(n) size for the deliberate pi/2 violation positive control.",
+        help="SO(n) size for the deliberate radius-threshold violation positive control.",
     )
     parser.add_argument(
         "--max-adapters",

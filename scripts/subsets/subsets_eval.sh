@@ -42,7 +42,7 @@ conda activate lm-eval
 cd "${REPO_ROOT}/OrthoMerge/eval/lm-evaluation-harness"
 
 for SIZE in 2 4 6 8 10 12; do
-    for MODE in standard_rescaled diagonal_fisher; do
+    for MODE in standard standard_rescaled diagonal_fisher; do
         ADAPTER="${MODELS_DIR}/${MODE}_${SIZE}/merged_adapter"
         OUTPUT="${OUTPUT_ROOT}/${SIZE}/run_${SEED}/${MODE}/${TASK_NAME}"
         mkdir -p "${OUTPUT}"

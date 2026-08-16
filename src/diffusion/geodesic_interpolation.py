@@ -122,7 +122,9 @@ def method_output_name(args, method):
         if args.fim_normalization != "none":
             prefix += f"_fim_{args.fim_normalization}"
         return prefix
-    if method.startswith("orthofuse"):
+    if method.startswith("orthofuse_geodesic"):
+        return method
+    if method == "orthofuse":
         return "orthofuse"
     return method
 

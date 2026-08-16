@@ -6,10 +6,10 @@
 #SBATCH --cpus-per-task=9
 #SBATCH --time=01:00:00
 #SBATCH --array=6,7
-#SBATCH --output=/gpfs/home6/eterres/MasterThesis/outputs/eval_loss/slurm/eval_loss_%A_%a.out
+#SBATCH --output=/path/to/MasterThesis/outputs/eval_loss/slurm/eval_loss_%A_%a.out
 
 set -e
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 OUTPUT_ROOT="${REPO_ROOT}/outputs/eval_loss"
 DATASET_CACHE_DIR="${REPO_ROOT}/data/hf_cache"
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"

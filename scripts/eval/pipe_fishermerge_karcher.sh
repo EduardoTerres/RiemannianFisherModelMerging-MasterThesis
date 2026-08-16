@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=00:10:00
-#SBATCH --output=/home/eterres/MasterThesis/outputs/evaluation/karcher/slurm/pipe_fishermerge_%A.out
+#SBATCH --output=/path/to/MasterThesis/outputs/evaluation/karcher/slurm/pipe_fishermerge_%A.out
 
 set -e
 
@@ -14,8 +14,8 @@ MODEL_NAME="qwen2.5"
 
 MERGE_METHOD="gradients"
 MERGE_MODE="karcher"
-SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
-REPO_ROOT="/home/eterres/MasterThesis"
+SCRIPT_DIR="/path/to/MasterThesis/scripts/eval"
+REPO_ROOT="/path/to/MasterThesis"
 
 if [[ "${MODEL_NAME}" == "llama3.1" ]]; then
     BASE_MODEL_PATH="${REPO_ROOT}/data/models/Llama-3.1-8B"

@@ -12,15 +12,15 @@ from safetensors import safe_open
 
 
 DEFAULT_QWEN = Path(
-    "/scratch-shared/eterres/models/Qwen-2.5-3B_OFT_dataset3_adapters/"
-    "qwen2.5_3b_finetune_gsm8k"
+    "/path/to/models/Qwen-2.5-3B_OFT_dataset3_adapters/"
+    "qwen2.5_3b_finetune_mbpp"
 )
 DEFAULT_LLAMA = Path(
-    "/scratch-shared/eterres/models/Llama-3.1-8B_OFT_dataset3_adapters/"
+    "/path/to/models/Llama-3.1-8B_OFT_dataset3_adapters/"
     "llama3-1_8b_finetune_wikitext"
 )
 DEFAULT_DIFFUSION = Path(
-    "/scratch-shared/eterres/SDXL/concepts/adapters/pytorch_lora_weights_cat.safetensors"
+    "/path/to/sdxl_data/concepts/adapters/pytorch_lora_weights_cat.safetensors"
 )
 DEFAULT_OUTPUT = Path("outputs/oft_info/oft_info.txt")
 DIFFUSION_PROJECTIONS = ("to_q_moft", "to_k_moft", "to_v_moft", "to_out_moft")

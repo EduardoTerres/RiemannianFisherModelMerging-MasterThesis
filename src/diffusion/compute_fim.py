@@ -397,7 +397,7 @@ def parse_args():
     """Parse command-line arguments for diffusion FIM computation."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", default="src/diffusion/config/config.yaml")
-    parser.add_argument("--output_dir", default="/scratch-shared/eterres/fishers/sdxl")
+    parser.add_argument("--output_dir", default="/path/to/fishers/sdxl")
     parser.add_argument("--datasets", nargs="+", choices=["concepts", "styles"], default=["concepts", "styles"])
     parser.add_argument("--entry_type", choices=["concept", "style"], default=None)
     parser.add_argument("--dataset_name", default=None)

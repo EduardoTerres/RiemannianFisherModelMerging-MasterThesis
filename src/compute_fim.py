@@ -25,7 +25,7 @@ WANDB_ENTITY = None
 WANDB_MODE = os.environ.get("WANDB_MODE", "online")
 WANDB_LOG_EVERY_BATCH = 1
 WANDB_METRIC_MAX_ENTRIES = 200_000
-DEFAULT_MATERIALIZED_ADAPTERS_DIR = Path("/scratch-shared/eterres/materialized_adapters")
+DEFAULT_MATERIALIZED_ADAPTERS_DIR = Path("/path/to/materialized_adapters")
 
 
 def infer_oft_block_size(so_dimension: int) -> int:

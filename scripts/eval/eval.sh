@@ -10,8 +10,8 @@
 
 set -e
 
-SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
-REPO_ROOT="/home/eterres/MasterThesis"
+SCRIPT_DIR="/path/to/MasterThesis/scripts/eval"
+REPO_ROOT="/path/to/MasterThesis"
 MODEL_PATH="$1"
 OUTPUT_ROOT="$2"
 PEFT_MODEL="$3"
@@ -64,7 +64,7 @@ if [ "${TASK_NAME}" = "squadv2" ]; then
     LM_EVAL_BATCH_SIZE=1
 elif [ "${TASK_NAME}" = "wikitext" ] || [ "${TASK_NAME}" = "xsum" ]; then
     LM_EVAL_BATCH_SIZE=2
-elif [ "${TASK_NAME}" = "meddialog_qsumm" ] || [ "${TASK_NAME}" = "cnn_dailymail" ] || [ "${TASK_NAME}" = "gsm8k" ] || [ "${TASK_NAME}" = "babi" ] || [ "${TASK_NAME}" = "mbpp" ] || [ "${TASK_NAME}" = "math500" ]; then
+elif [ "${TASK_NAME}" = "meddialog_qsumm" ] || [ "${TASK_NAME}" = "cnn_dailymail" ] || [ "${TASK_NAME}" = "babi" ] || [ "${TASK_NAME}" = "mbpp" ] || [ "${TASK_NAME}" = "math500" ]; then
     LM_EVAL_BATCH_SIZE=4
 fi
 

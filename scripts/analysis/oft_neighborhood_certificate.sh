@@ -9,7 +9,7 @@
 
 set -e
 
-REPO_ROOT="/home/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 cd "${REPO_ROOT}"
 
 mkdir -p outputs/oft_neighborhood_certificate/slurm

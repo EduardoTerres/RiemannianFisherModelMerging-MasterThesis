@@ -13,7 +13,7 @@ set -e
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
 
-export HF_HOME=/scratch-shared/eterres/huggingface-cache
+export HF_HOME=/path/to/hf_cache
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -52,7 +52,7 @@ echo "Running FIM for ${ENTRY_TYPE}:${DATASET_NAME} with repeats=${REPEATS}"
 
 python src/diffusion/compute_fim.py \
   --config_path=src/diffusion/config/config.yaml \
-  --output_dir=/scratch-shared/eterres/fishers/sdxl_correct \
+  --output_dir=/path/to/fishers/sdxl_correct \
   --entry_type="${ENTRY_TYPE}" \
   --dataset_name="${DATASET_NAME}" \
   --batch_size=1 \

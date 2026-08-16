@@ -12,8 +12,8 @@ set -e
 MODEL_NAME="llama3.1"
 MODEL_NAME="qwen2.5"
 
-SCRIPT_DIR="/home/eterres/MasterThesis/scripts/eval"
-REPO_ROOT="/home/eterres/MasterThesis"
+SCRIPT_DIR="/path/to/MasterThesis/scripts/eval"
+REPO_ROOT="/path/to/MasterThesis"
 
 MODEL_PATH="${REPO_ROOT}/data/models/Llama-3.1-8B"
 MODEL_PATH="${REPO_ROOT}/data/models/Qwen-2.5-3B"

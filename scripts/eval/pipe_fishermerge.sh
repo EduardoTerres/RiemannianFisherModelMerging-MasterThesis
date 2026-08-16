@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=00:10:00
-#SBATCH --output=/gpfs/home6/eterres/MasterThesis/outputs/evaluation/diagonal_fisher/slurm/pipe_fishermerge_%A.out
+#SBATCH --output=/path/to/MasterThesis/outputs/evaluation/diagonal_fisher/slurm/pipe_fishermerge_%A.out
 
 set -e
 
@@ -15,10 +15,10 @@ MODEL_NAME="llama3.1"
 
 MERGE_METHOD="gradients"
 MERGE_MODE="diagonal_fisher"
-SCRIPT_DIR="/gpfs/home6/eterres/MasterThesis/scripts/eval"
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
-MODELS_ROOT="/scratch-shared/eterres/models"
-SAVE_DIR="/scratch-shared/eterres"
+SCRIPT_DIR="/path/to/MasterThesis/scripts/eval"
+REPO_ROOT="/path/to/MasterThesis"
+MODELS_ROOT="/path/to/models"
+SAVE_DIR="/path/to/scratch"
 
 
 if [[ "${MODEL_NAME}" == "llama3.1" ]]; then

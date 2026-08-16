@@ -9,7 +9,7 @@
 
 set -e
 
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
 SAMPLES_DIR="${OUTPUT_DIR}/samples"
 METHOD_SAMPLES_ROOT="${OUTPUT_DIR}/samples"
@@ -46,7 +46,7 @@ METHODS=(
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
 
-export HF_HOME=/scratch-shared/eterres/huggingface-cache
+export HF_HOME=/path/to/hf_cache
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export TORCH_HOME="${HF_HOME}/torch"
 export HF_HUB_OFFLINE="${EVAL_OFFLINE:-0}"

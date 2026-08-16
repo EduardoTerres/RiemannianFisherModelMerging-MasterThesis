@@ -13,7 +13,7 @@ set -e
 SEED="${1:?Usage: subset_eval.sh SEED MODEL_FAMILY MODELS_DIR}"
 MODEL_FAMILY="${2:?Usage: subset_eval.sh SEED MODEL_FAMILY MODELS_DIR}"
 MODELS_DIR="${3:?Usage: subset_eval.sh SEED MODEL_FAMILY MODELS_DIR}"
-REPO_ROOT="/home/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 OUTPUT_ROOT="${REPO_ROOT}/outputs/evaluation_subsets/${MODEL_FAMILY}"
 
 DATASETS=(coqa nq_open triviaqa meddialog_qsumm wmt16-en-de wikitext cnn_dailymail xsum babi squadv2 mbpp math500)

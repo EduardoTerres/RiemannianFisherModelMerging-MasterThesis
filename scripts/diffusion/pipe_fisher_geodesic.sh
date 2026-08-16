@@ -14,14 +14,14 @@ FISHER_BACKEND="diagonal"  # "diagonal" or "kfac"
 CORRECTION_MU=2
 FIM_NORMALIZATION="none"  # "none", "trace", "frobenius", "layer-trace", "layer-frobenius", or "kl"
 
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
 METHOD_OUTPUT_DIR="${OUTPUT_DIR}/samples_10_prompts/fisher_geodesic_${FISHER_BACKEND}_corr_${CORRECTION_MU}_fim_${FIM_NORMALIZATION}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
 
-export HF_HOME=/scratch-shared/eterres/huggingface-cache
+export HF_HOME=/path/to/hf_cache
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1

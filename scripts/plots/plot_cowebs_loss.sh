@@ -9,7 +9,7 @@
 
 set -e
 
-REPO_ROOT="/home/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 MODEL_NAME="llama3.1"  # "llama3.1" or "qwen2.5"
 
 python "${REPO_ROOT}/src/plots/plot_cowebs.py" \

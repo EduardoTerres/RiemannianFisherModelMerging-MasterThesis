@@ -10,9 +10,9 @@
 
 set -e
 
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 DATASET_CACHE_DIR="${REPO_ROOT}/data/hf_cache"
-MATERIALIZED_ADAPTERS_DIR="/scratch-shared/eterres/materialized_adapters"
+MATERIALIZED_ADAPTERS_DIR="/path/to/materialized_adapters"
 mkdir -p "${DATASET_CACHE_DIR}"
 mkdir -p "${MATERIALIZED_ADAPTERS_DIR}"
 

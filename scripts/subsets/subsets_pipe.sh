@@ -9,7 +9,7 @@
 
 set -e
 
-REPO_ROOT="/home/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 MODEL_FAMILY="qwen2.5"  # llama3.1 or qwen2.5
 MODELS_DIR="${REPO_ROOT}/outputs/models/subsets/${MODEL_FAMILY}"
 SLURM_DIR="${REPO_ROOT}/outputs/evaluation_subsets/slurm"

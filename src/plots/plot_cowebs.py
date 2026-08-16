@@ -68,8 +68,6 @@ def read_metric(model_dir: Path, task: str, metric: str) -> float | None:
         if value is not None:
             break
         value = values.get(alias)
-    if value is None and task == "humanevalplus":
-        value = values.get("pass@1") or values.get("pass_at_1")
     if not isinstance(value, int | float):
         return None
     return value

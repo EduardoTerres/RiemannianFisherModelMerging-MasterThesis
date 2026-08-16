@@ -12,7 +12,7 @@ set -e
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
 
-export HF_HOME=/scratch-shared/eterres/huggingface-cache
+export HF_HOME=/path/to/hf_cache
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/matplotlib-${USER}}"
 

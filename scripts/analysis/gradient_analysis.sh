@@ -9,7 +9,7 @@
 
 set -e
 
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 OUTPUT_ROOT="${REPO_ROOT}/outputs/gradient_analysis"
 DATASET_CACHE_DIR="${REPO_ROOT}/data/hf_cache"
 

@@ -9,14 +9,14 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="/home/eterres/MasterThesis/scripts/analysis"
-REPO_ROOT="/home/eterres/MasterThesis"
+SCRIPT_DIR="/path/to/MasterThesis/scripts/analysis"
+REPO_ROOT="/path/to/MasterThesis"
 cd "${REPO_ROOT}"
 
 PLOT_DIR="${REPO_ROOT}/outputs/analysis"
 DATA_DIR="${REPO_ROOT}/outputs/analysis/data_2"
 EVAL_DIR="${REPO_ROOT}/outputs/evaluation"
-PIPE_MERGE_ROOT="/scratch-shared/eterres"
+PIPE_MERGE_ROOT="/path/to/scratch"
 MERGED_MODELS_DIR="${PIPE_MERGE_ROOT}/models"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"

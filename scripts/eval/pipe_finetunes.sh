@@ -9,8 +9,8 @@
 
 set -e
 
-REPO_ROOT="/home/eterres/MasterThesis"
-MODELS_ROOT="/scratch-shared/eterres/models"
+REPO_ROOT="/path/to/MasterThesis"
+MODELS_ROOT="/path/to/models"
 
 MODEL_NAME="llama3.1"
 MODEL_NAME="qwen2.5"

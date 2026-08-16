@@ -9,13 +9,13 @@
 
 set -e
 
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/diffusion"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env
 
-export HF_HOME=/scratch-shared/eterres/huggingface-cache
+export HF_HOME=/path/to/hf_cache
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export TORCH_HOME="${HF_HOME}/torch"
 export CUDA_VISIBLE_DEVICES=0

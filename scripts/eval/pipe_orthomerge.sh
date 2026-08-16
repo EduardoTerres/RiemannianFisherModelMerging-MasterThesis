@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=00:10:00
-#SBATCH --output=/gpfs/home6/eterres/MasterThesis/outputs/evaluation/standard_rescaled/slurm/pipe_orthomerge_%A.out
+#SBATCH --output=/path/to/MasterThesis/outputs/evaluation/standard_rescaled/slurm/pipe_orthomerge_%A.out
 
 set -e
 
@@ -14,10 +14,10 @@ MODEL_NAME="llama3.1"
 
 MERGE_METHOD="gradients"
 MERGE_MODE="standard_rescaled"
-SCRIPT_DIR="/gpfs/home6/eterres/MasterThesis/scripts/eval"
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
-MODELS_ROOT="/scratch-shared/eterres/models"
-SAVE_DIR="/scratch-shared/eterres"
+SCRIPT_DIR="/path/to/MasterThesis/scripts/eval"
+REPO_ROOT="/path/to/MasterThesis"
+MODELS_ROOT="/path/to/models"
+SAVE_DIR="/path/to/scratch"
 
 if [[ "${MODEL_NAME}" == "llama3.1" ]]; then
     BASE_MODEL_PATH="${MODELS_ROOT}/Llama-3.1-8B"

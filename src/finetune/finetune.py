@@ -46,7 +46,7 @@ CACHE_DIR = ROOTDIR / "data" / "hf_cache"
 SCRATCH_CHECKPOINT_ROOT = Path(
     os.environ.get(
         "FINETUNE_CHECKPOINT_ROOT",
-        "/scratch-shared/eterres/MasterThesis/finetune_checkpoints",
+        "/path/to/MasterThesis/finetune_checkpoints",
     )
 )
 FINAL_OUTPUT_ROOT = ROOTDIR / "outputs" / "models"

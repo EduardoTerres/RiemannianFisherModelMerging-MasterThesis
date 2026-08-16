@@ -45,7 +45,7 @@ If you already have trained concept + style orthogonal adapters (or downloaded t
 ```
 
 ```bash
-./orthofuse_inference_merge_sdxl.sh moft_merge /output/concept_style/sdxl_merge/example/logs/hparams.yml 0.6 /scratch-shared/eterres/SDXL/concepts/pytorch_lora_weights_cat.safetensors /scratch-shared/eterres/SDXL/adapters/pytorch_lora_weights_etsy.safetensors 1
+./orthofuse_inference_merge_sdxl.sh moft_merge /output/concept_style/sdxl_merge/example/logs/hparams.yml 0.6 /path/to/sdxl_data/concepts/pytorch_lora_weights_cat.safetensors /path/to/sdxl_data/adapters/pytorch_lora_weights_etsy.safetensors 1
 ```
 
 - **inference_type**: predefined inference preset. Two options:

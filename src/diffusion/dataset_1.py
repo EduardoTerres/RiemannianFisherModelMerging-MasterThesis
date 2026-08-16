@@ -1,7 +1,7 @@
 from itertools import product
 
 
-FISHER_ROOT = "/scratch-shared/eterres/fishers/sdxl_decharted"
+FISHER_ROOT = "/path/to/fishers/sdxl_decharted"
 
 
 def _concept(name, class_name):
@@ -9,8 +9,8 @@ def _concept(name, class_name):
         "name": name,
         "class_name": class_name,
         "placeholder_token": f"<{name}>",
-        "adapter_path": f"/scratch-shared/eterres/SDXL/concepts/adapters/pytorch_lora_weights_{name}.safetensors",
-        "dataset_path": f"/scratch-shared/eterres/SDXL/concepts/datasets/{name}",
+        "adapter_path": f"/path/to/sdxl_data/concepts/adapters/pytorch_lora_weights_{name}.safetensors",
+        "dataset_path": f"/path/to/sdxl_data/concepts/datasets/{name}",
         "fim_path": f"{FISHER_ROOT}/{name}_oft_lie_fim.safetensors",
         "kfac_path": f"{FISHER_ROOT}/{name}_oft_lie_kfac.safetensors",
         "type": "concept",
@@ -22,8 +22,8 @@ def _style(name, image):
         "name": name,
         "class_name": "style",
         "placeholder_token": "<style>",
-        "adapter_path": f"/scratch-shared/eterres/SDXL/styles/adapters/pytorch_lora_weights_{name}.safetensors",
-        "dataset_path": f"/scratch-shared/eterres/SDXL/styles/datasets/{image}",
+        "adapter_path": f"/path/to/sdxl_data/styles/adapters/pytorch_lora_weights_{name}.safetensors",
+        "dataset_path": f"/path/to/sdxl_data/styles/datasets/{image}",
         "fim_path": f"{FISHER_ROOT}/{name}_oft_lie_fim.safetensors",
         "kfac_path": f"{FISHER_ROOT}/{name}_oft_lie_kfac.safetensors",
         "type": "style",

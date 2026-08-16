@@ -32,7 +32,7 @@ from src.dataset.dataset_3 import DATASET_3_TRAIN
 
 TASKS = [tag for tag, *_ in DATASET_3_TRAIN]
 LAYER_RE = re.compile(r"layers?\.(\d+)\.")
-FISHERS_DIR = Path("/scratch-shared/eterres/fishers")
+FISHERS_DIR = Path("/path/to/fishers")
 FAMILIES = {
     "llama3.1": "llama3-1_8b_finetune",
     "qwen2.5": "qwen2.5_3b_finetune",

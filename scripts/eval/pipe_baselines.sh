@@ -6,11 +6,11 @@
 #SBATCH --cpus-per-task=9
 #SBATCH --time=02:00:00
 #SBATCH --array=0-1%2
-#SBATCH --output=/gpfs/home6/eterres/MasterThesis/outputs/evaluation/baselines/slurm/pipe_baselines_%A_%a.out
+#SBATCH --output=/path/to/MasterThesis/outputs/evaluation/baselines/slurm/pipe_baselines_%A_%a.out
 
 set -euo pipefail
 
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 SLURM_DIR="${REPO_ROOT}/outputs/evaluation/baselines/slurm"
 
 MODEL_NAMES=(
@@ -39,9 +39,9 @@ run_one() {
     local base_model_path
 
     if [[ "${model_name}" == "llama3.1" ]]; then
-        base_model_path="/scratch-shared/eterres/models/Llama-3.1-8B"
+        base_model_path="/path/to/models/Llama-3.1-8B"
     elif [[ "${model_name}" == "qwen2.5" ]]; then
-        base_model_path="/scratch-shared/eterres/models/Qwen-2.5-3B"
+        base_model_path="/path/to/models/Qwen-2.5-3B"
     else
         echo "Unknown model name: ${model_name}"
         exit 1

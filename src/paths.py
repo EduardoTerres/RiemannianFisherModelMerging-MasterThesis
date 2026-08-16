@@ -28,8 +28,8 @@ class ModelFamily:
         return self.name
 
 # MODELS_DIR = ROOTDIR / "data" / "models"
-MODELS_DIR = Path("/scratch-shared/eterres/models")
-FISHERS_DIR = Path("/scratch-shared/eterres/fishers")
+MODELS_DIR = Path("/path/to/models")
+FISHERS_DIR = Path("/path/to/fishers")
 
 ADAPTER_TASK_NAMES = {
     "social_iqa": "socialiqa",

@@ -146,11 +146,6 @@ def _squadv2_text(doc: dict[str, Any]) -> tuple[str, str]:
     return prompt, prompt + target
 
 
-def _magicoder_text(doc: dict[str, Any]) -> tuple[str, str]:
-    prompt = f"Problem:\n{doc['problem']}\n\nSolution:\n"
-    return prompt, prompt + doc["solution"]
-
-
 def _mbpp_text(doc: dict[str, Any]) -> tuple[str, str]:
     tests = doc.get("test_list", [])
     test_block = "\n".join(_stringify(test) for test in tests[:3])

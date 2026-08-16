@@ -8,7 +8,7 @@
 
 set -e
 
-REPO_ROOT="/home/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 MODEL_FAMILY="llama3.1"  # llama3.1 or qwen2.5
 
 source "$(conda info --base)/etc/profile.d/conda.sh"

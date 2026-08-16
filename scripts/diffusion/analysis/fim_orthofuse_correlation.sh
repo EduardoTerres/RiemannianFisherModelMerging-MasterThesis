@@ -9,7 +9,7 @@
 
 set -e
 
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate orthofuse_env

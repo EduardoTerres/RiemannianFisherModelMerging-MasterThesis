@@ -6,12 +6,12 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=03:00:00
-#SBATCH --chdir=/gpfs/home6/eterres/MasterThesis
-#SBATCH --output=/gpfs/home6/eterres/MasterThesis/outputs/mergeschema/slurm/mergeschema_%A_%a.out
+#SBATCH --chdir=/path/to/MasterThesis
+#SBATCH --output=/path/to/MasterThesis/outputs/mergeschema/slurm/mergeschema_%A_%a.out
 
 set -e
 
-REPO_ROOT="/gpfs/home6/eterres/MasterThesis"
+REPO_ROOT="/path/to/MasterThesis"
 OUTPUT_DIR="${REPO_ROOT}/outputs/mergeschema"
 export MPLCONFIGDIR="${REPO_ROOT}/.matplotlib"
 export XDG_CACHE_HOME="${REPO_ROOT}/.cache"

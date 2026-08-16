@@ -15,7 +15,7 @@ from pathlib import Path
 from safetensors import safe_open
 
 
-MODELS_DIR = Path("/scratch-shared/eterres/models")
+MODELS_DIR = Path("/path/to/models")
 DEFAULT_MODELS = {
     "Llama-3.1-8B": (
         MODELS_DIR
@@ -25,7 +25,7 @@ DEFAULT_MODELS = {
     "Qwen-2.5-3B": (
         MODELS_DIR
         / "Qwen-2.5-3B_OFT_dataset3_adapters"
-        / "qwen2.5_3b_finetune_gsm8k"
+        / "qwen2.5_3b_finetune_mbpp"
     ),
 }
 

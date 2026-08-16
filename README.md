@@ -1,11 +1,5 @@
 # MasterThesis — Fisher-Weighted Riemannian Merging of Orthogonal Adapters
 
-Code for the experiments in the thesis manuscript reproduced under [`TFM-4/`](TFM-4) (compiled PDF: [`TFM-4/TFM-13.pdf`](TFM-4/TFM-13.pdf)).
-The method merges task-specific Orthogonal Finetuning (OFT/GSOFT) adapters on the tangent space of
-$\mathrm{SO}(n)$, weighting each task's contribution by its (diagonal) Fisher information. It is
-evaluated on two LLMs (Llama 3.1 8B, Qwen 2.5 3B, merging 12 tasks each) and on Stable Diffusion XL
-(merging style/concept GSOFT adapters).
-
 This README documents every experiment reported in the thesis and the exact commands used to run it.
 
 ## Repository layout

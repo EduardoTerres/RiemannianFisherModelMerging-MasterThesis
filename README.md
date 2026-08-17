@@ -9,7 +9,6 @@ This README documents every experiment reported in the thesis and the exact comm
 | `src/`, `scripts/` | This project's own code: Fisher computation, merging, evaluation, plots. |
 | `OrthoFuse/` | Vendored baseline/dependency: [OrthoFuse](https://github.com/ControlGenAI/OrthoFuse) (diffusion adapter merging baseline, also provides the GSOFT/`moft` training and inference code used for the SDXL experiments). |
 | `OrthoMerge/` | Vendored baseline/dependency: [OrthoMerge](https://github.com/Sphere-AI-Lab/OrthoMerge) (LLM merging baseline, and the `OrthoMerge/eval/` folder that hosts the evaluation harnesses used by every LLM experiment: `lm-evaluation-harness`, `bigcode-evaluation-harness`). |
-| `TFM-4/` | LaTeX source and compiled PDF of the thesis manuscript. |
 | `tests/` | Unit tests for the merging math and dataset formatting (`pytest`). |
 | `utils/` | One-off conversion/download helpers (e.g. converting a raw Llama checkpoint to the HF format). |
 

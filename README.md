@@ -114,7 +114,7 @@ sbatch scripts/eval/pipe_finetunes.sh         # per-task finetuned reference mod
 sbatch scripts/eval/pipe_pretrained.sh        # zero-shot pretrained reference
 ```
 The "Lie sum" baseline is `--merge_mode standard` of the same `perform_merging.py` entry point (an ablation
-of the diagonal Fisher formula with $\widetilde{\mathcal I}_t \equiv I$).
+of the diagonal Fisher formula with Fishers being the identity operator).
 
 **Step 3 — evaluation loss** (used for the cobweb loss plots):
 ```bash
